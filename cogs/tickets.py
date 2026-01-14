@@ -55,6 +55,7 @@ class Tickets(commands.Cog):
         role="The role that triggers the ticket creation",
         ticket_name="Name of the channel (use {user})",
         prompt="Message sent in ticket (use {user} and {admin})",
+        category="Optional: Category to create tickets in",
         admin="Optional: Admin role for this ticket",
         message_id="Optional: Message ID for reaction verification",
         emoji="Optional: Emoji for reaction verification",
@@ -63,7 +64,8 @@ class Tickets(commands.Cog):
     async def add(self, interaction: discord.Interaction, 
                   role: discord.Role, 
                   ticket_name: str, 
-                  prompt: str, 
+                  prompt: str,
+                  category: discord.CategoryChannel = None,
                   admin: discord.Role = None, 
                   message_id: str = None, 
                   emoji: str = None, 
@@ -81,6 +83,7 @@ class Tickets(commands.Cog):
             "role_id": role.id,
             "ticket_name": ticket_name,
             "prompt": prompt,
+            "category_id": category.id if category else None,
             "admin_role_id": admin.id if admin else None,
             "gate_message_id": int(message_id) if message_id else None,
             "gate_emoji": emoji,
@@ -95,6 +98,7 @@ class Tickets(commands.Cog):
                    role: discord.Role, 
                    ticket_name: str = None, 
                    prompt: str = None, 
+                   category: discord.CategoryChannel = None,
                    admin: discord.Role = None, 
                    message_id: str = None, 
                    emoji: str = None, 
@@ -107,6 +111,7 @@ class Tickets(commands.Cog):
         # Update fields if provided
         if ticket_name: setup['ticket_name'] = ticket_name
         if prompt: setup['prompt'] = prompt
+        if category: setup['category_id'] = category.id
         if admin: setup['admin_role_id'] = admin.id
         
         # Handle the gate logic update carefully
@@ -143,17 +148,15 @@ class Tickets(commands.Cog):
         for s in setups:
             role_ping = f"<@&{s['role_id']}>"
             admin_ping = f"<@&{s['admin_role_id']}>" if s['admin_role_id'] else "None"
+            cat_ping = f"<#{s.get('category_id')}>" if s.get('category_id') else "None"
             gate = "Yes" if s['gate_message_id'] else "No"
-            text += f"• **Role:** {role_ping} | **Admin:** {admin_ping} | **Gate:** {gate}\n"
+            text += f"• **Role:** {role_ping} | **Admin:** {admin_ping} | **Cat:** {cat_ping} | **Gate:** {gate}\n"
         
         await interaction.response.send_message(text, ephemeral=True)
 
-    @ticket_group.command(name="close", description="Close the current ticket.")
-    @app_commands.choices(action=[
-        app_commands.Choice(name="Accept (Give Access Role)", value="accept"),
-        app_commands.Choice(name="Deny (Just Close)", value="deny")
-    ])
-    async def close(self, interaction: discord.Interaction, action: app_commands.Choice[str]):
+    @ticket_group.command(name="close", description="Close the ticket. Optional: Set accept to True to grant access role.")
+    @app_commands.describe(accept="If True, grant the access role (Accept). If False/Empty, just delete (Deny).")
+    async def close(self, interaction: discord.Interaction, accept: bool = False):
         # 1. Check if we are in a ticket
         ticket_data = self.get_active_ticket(interaction.channel.id)
         if not ticket_data:
@@ -177,9 +180,10 @@ class Tickets(commands.Cog):
             except Exception as e: print(f"Failed to remove trigger role: {e}")
 
         # 3. Logic: Handle Accept (Give Access Role)
-        if action.value == "accept" and member:
+        # Only if accept is explicitly True
+        if accept and member:
             setup = self.get_setup(setup_role_id)
-            if setup and setup['access_role_id']:
+            if setup and setup.get('access_role_id'):
                 access_role = interaction.guild.get_role(setup['access_role_id'])
                 if access_role:
                     try: await member.add_roles(access_role)
@@ -211,7 +215,6 @@ class Tickets(commands.Cog):
         # Check if they already have a ticket for this setup
         existing = self.find_ticket_by_user_and_role(member.id, setup['role_id'])
         if existing:
-            # Optionally ping them in the existing one, but mostly we ignore
             return
 
         # 1. Format Name
@@ -239,21 +242,26 @@ class Tickets(commands.Cog):
             send_messages=not has_gate
         )
 
-        # 3. Create Channel
+        # 3. Determine Category
+        category = None
+        if setup.get('category_id'):
+            category = guild.get_channel(setup['category_id'])
+
+        # 4. Create Channel
         try:
-            channel = await guild.create_text_channel(chan_name, overwrites=overwrites)
+            channel = await guild.create_text_channel(chan_name, overwrites=overwrites, category=category)
         except Exception as e:
             print(f"Failed to create ticket channel: {e}")
             return
 
-        # 4. Send Prompt
+        # 5. Send Prompt
         prompt_text = setup['prompt']\
             .replace("{user}", member.mention)\
             .replace("{admin}", admin_role.mention if admin_role else "")
         
         await channel.send(prompt_text)
 
-        # 5. Save Active Ticket
+        # 6. Save Active Ticket
         ticket_data = {
             "channel_id": channel.id,
             "user_id": member.id,
@@ -296,12 +304,11 @@ class Tickets(commands.Cog):
                     await channel.send(f"🔓 **Access Granted:** {member.mention} has verified and can now speak.")
 
             # 3. Remove Reaction (so others don't see it piling up)
-            # We need to fetch the channel where the reaction happened
             gate_channel = self.bot.get_channel(payload.channel_id)
             if gate_channel:
                 try:
                     message = await gate_channel.fetch_message(payload.message_id)
-                    member = guild.get_member(payload.user_id)
+                    member = self.bot.get_guild(payload.guild_id).get_member(payload.user_id)
                     if member:
                         await message.remove_reaction(payload.emoji, member)
                 except Exception as e:
@@ -309,3 +316,5 @@ class Tickets(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(Tickets(bot))
+
+
