@@ -1,0 +1,398 @@
+import discord
+from discord import app_commands
+from discord.ext import commands
+import asyncio
+
+class Clone(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    # --- HELPERS ---
+    def get_clone_setups(self):
+        """Returns the list of all clone setups."""
+        return self.bot.db.get_collection("clone_setups")
+
+    def save_clone_setups(self, setups):
+        """Saves the list of setups."""
+        self.bot.db.save_collection("clone_setups", setups)
+
+    def get_history(self):
+        """Returns the mapping history (Source MSG -> Clone MSG)."""
+        return self.bot.db.get_collection("clone_history")
+    
+    def save_history(self, history):
+        self.bot.db.save_collection("clone_history", history)
+
+    async def get_webhook(self, channel):
+        """Finds or creates a webhook for the bot in the channel."""
+        if not isinstance(channel, discord.TextChannel):
+            return None
+            
+        webhooks = await channel.webhooks()
+        for wh in webhooks:
+            # We reuse our own webhook if found
+            if wh.user == self.bot.user or wh.name == "BuggyClone":
+                return wh
+        return await channel.create_webhook(name="BuggyClone")
+
+    # --- EVENTS ---
+
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        if message.author.bot:
+            return
+
+        # 1. Check if this is a Reply in a Receiving Channel (Return Replies)
+        # This allows users in the receiving channel to talk back
+        await self.handle_return_reply(message)
+
+        # 2. Check if this message needs to be CLONED (Source -> Receiver)
+        await self.handle_cloning(message)
+
+    async def handle_cloning(self, message):
+        setups = self.get_clone_setups()
+        if not setups: return
+
+        # We need to find setups where this message's channel (or category) is the source
+        applicable_setups = []
+        for s in setups:
+            is_source = False
+            
+            # Direct Channel Match
+            if s['source_id'] == message.channel.id:
+                is_source = True
+            
+            # Category Match
+            elif message.channel.category and s['source_id'] == message.channel.category.id:
+                is_source = True
+            
+            if is_source:
+                # Check Ignore List (Channels to skip within a category)
+                if message.channel.id in s.get('ignore_channels', []):
+                    continue
+                
+                # Check Attachments Only
+                if s.get('attachments_only', False) and not message.attachments:
+                    continue
+                
+                # Check Reaction Threshold 
+                # If > 0, we skip cloning NOW. It will be handled in on_raw_reaction_add
+                if s.get('min_reactions', 0) > 0:
+                    continue
+
+                applicable_setups.append(s)
+
+        for s in applicable_setups:
+            await self.execute_clone(message, s)
+
+    async def execute_clone(self, message, setup):
+        """Performs the actual webhook cloning."""
+        receiver = self.bot.get_channel(setup['receive_id'])
+        if not receiver: return
+
+        # Content Prep
+        content = message.content
+        
+        # Handle Attachments: Use "Copy Media Link" style to avoid 8MB limit
+        if message.attachments:
+            urls = [a.url for a in message.attachments]
+            content = (content + "\n" + "\n".join(urls)).strip()
+
+        if not content and not message.embeds:
+            return # Nothing to send
+
+        webhook = await self.get_webhook(receiver)
+        if not webhook: return # Could not create webhook
+        
+        try:
+            # Send via Webhook to impersonate
+            cloned_msg = await webhook.send(
+                content=content,
+                username=message.author.display_name,
+                avatar_url=message.author.display_avatar.url,
+                embeds=message.embeds,
+                wait=True,
+                allowed_mentions=discord.AllowedMentions.none() # Prevent mass pings
+            )
+            
+            # Save History for deletions and replies
+            history = self.get_history()
+            history.append({
+                "source_msg_id": message.id,
+                "clone_msg_id": cloned_msg.id,
+                "source_channel_id": message.channel.id,
+                "receive_channel_id": receiver.id
+            })
+            self.save_history(history)
+            
+        except Exception as e:
+            print(f"Failed to clone message: {e}")
+
+    async def handle_return_reply(self, message):
+        """Handles replies in the receiving channel sent back to source."""
+        if not message.reference: return
+
+        history = self.get_history()
+        # Find the entry where clone_msg_id == reference.message_id
+        entry = next((h for h in history if h['clone_msg_id'] == message.reference.message_id), None)
+        
+        if not entry: return
+
+        # Found the link! Check if the setup allows replies
+        setups = self.get_clone_setups()
+        
+        # We need to find the setup that links these two channels
+        relevant_setup = None
+        for s in setups:
+            if s['receive_id'] == entry['receive_channel_id']:
+                # Does this setup cover the source channel?
+                source_chan = self.bot.get_channel(entry['source_channel_id'])
+                if not source_chan: continue
+                
+                # Check if this setup matches the source channel ID or its category
+                if s['source_id'] == source_chan.id or (source_chan.category and s['source_id'] == source_chan.category.id):
+                     relevant_setup = s
+                     break
+        
+        if relevant_setup and relevant_setup.get('return_replies', False):
+            source_chan = self.bot.get_channel(entry['source_channel_id'])
+            if source_chan:
+                # Send the reply as the Bot (Webhooks can't reply to specific messages easily)
+                nick = message.author.display_name
+                content = f"**{nick}**: {message.content}"
+                if message.attachments:
+                     content += "\n" + "\n".join([a.url for a in message.attachments])
+
+                try:
+                    # Reply to the original source message if possible
+                    try:
+                        orig_msg = await source_chan.fetch_message(entry['source_msg_id'])
+                        await orig_msg.reply(content, mention_author=False)
+                    except discord.NotFound:
+                        # Original message deleted, just send to channel
+                        await source_chan.send(content)
+                except Exception as e:
+                    print(f"Failed to return reply: {e}")
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload):
+        """Handles delayed cloning based on reaction thresholds."""
+        if payload.member and payload.member.bot: return
+
+        # Check if message is in a Source Channel that requires reactions
+        setups = self.get_clone_setups()
+        channel = self.bot.get_channel(payload.channel_id)
+        if not channel: return
+
+        msg_id = payload.message_id
+        
+        # Check history to ensure we haven't cloned it yet
+        history = self.get_history()
+        if any(h['source_msg_id'] == msg_id for h in history):
+            return # Already cloned
+
+        # Find applicable setup
+        for s in setups:
+            min_reacts = s.get('min_reactions', 0)
+            if min_reacts <= 0: continue
+
+            # Is this the source?
+            is_source = (s['source_id'] == channel.id) or (channel.category and s['source_id'] == channel.category.id)
+            if is_source:
+                if channel.id in s.get('ignore_channels', []): continue
+                if s.get('attachments_only', False):
+                    # We'd need to fetch message to check attachments, which we do below
+                    pass
+
+                # Fetch message to count reactions
+                try:
+                    message = await channel.fetch_message(msg_id)
+                    
+                    # Double check attachments if required
+                    if s.get('attachments_only', False) and not message.attachments:
+                        continue
+
+                    # Count total reactions
+                    total = sum(r.count for r in message.reactions)
+                    
+                    if total >= min_reacts:
+                        await self.execute_clone(message, s)
+                        # We stop after one clone to prevent duplicate messages if multiple setups match
+                        # (Though prompt said no channel should receive from multiple setups, so this is safe)
+                        break
+                except:
+                    pass
+
+    @commands.Cog.listener()
+    async def on_message_delete(self, message):
+        """Deletes the cloned message if the source is deleted."""
+        history = self.get_history()
+        # Find entries where this message is the SOURCE
+        entries = [h for h in history if h['source_msg_id'] == message.id]
+        
+        if entries:
+            # Remove from history DB
+            new_history = [h for h in history if h['source_msg_id'] != message.id]
+            self.save_history(new_history)
+            
+            # Delete the clones
+            for entry in entries:
+                receiver = self.bot.get_channel(entry['receive_channel_id'])
+                if receiver:
+                    try:
+                        clone = await receiver.fetch_message(entry['clone_msg_id'])
+                        await clone.delete()
+                    except: pass
+
+    # --- COMMANDS ---
+
+    clone_group = app_commands.Group(name="clone", description="Manage message cloning setups")
+
+    @clone_group.command(name="add", description="Add a new clone setup")
+    @app_commands.describe(
+        receive_channel="Channel where messages will be cloned TO",
+        source_id="Channel or Category ID to clone FROM",
+        ignore_channel="Optional: Channel to ignore (if source is category)",
+        attachments_only="Only clone messages with attachments?",
+        return_replies="Allow replies in receiving channel to be sent back?",
+        min_reactions="Minimum reactions required to clone (0 for instant)"
+    )
+    async def clone_add(self, interaction: discord.Interaction, 
+                        receive_channel: discord.TextChannel, 
+                        source_id: str, 
+                        ignore_channel: discord.TextChannel = None,
+                        attachments_only: bool = False,
+                        return_replies: bool = False,
+                        min_reactions: int = 0):
+        
+        # Clean ID (Source can be channel or category, so we take string and parse)
+        try:
+            s_id = int(source_id)
+        except:
+            return await interaction.response.send_message("❌ Source ID must be a valid number.", ephemeral=True)
+
+        setups = self.get_clone_setups()
+        
+        # Create new setup object
+        new_setup = {
+            "receive_id": receive_channel.id,
+            "source_id": s_id,
+            "ignore_channels": [ignore_channel.id] if ignore_channel else [],
+            "attachments_only": attachments_only,
+            "return_replies": return_replies,
+            "min_reactions": min_reactions
+        }
+        
+        # Check duplicates (Receiver + Source combo)
+        for s in setups:
+            if s['receive_id'] == receive_channel.id and s['source_id'] == s_id:
+                return await interaction.response.send_message("❌ A setup for this Receiver and Source already exists. Use `/clone edit`.", ephemeral=True)
+
+        setups.append(new_setup)
+        self.save_clone_setups(setups)
+        
+        await interaction.response.send_message(f"✅ Setup added! Cloning from `{s_id}` to {receive_channel.mention}.", ephemeral=True)
+
+    @clone_group.command(name="edit", description="Edit a clone setup for a receiving channel")
+    @app_commands.describe(source_id="The Source ID you want to edit settings for")
+    async def clone_edit(self, interaction: discord.Interaction,
+                         receive_channel: discord.TextChannel,
+                         source_id: str,
+                         ignore_channel: discord.TextChannel = None,
+                         attachments_only: bool = None,
+                         return_replies: bool = None,
+                         min_reactions: int = None):
+        
+        try: s_id = int(source_id)
+        except: return await interaction.response.send_message("❌ Source ID invalid.", ephemeral=True)
+
+        setups = self.get_clone_setups()
+        found = False
+        
+        for s in setups:
+            if s['receive_id'] == receive_channel.id and s['source_id'] == s_id:
+                # Update provided fields
+                if ignore_channel: 
+                    current_ignores = s.get('ignore_channels', [])
+                    if ignore_channel.id not in current_ignores:
+                        current_ignores.append(ignore_channel.id)
+                    s['ignore_channels'] = current_ignores
+                
+                if attachments_only is not None: s['attachments_only'] = attachments_only
+                if return_replies is not None: s['return_replies'] = return_replies
+                if min_reactions is not None: s['min_reactions'] = min_reactions
+                found = True
+                break
+        
+        if found:
+            self.save_clone_setups(setups)
+            await interaction.response.send_message(f"✅ Updated setup for {receive_channel.mention} (Source: `{s_id}`).", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"❌ No setup found matching that Receiver and Source.", ephemeral=True)
+
+    @clone_group.command(name="remove", description="Remove a clone setup")
+    async def clone_remove(self, interaction: discord.Interaction, receive_channel: discord.TextChannel, source_id: str):
+        try: s_id = int(source_id)
+        except: return await interaction.response.send_message("❌ ID invalid.", ephemeral=True)
+
+        setups = self.get_clone_setups()
+        initial_len = len(setups)
+        
+        # Remove matching setup
+        setups = [s for s in setups if not (s['receive_id'] == receive_channel.id and s['source_id'] == s_id)]
+        
+        if len(setups) < initial_len:
+            self.save_clone_setups(setups)
+            await interaction.response.send_message(f"✅ Removed setup for {receive_channel.mention}.", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"❌ No matching setup found.", ephemeral=True)
+
+    @clone_group.command(name="list", description="List all clone setups")
+    async def clone_list(self, interaction: discord.Interaction):
+        setups = self.get_clone_setups()
+        if not setups:
+            return await interaction.response.send_message("📝 No clone setups active.", ephemeral=True)
+
+        # Group by Receiver
+        grouped = {}
+        for s in setups:
+            rid = s['receive_id']
+            if rid not in grouped: grouped[rid] = []
+            grouped[rid].append(s)
+
+        text = "**🐏 Clone Setups:**\n"
+        
+        for rid, source_list in grouped.items():
+            receiver = interaction.guild.get_channel(rid)
+            r_name = receiver.name if receiver else f"ID:{rid}"
+            
+            text += f"\n📂 **Receiver: {r_name}**\n"
+            for s in source_list:
+                # Try to resolve Source Name
+                # It could be a Channel or a Category
+                source_obj = interaction.guild.get_channel(s['source_id'])
+                s_name = source_obj.name if source_obj else f"ID:{s['source_id']}"
+                
+                # Format flags
+                flags = []
+                if s.get('attachments_only'): flags.append("🖼️ MediaOnly")
+                if s.get('return_replies'): flags.append("↩️ Replies")
+                if s.get('min_reactions', 0) > 0: flags.append(f"⭐ {s['min_reactions']}+ Reacts")
+                
+                # Format Ignores
+                ignores = s.get('ignore_channels', [])
+                ignore_text = ""
+                if ignores:
+                    ign_names = []
+                    for iid in ignores:
+                        c = interaction.guild.get_channel(iid)
+                        ign_names.append(c.name if c else str(iid))
+                    ignore_text = f" | 🚫 Excluding: {', '.join(ign_names)}"
+
+                flag_text = f" ({', '.join(flags)})" if flags else ""
+                text += f" - Source: **{s_name}**{flag_text}{ignore_text}\n"
+
+        await interaction.response.send_message(text[:2000], ephemeral=True)
+
+async def setup(bot):
+    await bot.add_cog(Clone(bot))
