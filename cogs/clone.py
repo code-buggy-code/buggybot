@@ -2,6 +2,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import asyncio
+import re
 
 class Clone(commands.Cog):
     def __init__(self, bot):
@@ -34,6 +35,43 @@ class Clone(commands.Cog):
             if wh.user == self.bot.user or wh.name == "BuggyClone":
                 return wh
         return await channel.create_webhook(name="BuggyClone")
+
+    async def resolve_mentions(self, content, guild):
+        """
+        Replaces user mentions with their display name (non-pinging text).
+        If user is not in guild, fetches their name to display.
+        """
+        if not content: return content
+
+        # Regex to find <@123456789> or <@!123456789>
+        mention_pattern = re.compile(r'<@!?(\d+)>')
+        
+        # Helper to find name for a specific match
+        async def get_name(match):
+            user_id = int(match.group(1))
+            member = guild.get_member(user_id)
+            if member:
+                return f"**@{member.display_name}**"
+            else:
+                # Try fetching user if not in cache
+                try:
+                    user = await self.bot.fetch_user(user_id)
+                    return f"**@{user.display_name}**"
+                except:
+                    return "**@UnknownUser**"
+
+        # We iterate matches and replace them
+        # Note: We replace one by one. For a large message with many pings this is okay.
+        new_content = content
+        matches = list(mention_pattern.finditer(content))
+        
+        # Iterate backwards to replace without affecting indices
+        for m in reversed(matches):
+            replacement = await get_name(m)
+            start, end = m.span()
+            new_content = new_content[:start] + replacement + new_content[end:]
+            
+        return new_content
 
     # --- EVENTS ---
 
@@ -90,15 +128,33 @@ class Clone(commands.Cog):
         receiver = self.bot.get_channel(setup['receive_id'])
         if not receiver: return
 
-        # Content Prep
+        # 1. Prepare Content & Resolve Mentions
         content = message.content
+        content = await self.resolve_mentions(content, receiver.guild)
         
-        # Handle Attachments: Use "Copy Media Link" style to avoid 8MB limit
+        # 2. Handle Attachments (Convert to Links)
+        attachment_urls = []
         if message.attachments:
-            urls = [a.url for a in message.attachments]
-            content = (content + "\n" + "\n".join(urls)).strip()
+            attachment_urls = [a.url for a in message.attachments]
+        
+        # Append URLs to content. 
+        # Discord auto-embeds URLs at the bottom if they are clean links.
+        final_content = content
+        if attachment_urls:
+            if final_content:
+                final_content += "\n" + "\n".join(attachment_urls)
+            else:
+                final_content = "\n".join(attachment_urls)
 
-        if not content and not message.embeds:
+        # 3. Handle Embeds
+        # CRITICAL: Only copy "Rich" embeds (actual embeds sent by bots/users).
+        # Ignore "Image", "Video", or "Link" embeds because Discord auto-generates those
+        # from the content/URLs we just prepared. Copying them causes duplicate/tiny previews.
+        clean_embeds = []
+        if message.embeds:
+            clean_embeds = [e for e in message.embeds if e.type == 'rich']
+
+        if not final_content and not clean_embeds:
             return # Nothing to send
 
         webhook = await self.get_webhook(receiver)
@@ -106,13 +162,14 @@ class Clone(commands.Cog):
         
         try:
             # Send via Webhook to impersonate
+            # allowed_mentions=discord.AllowedMentions.none() prevents any lingering pings
             cloned_msg = await webhook.send(
-                content=content,
+                content=final_content,
                 username=message.author.display_name,
                 avatar_url=message.author.display_avatar.url,
-                embeds=message.embeds,
+                embeds=clean_embeds,
                 wait=True,
-                allowed_mentions=discord.AllowedMentions.none() # Prevent mass pings
+                allowed_mentions=discord.AllowedMentions.none()
             )
             
             # Save History for deletions and replies
