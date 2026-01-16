@@ -293,25 +293,20 @@ class Clone(commands.Cog):
         
         await interaction.response.send_message(f"✅ Setup added! Cloning from `{s_id}` to {receive_channel.mention}.", ephemeral=True)
 
-    @clone_group.command(name="edit", description="Edit a clone setup for a receiving channel")
-    @app_commands.describe(source_id="The Source ID you want to edit settings for")
+    @clone_group.command(name="edit", description="Edit ALL clone setups for a receiving channel")
     async def clone_edit(self, interaction: discord.Interaction,
                          receive_channel: discord.TextChannel,
-                         source_id: str,
                          ignore_channel: discord.TextChannel = None,
                          attachments_only: bool = None,
                          return_replies: bool = None,
                          min_reactions: int = None):
         
-        try: s_id = int(source_id)
-        except: return await interaction.response.send_message("❌ Source ID invalid.", ephemeral=True)
-
         setups = self.get_clone_setups()
-        found = False
+        updated_count = 0
         
         for s in setups:
-            if s['receive_id'] == receive_channel.id and s['source_id'] == s_id:
-                # Update provided fields
+            if s['receive_id'] == receive_channel.id:
+                # Update provided fields for ALL setups for this receiver
                 if ignore_channel: 
                     current_ignores = s.get('ignore_channels', [])
                     if ignore_channel.id not in current_ignores:
@@ -321,14 +316,13 @@ class Clone(commands.Cog):
                 if attachments_only is not None: s['attachments_only'] = attachments_only
                 if return_replies is not None: s['return_replies'] = return_replies
                 if min_reactions is not None: s['min_reactions'] = min_reactions
-                found = True
-                break
+                updated_count += 1
         
-        if found:
+        if updated_count > 0:
             self.save_clone_setups(setups)
-            await interaction.response.send_message(f"✅ Updated setup for {receive_channel.mention} (Source: `{s_id}`).", ephemeral=True)
+            await interaction.response.send_message(f"✅ Updated {updated_count} setups for {receive_channel.mention}.", ephemeral=True)
         else:
-            await interaction.response.send_message(f"❌ No setup found matching that Receiver and Source.", ephemeral=True)
+            await interaction.response.send_message(f"❌ No setups found for {receive_channel.mention}.", ephemeral=True)
 
     @clone_group.command(name="remove", description="Remove a clone setup")
     async def clone_remove(self, interaction: discord.Interaction, receive_channel: discord.TextChannel, source_id: str):
@@ -353,6 +347,10 @@ class Clone(commands.Cog):
         if not setups:
             return await interaction.response.send_message("📝 No clone setups active.", ephemeral=True)
 
+        # Build a mapping of ALL channels (Categories, Text, Voice, etc.)
+        # This is more reliable than get_channel sometimes if the cache is being weird
+        channel_map = {c.id: c.name for c in interaction.guild.channels}
+
         # Group by Receiver
         grouped = {}
         for s in setups:
@@ -363,15 +361,14 @@ class Clone(commands.Cog):
         text = "**🐏 Clone Setups:**\n"
         
         for rid, source_list in grouped.items():
-            receiver = interaction.guild.get_channel(rid)
-            r_name = receiver.name if receiver else f"ID:{rid}"
+            # Receiver is always a TextChannel, likely in map
+            r_name = channel_map.get(rid, f"ID:{rid}")
             
             text += f"\n📂 **Receiver: {r_name}**\n"
             for s in source_list:
-                # Try to resolve Source Name
-                # It could be a Channel or a Category
-                source_obj = interaction.guild.get_channel(s['source_id'])
-                s_name = source_obj.name if source_obj else f"ID:{s['source_id']}"
+                # Source
+                sid = s['source_id']
+                s_name = channel_map.get(sid, f"ID:{sid}")
                 
                 # Format flags
                 flags = []
@@ -385,8 +382,9 @@ class Clone(commands.Cog):
                 if ignores:
                     ign_names = []
                     for iid in ignores:
-                        c = interaction.guild.get_channel(iid)
-                        ign_names.append(c.name if c else str(iid))
+                        # Resolve ignore channel names
+                        i_name = channel_map.get(iid, str(iid))
+                        ign_names.append(i_name)
                     ignore_text = f" | 🚫 Excluding: {', '.join(ign_names)}"
 
                 flag_text = f" ({', '.join(flags)})" if flags else ""
