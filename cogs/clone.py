@@ -4,9 +4,31 @@ from discord.ext import commands
 import asyncio
 import re
 
+# Function/Class List:
+# class Clone(commands.Cog)
+# - __init__(bot)
+# - get_clone_setups()
+# - save_clone_setups(setups)
+# - get_history()
+# - save_history(history)
+# - get_webhook(channel)
+# - resolve_mentions(content, guild)
+# - on_message(message)
+# - handle_cloning(message)
+# - execute_clone(message, setup)
+# - handle_return_reply(message)
+# - on_raw_reaction_add(payload)
+# - on_message_delete(message)
+# - clone_add(interaction, receive_channel, source_id, ignore_channel, attachments_only, return_replies, min_reactions)
+# - clone_edit(interaction, receive_channel, ignore_channel, attachments_only, return_replies, min_reactions)
+# - clone_remove(interaction, receive_channel, source_id)
+# - clone_list(interaction)
+# setup(bot)
+
 class Clone(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.description = "Channel mirroring and cloning system."
 
     # --- HELPERS ---
     def get_clone_setups(self):
