@@ -3,9 +3,28 @@ from discord import app_commands
 from discord.ext import commands
 import asyncio
 
+# Function/Class List:
+# class Tickets(commands.Cog)
+# - __init__(bot)
+# - get_setup(role_id)
+# - get_active_ticket(channel_id)
+# - find_ticket_by_user_and_role(user_id, role_id)
+# - save_active_ticket(data)
+# - delete_active_ticket(channel_id)
+# - add(interaction, role, ticket_name, prompt, category, admin, message_id, emoji, access)
+# - edit(interaction, role, ticket_name, prompt, category, admin, message_id, emoji, access)
+# - remove(interaction, role)
+# - list_setups(interaction)
+# - close(interaction, accept)
+# - on_member_update(before, after)
+# - create_ticket(member, setup)
+# - on_raw_reaction_add(payload)
+# setup(bot)
+
 class Tickets(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.description = "Ticket management system triggered by roles."
 
     # --- HELPERS ---
     def get_setup(self, role_id):
@@ -141,11 +160,17 @@ class Tickets(commands.Cog):
     @ticket_group.command(name="list", description="List all ticket setups.")
     async def list_setups(self, interaction: discord.Interaction):
         setups = self.bot.db.get_collection("ticket_setups")
-        if not setups:
-            return await interaction.response.send_message("📝 No ticket setups found.", ephemeral=True)
+        
+        # Filter for current guild
+        # We check if the role_id exists in this guild's roles
+        current_guild_roles = {r.id for r in interaction.guild.roles}
+        filtered_setups = [s for s in setups if s['role_id'] in current_guild_roles]
+
+        if not filtered_setups:
+            return await interaction.response.send_message("📝 No ticket setups found for this server.", ephemeral=True)
         
         text = "**🎫 Ticket Setups:**\n"
-        for s in setups:
+        for s in filtered_setups:
             role_ping = f"<@&{s['role_id']}>"
             admin_ping = f"<@&{s['admin_role_id']}>" if s['admin_role_id'] else "None"
             cat_ping = f"<#{s.get('category_id')}>" if s.get('category_id') else "None"
@@ -316,5 +341,3 @@ class Tickets(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(Tickets(bot))
-
-
