@@ -11,8 +11,8 @@ import asyncio
 # - find_ticket_by_user_and_role(user_id, role_id)
 # - save_active_ticket(data)
 # - delete_active_ticket(channel_id)
-# - add(interaction, role, ticket_name, prompt, category, admin, message_id, emoji, access)
-# - edit(interaction, role, ticket_name, prompt, category, admin, message_id, emoji, access)
+# - add(interaction, role, ticket_name, prompt, category, admin, message_id, emoji, access, demessage_id)
+# - edit(interaction, role, ticket_name, prompt, category, admin, message_id, emoji, access, demessage_id)
 # - remove(interaction, role)
 # - list_setups(interaction)
 # - close(interaction, accept)
@@ -76,9 +76,10 @@ class Tickets(commands.Cog):
         prompt="Message sent in ticket (use {user} and {admin})",
         category="Optional: Category to create tickets in",
         admin="Optional: Admin role for this ticket",
-        message_id="Optional: Message ID for reaction verification",
-        emoji="Optional: Emoji for reaction verification",
-        access="Optional: Role to give when ticket is accepted"
+        message_id="Optional: Gate Message ID for reaction verification",
+        emoji="Optional: Gate Emoji for reaction verification",
+        access="Optional: Role to give when ticket is accepted",
+        demessage_id="Optional: Message ID to remove access role on ANY reaction"
     )
     async def add(self, interaction: discord.Interaction, 
                   role: discord.Role, 
@@ -88,11 +89,12 @@ class Tickets(commands.Cog):
                   admin: discord.Role = None, 
                   message_id: str = None, 
                   emoji: str = None, 
-                  access: discord.Role = None):
+                  access: discord.Role = None,
+                  demessage_id: str = None):
         
-        # Validation: message_id and emoji must appear together or not at all
+        # Validation: message_id and emoji must appear together or not at all (Gate)
         if (message_id and not emoji) or (emoji and not message_id):
-            return await interaction.response.send_message("❌ Error: `message_id` and `emoji` must be provided together or not at all.", ephemeral=True)
+            return await interaction.response.send_message("❌ Error: `message_id` and `emoji` (Gate) must be provided together or not at all.", ephemeral=True)
 
         existing = self.get_setup(role.id)
         if existing:
@@ -106,7 +108,8 @@ class Tickets(commands.Cog):
             "admin_role_id": admin.id if admin else None,
             "gate_message_id": int(message_id) if message_id else None,
             "gate_emoji": emoji,
-            "access_role_id": access.id if access else None
+            "access_role_id": access.id if access else None,
+            "demessage_id": int(demessage_id) if demessage_id else None
         }
 
         self.bot.db.update_doc("ticket_setups", "role_id", role.id, new_setup)
@@ -121,7 +124,8 @@ class Tickets(commands.Cog):
                    admin: discord.Role = None, 
                    message_id: str = None, 
                    emoji: str = None, 
-                   access: discord.Role = None):
+                   access: discord.Role = None,
+                   demessage_id: str = None):
         
         setup = self.get_setup(role.id)
         if not setup:
@@ -133,12 +137,16 @@ class Tickets(commands.Cog):
         if category: setup['category_id'] = category.id
         if admin: setup['admin_role_id'] = admin.id
         
-        # Handle the gate logic update carefully
+        # Handle the gate logic update
         if message_id is not None or emoji is not None:
              if (message_id and not emoji) or (emoji and not message_id):
                  return await interaction.response.send_message("❌ Error: To update the gate, provide both `message_id` and `emoji`.", ephemeral=True)
              setup['gate_message_id'] = int(message_id)
              setup['gate_emoji'] = emoji
+        
+        # Handle the demessage logic update
+        if demessage_id is not None:
+             setup['demessage_id'] = int(demessage_id)
         
         if access: setup['access_role_id'] = access.id
 
@@ -162,7 +170,6 @@ class Tickets(commands.Cog):
         setups = self.bot.db.get_collection("ticket_setups")
         
         # Filter for current guild
-        # We check if the role_id exists in this guild's roles
         current_guild_roles = {r.id for r in interaction.guild.roles}
         filtered_setups = [s for s in setups if s['role_id'] in current_guild_roles]
 
@@ -174,8 +181,9 @@ class Tickets(commands.Cog):
             role_ping = f"<@&{s['role_id']}>"
             admin_ping = f"<@&{s['admin_role_id']}>" if s['admin_role_id'] else "None"
             cat_ping = f"<#{s.get('category_id')}>" if s.get('category_id') else "None"
-            gate = "Yes" if s['gate_message_id'] else "No"
-            text += f"• **Role:** {role_ping} | **Admin:** {admin_ping} | **Cat:** {cat_ping} | **Gate:** {gate}\n"
+            gate = "Yes" if s.get('gate_message_id') else "No"
+            demessage = "Yes" if s.get('demessage_id') else "No"
+            text += f"• **Role:** {role_ping} | **Admin:** {admin_ping} | **Cat:** {cat_ping} | **Gate:** {gate} | **DeMsg:** {demessage}\n"
         
         await interaction.response.send_message(text, ephemeral=True)
 
@@ -192,7 +200,6 @@ class Tickets(commands.Cog):
         
         member = interaction.guild.get_member(user_id)
         if not member:
-            # Try to fetch if not cached
             try: member = await interaction.guild.fetch_member(user_id)
             except: member = None
 
@@ -205,7 +212,6 @@ class Tickets(commands.Cog):
             except Exception as e: print(f"Failed to remove trigger role: {e}")
 
         # 3. Logic: Handle Accept (Give Access Role)
-        # Only if accept is explicitly True
         if accept and member:
             setup = self.get_setup(setup_role_id)
             if setup and setup.get('access_role_id'):
@@ -297,21 +303,21 @@ class Tickets(commands.Cog):
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload):
-        """Handles the Write Access logic (Reaction Gate)."""
+        """Handles the Gate (Write Access) and Demessage (Remove Access) logic."""
         if payload.user_id == self.bot.user.id: return
 
-        # Check if this reaction matches any setup's gate
         setups = self.bot.db.get_collection("ticket_setups")
-        matched_setup = None
         
+        # --- 1. Gate Logic (Unlock Ticket) ---
+        matched_gate = None
         for s in setups:
-            if s['gate_message_id'] == payload.message_id and str(payload.emoji) == s['gate_emoji']:
-                matched_setup = s
+            if s.get('gate_message_id') == payload.message_id and str(payload.emoji) == s.get('gate_emoji'):
+                matched_gate = s
                 break
         
-        if matched_setup:
+        if matched_gate:
             # User reacted to the gate. Find their ticket for this setup.
-            ticket_data = self.find_ticket_by_user_and_role(payload.user_id, matched_setup['role_id'])
+            ticket_data = self.find_ticket_by_user_and_role(payload.user_id, matched_gate['role_id'])
             
             if ticket_data and ticket_data.get('is_gated'):
                 guild = self.bot.get_guild(payload.guild_id)
@@ -319,16 +325,16 @@ class Tickets(commands.Cog):
                 member = guild.get_member(payload.user_id)
                 
                 if channel and member:
-                    # 1. Grant Write Access
+                    # Grant Write Access
                     await channel.set_permissions(member, read_messages=True, send_messages=True)
                     
-                    # 2. Update DB (Gate passed)
+                    # Update DB (Gate passed)
                     ticket_data['is_gated'] = False
-                    await self.save_active_ticket(ticket_data) # Update state
+                    await self.save_active_ticket(ticket_data)
                     
                     await channel.send(f"🔓 **Access Granted:** {member.mention} has verified and can now speak.")
 
-            # 3. Remove Reaction (so others don't see it piling up)
+            # Remove Reaction from Gate
             gate_channel = self.bot.get_channel(payload.channel_id)
             if gate_channel:
                 try:
@@ -337,7 +343,38 @@ class Tickets(commands.Cog):
                     if member:
                         await message.remove_reaction(payload.emoji, member)
                 except Exception as e:
-                    print(f"Failed to remove reaction: {e}")
+                    print(f"Failed to remove gate reaction: {e}")
+        
+        # --- 2. Demessage Logic (Remove Access Role) ---
+        matched_demessage = None
+        for s in setups:
+            # Only match Message ID, any emoji triggers it
+            if s.get('demessage_id') == payload.message_id:
+                matched_demessage = s
+                break
+        
+        if matched_demessage:
+            guild = self.bot.get_guild(payload.guild_id)
+            if not guild: return
+            
+            member = guild.get_member(payload.user_id)
+            if not member: return
+
+            role_id = matched_demessage.get('access_role_id')
+            if role_id:
+                role = guild.get_role(role_id)
+                if role and role in member.roles:
+                    try:
+                        await member.remove_roles(role)
+                    except Exception as e:
+                        print(f"Failed to remove access role via demessage: {e}")
+
+            # Remove Reaction from Demessage
+            try:
+                channel = self.bot.get_channel(payload.channel_id)
+                message = await channel.fetch_message(payload.message_id)
+                await message.remove_reaction(payload.emoji, member)
+            except: pass
 
 async def setup(bot):
     await bot.add_cog(Tickets(bot))
