@@ -246,7 +246,18 @@ class Tickets(commands.Cog):
         # Check if they already have a ticket for this setup
         existing = self.find_ticket_by_user_and_role(member.id, setup['role_id'])
         if existing:
-            return
+            # Buggy requested: If ticket exists, clean it up and start fresh.
+            # This handles phantom tickets where the channel was deleted manually.
+            try:
+                # Try to find and delete the old channel
+                old_channel = guild.get_channel(existing['channel_id'])
+                if old_channel:
+                    await old_channel.delete()
+            except Exception as e:
+                print(f"Cleanup error (ignorable): {e}")
+
+            # Always remove the old DB entry
+            await self.delete_active_ticket(existing['channel_id'])
 
         # 1. Format Name
         raw_name = setup['ticket_name'].replace("{user}", member.name).lower()
