@@ -387,6 +387,9 @@ class Purge(commands.Cog):
     @app_commands.command(name="stick", description="Stick a message to the bottom of this channel.")
     @app_commands.describe(message="The message to sticky")
     async def stick(self, interaction: discord.Interaction, message: str):
+        # Process newlines so \n creates a real line break
+        content = message.replace("\\n", "\n")
+
         stickies = self.get_stickies()
         
         # Remove existing sticky for this channel if present (to overwrite)
@@ -396,14 +399,14 @@ class Purge(commands.Cog):
         new_sticky = {
             "channel_id": interaction.channel.id,
             "guild_id": interaction.guild.id,
-            "content": message,
+            "content": content,
             "last_message_id": None,
             "last_posted_at": datetime.datetime.now().timestamp()
         }
 
         # Send the first message immediately
         try:
-            sent_msg = await interaction.channel.send(message)
+            sent_msg = await interaction.channel.send(content)
             new_sticky['last_message_id'] = sent_msg.id
         except Exception as e:
             return await interaction.response.send_message(f"❌ Failed to send sticky message: {e}", ephemeral=True)
