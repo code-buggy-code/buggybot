@@ -73,7 +73,7 @@ class Tickets(commands.Cog):
     @app_commands.describe(
         role="The role that triggers the ticket creation",
         ticket_name="Name of the channel (use {user})",
-        prompt="Message sent in ticket (use {user} and {admin})",
+        prompt="Message sent in ticket (use {user}, {admin}, \\n for line)",
         category="Optional: Category to create tickets in",
         admin="Optional: Admin role for this ticket",
         message_id="Optional: Gate Message ID for reaction verification",
@@ -116,6 +116,17 @@ class Tickets(commands.Cog):
         await interaction.response.send_message(f"✅ Ticket setup added! Assigning {role.mention} will now trigger a ticket.", ephemeral=True)
 
     @ticket_group.command(name="edit", description="Edit an existing ticket setup.")
+    @app_commands.describe(
+        role="The role to edit setup for",
+        ticket_name="Name of the channel (use {user})",
+        prompt="Message (use {user}, {admin}, \\n for line)",
+        category="Category to create tickets in",
+        admin="Admin role for this ticket",
+        message_id="Gate Message ID",
+        emoji="Gate Emoji",
+        access="Role to give on accept",
+        demessage_id="Message ID for removal"
+    )
     async def edit(self, interaction: discord.Interaction, 
                    role: discord.Role, 
                    ticket_name: str = None, 
@@ -297,9 +308,11 @@ class Tickets(commands.Cog):
             return
 
         # 5. Send Prompt
+        # Added .replace("\\n", "\n") so users can type literal \n in the slash command to get a new line
         prompt_text = setup['prompt']\
             .replace("{user}", member.mention)\
-            .replace("{admin}", admin_role.mention if admin_role else "")
+            .replace("{admin}", admin_role.mention if admin_role else "")\
+            .replace("\\n", "\n")
         
         await channel.send(prompt_text)
 
