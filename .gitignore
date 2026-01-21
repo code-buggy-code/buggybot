@@ -1,4 +1,7 @@
 main.py
 manager.py
 database.json
+client_secret.json
+browser.json
+*.json
 *.log
