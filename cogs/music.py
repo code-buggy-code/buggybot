@@ -30,7 +30,7 @@ from spotipy.oauth2 import SpotifyClientCredentials
 # - checkmusic(interaction)
 # - refreshmusic(interaction)
 # - entercode(interaction, code)
-# - setupmusic(interaction, headers)
+# - setupmusic(interaction, user_agent, cookie)
 # - setplaylist(interaction, playlist_id)
 # - setmusicchannel(interaction, channel)
 # - on_message(message)
@@ -276,72 +276,37 @@ class Music(commands.Cog):
         except Exception as e:
             await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
-    @app_commands.command(name="setupmusic", description="Admin: Automated setup for YTM browser.json.")
-    @app_commands.describe(file="Upload a .txt file containing the raw headers")
+    @app_commands.command(name="setupmusic", description="Admin: Manual setup for YTM with User Agent and Cookie.")
+    @app_commands.describe(user_agent="The User-Agent string from your browser", cookie="The Cookie string from your browser")
     @app_commands.checks.has_permissions(administrator=True)
-    async def setupmusic(self, interaction: discord.Interaction, file: discord.Attachment):
+    async def setupmusic(self, interaction: discord.Interaction, user_agent: str, cookie: str):
         await interaction.response.defer(ephemeral=True)
+        
         try:
-            # Read the file content
-            content = await file.read()
-            try:
-                headers_str = content.decode('utf-8')
-            except UnicodeDecodeError:
-                return await interaction.followup.send("❌ File must be UTF-8 encoded text.", ephemeral=True)
+            # Construct the dictionary directly
+            header_dict = {
+                "User-Agent": user_agent.strip(),
+                "Cookie": cookie.strip()
+            }
 
-            header_dict = {}
-            
-            # --- SUPER STRICT WHITELIST ---
-            # ONLY Cookie and User-Agent are strictly required. X-Goog-AuthUser helps.
-            ALLOWED_HEADERS = ["cookie", "user-agent", "x-goog-authuser"]
-
-            # --- HEADER UNFOLDING ---
-            # Handles multi-line headers (e.g. wrapped Cookies)
-            cleaned_lines = []
-            raw_lines = headers_str.split('\n')
-            current_line = ""
-            
-            for line in raw_lines:
-                # If line starts with whitespace, it's a continuation
-                if line.startswith((' ', '\t')) and current_line:
-                    current_line += " " + line.strip()
-                else:
-                    if current_line: cleaned_lines.append(current_line)
-                    current_line = line.strip()
-            if current_line: cleaned_lines.append(current_line)
-
-            for line in cleaned_lines:
-                if ':' in line:
-                    key, value = line.split(':', 1)
-                    key = key.strip()
-                    value = value.strip()
-                    
-                    if key.lower() in ALLOWED_HEADERS:
-                        header_dict[key] = value
-
-            if not header_dict:
-                 return await interaction.followup.send("❌ Could not parse any valid headers. I ONLY look for `Cookie` and `User-Agent`.", ephemeral=True)
-
-            if "cookie" not in [k.lower() for k in header_dict.keys()]:
-                 return await interaction.followup.send("⚠️ Warning: Missing `Cookie` header. Setup will likely fail.", ephemeral=True)
-
+            # Write to browser.json
             with open('browser.json', 'w') as f:
                 json.dump(header_dict, f, indent=4)
             
-            # Explicitly try to load here to capture and show the error to the user
+            # Try to load YTM
             try:
                 self.ytmusic = YTMusic('browser.json')
-                msg = f"✅ **Success!** `browser.json` created with keys: `{', '.join(header_dict.keys())}` and YTM loaded!"
+                msg = f"✅ **Success!** `browser.json` created and YTM loaded!"
             except Exception as e:
                 self.ytmusic = None
-                # If it failed, delete the bad file so we don't leave trash
+                # Delete invalid file
                 if os.path.exists('browser.json'): os.remove('browser.json')
                 msg = f"⚠️ `browser.json` created, but YTM failed to initialize: `{e}`. (File deleted)"
 
             await interaction.followup.send(msg, ephemeral=True)
             
         except Exception as e:
-            await interaction.followup.send(f"❌ Error processing file: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @app_commands.command(name="setplaylist", description="Admin: Set the YouTube Playlist ID.")
     @app_commands.checks.has_permissions(administrator=True)
