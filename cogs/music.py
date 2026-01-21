@@ -146,6 +146,7 @@ class Music(commands.Cog):
                 print("✅ YouTube Music Service Loaded.")
             except Exception as e:
                 print(f"❌ Failed to load YouTube Music: {e}")
+                self.ytmusic = None
         else:
             print("❌ browser.json not found for YTM.")
 
@@ -312,9 +313,14 @@ class Music(commands.Cog):
             with open('browser.json', 'w') as f:
                 json.dump(header_dict, f, indent=4)
             
-            self.load_music_services()
-            
-            msg = "✅ **Success!** `browser.json` created." if self.ytmusic else "⚠️ Created but failed to load."
+            # Explicitly try to load here to capture and show the error to the user
+            try:
+                self.ytmusic = YTMusic('browser.json')
+                msg = "✅ **Success!** `browser.json` created and YTM loaded!"
+            except Exception as e:
+                self.ytmusic = None
+                msg = f"⚠️ `browser.json` created, but YTM failed to initialize: `{e}`"
+
             await interaction.followup.send(msg, ephemeral=True)
             
         except Exception as e:
