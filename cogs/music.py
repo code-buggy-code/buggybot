@@ -283,30 +283,40 @@ class Music(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         
         try:
-            # Direct input as requested
+            # 1. Direct inputs, minimal stripping (just outer whitespace)
+            ua_clean = user_agent.strip()
+            cookie_clean = cookie.strip()
+
+            # 2. Construct dict
             header_dict = {
-                "User-Agent": user_agent.strip(),
+                "User-Agent": ua_clean,
                 "Accept": "*/*",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Content-Type": "application/json",
                 "X-Goog-AuthUser": "0",
                 "x-origin": "https://music.youtube.com",
-                "Cookie": cookie.strip()
+                "Cookie": cookie_clean
             }
 
-            # Write to browser.json
+            # 3. Write to file
             with open('browser.json', 'w') as f:
                 json.dump(header_dict, f, indent=4)
             
-            # Try to load YTM
+            # 4. Read back for debug
+            with open('browser.json', 'r') as f:
+                file_content = f.read()
+
+            # 5. Try to load
             try:
                 self.ytmusic = YTMusic('browser.json')
-                msg = f"✅ **Success!** `browser.json` created and YTM loaded!"
+                msg = f"✅ **Success!** YTM Loaded!"
             except Exception as e:
                 self.ytmusic = None
-                # Delete invalid file
-                if os.path.exists('browser.json'): os.remove('browser.json')
-                msg = f"⚠️ `browser.json` created, but YTM failed to initialize: `{e}`. (File deleted)"
+                # Don't delete file, let user debug
+                preview = file_content[:1500] # Grab most of it
+                msg = (f"⚠️ **Failed to Initialize:** `{e}`\n\n"
+                       f"🔍 **Debug Output (What I wrote to browser.json):**\n"
+                       f"```json\n{preview}\n```")
 
             await interaction.followup.send(msg, ephemeral=True)
             
