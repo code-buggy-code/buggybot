@@ -29,11 +29,10 @@ import os
 # - stickylist(interaction)
 # - stickytime(interaction, timing, number, unit)
 # - setlogchannel(interaction, channel)
-# - vote_group (Group)
-# - vote_kick(interaction, member) [/vote kick]
-# - vote_role(interaction, role) [/vote role]
-# - vote_remove(interaction, member) [/vote remove]
-# - vote_list(interaction) [/vote list]
+# - vote(interaction, member) [/vote]
+# - vote_role(interaction, role) [/vote-role]
+# - vote_remove(interaction, member) [/vote-remove]
+# - vote_list(interaction) [/vote-list]
 # - vcping_group (Group)
 # - vcping_ignore_group (Group)
 # - vcping_ignore_add(interaction, channel)
@@ -381,14 +380,13 @@ class Admin(commands.Cog):
         await interaction.response.send_message(f"✅ Logging channel set to {channel.mention}.\nI will now log:\n- Message Deletions\n- Message Edits\n- Member Leaves\n- Votekick Results", ephemeral=True)
 
     # --- VOTE KICK COMMANDS ---
-    vote_group = app_commands.Group(name="vote", description="Voting commands")
-
-    @vote_group.command(name="kick", description="Vote to kick a user")
+    
+    @app_commands.command(name="vote", description="Vote to kick a user")
     @app_commands.describe(member="The member to vote kick")
-    async def vote_kick(self, interaction: discord.Interaction, member: discord.Member):
+    async def vote(self, interaction: discord.Interaction, member: discord.Member):
         # 1. Check if voting role is set and if user has it
         if self.voting_role_id is None:
-            await interaction.response.send_message("❌ The voting role has not been set yet. An admin must use `/vote role` first.", ephemeral=True)
+            await interaction.response.send_message("❌ The voting role has not been set yet. An admin must use `/vote-role` first.", ephemeral=True)
             return
 
         user_role_ids = [r.id for r in interaction.user.roles]
@@ -442,7 +440,7 @@ class Admin(commands.Cog):
             # Ephemeral confirmation for anonymity
             await interaction.response.send_message(f"✅ Vote cast! {member.display_name} has {current_votes}/{self.VOTE_THRESHOLD} votes.", ephemeral=True)
 
-    @vote_group.command(name="role", description="Set the role allowed to vote")
+    @app_commands.command(name="vote-role", description="Set the role allowed to vote")
     @app_commands.describe(role="The role that can use the votekick command")
     async def vote_role(self, interaction: discord.Interaction, role: discord.Role):
         # We need to make sure the user running this command has admin perms
@@ -458,7 +456,7 @@ class Admin(commands.Cog):
 
         await interaction.response.send_message(f"✅ Voting role set to {role.mention}.", ephemeral=True)
 
-    @vote_group.command(name="remove", description="Remove an active vote against a user (Admin only)")
+    @app_commands.command(name="vote-remove", description="Remove an active vote against a user (Admin only)")
     @app_commands.checks.has_permissions(administrator=True)
     async def vote_remove(self, interaction: discord.Interaction, member: discord.Member):
         if member.id in self.active_votes:
@@ -471,7 +469,7 @@ class Admin(commands.Cog):
         else:
             await interaction.response.send_message(f"⚠️ There are no active votes against {member.display_name}.", ephemeral=True)
 
-    @vote_group.command(name="list", description="List active vote kicks")
+    @app_commands.command(name="vote-list", description="List active vote kicks")
     async def vote_list(self, interaction: discord.Interaction):
         if not self.active_votes:
             await interaction.response.send_message("No active votes.", ephemeral=True)
