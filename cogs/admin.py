@@ -7,7 +7,7 @@ import json
 import os
 
 # Function/Class List:
-# class Admin(commands.Cog)
+# class buggy(commands.Cog)
 # - __init__(bot)
 # - load_config()
 # - save_config()
@@ -44,10 +44,10 @@ import os
 # - on_voice_state_update(member, before, after)
 # setup(bot)
 
-class Admin(commands.Cog):
+class buggy(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.description = "Admin tools, Logging, Sticky Message management, and VC Pings."
+        self.description = "buggy tools, Logging, Sticky Message management, and VC Pings."
         
         # VC Ping Config
         self.config_file = 'vcping_config.json'
@@ -456,7 +456,7 @@ class Admin(commands.Cog):
 
         await interaction.response.send_message(f"✅ Voting role set to {role.mention}.", ephemeral=True)
 
-    @app_commands.command(name="vote-remove", description="Remove an active vote against a user (Admin only)")
+    @app_commands.command(name="vote-remove", description="Remove an active vote against a user (buggy only)")
     @app_commands.checks.has_permissions(administrator=True)
     async def vote_remove(self, interaction: discord.Interaction, member: discord.Member):
         if member.id in self.active_votes:
@@ -636,4 +636,4 @@ class Admin(commands.Cog):
             update_channel_state(after.channel)
 
 async def setup(bot):
-    await bot.add_cog(Admin(bot))
+    await bot.add_cog(buggy(bot))
