@@ -30,7 +30,7 @@ from spotipy.oauth2 import SpotifyClientCredentials
 # - checkmusic(interaction)
 # - refreshmusic(interaction)
 # - entercode(interaction, code)
-# - setupmusic(interaction, user_agent, cookie)
+# - setupmusic(interaction, cookie, user_agent)
 # - setplaylist(interaction, playlist_id)
 # - setmusicchannel(interaction, channel)
 # - on_message(message)
@@ -276,37 +276,37 @@ class Music(commands.Cog):
         except Exception as e:
             await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
-    @app_commands.command(name="setupmusic", description="Admin: Manual setup for YTM with User Agent and Cookie.")
-    @app_commands.describe(user_agent="The raw User-Agent string", cookie="The raw Cookie string")
+    @app_commands.command(name="setupmusic", description="Admin: Manual setup for YTM with Cookie (User Agent optional).")
+    @app_commands.describe(cookie="The raw Cookie string", user_agent="Optional: The raw User-Agent string (Defaults to Firefox 147)")
     @app_commands.checks.has_permissions(administrator=True)
-    async def setupmusic(self, interaction: discord.Interaction, user_agent: str, cookie: str):
+    async def setupmusic(self, interaction: discord.Interaction, cookie: str, user_agent: str = None):
         await interaction.response.defer(ephemeral=True)
         
         try:
-            # 1. Direct inputs, minimal stripping (just outer whitespace)
+            # 1. Handle Defaults
+            if user_agent is None:
+                # Default to the one you were using in your logs
+                user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0"
+
+            # 2. Direct inputs, minimal stripping (just outer whitespace)
             ua_clean = user_agent.strip()
             cookie_clean = cookie.strip()
 
-            # 2. Construct dict
+            # 3. Construct dict - Simplified to bare minimum to prevent detection errors
             header_dict = {
                 "User-Agent": ua_clean,
-                "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Content-Type": "application/json",
-                "X-Goog-AuthUser": "0",
-                "x-origin": "https://music.youtube.com",
                 "Cookie": cookie_clean
             }
 
-            # 3. Write to file
-            with open('browser.json', 'w') as f:
+            # 4. Write to file
+            with open('browser.json', 'w', encoding='utf-8') as f:
                 json.dump(header_dict, f, indent=4)
             
-            # 4. Read back for debug
-            with open('browser.json', 'r') as f:
+            # 5. Read back for debug
+            with open('browser.json', 'r', encoding='utf-8') as f:
                 file_content = f.read()
 
-            # 5. Try to load
+            # 6. Try to load
             try:
                 self.ytmusic = YTMusic('browser.json')
                 msg = f"✅ **Success!** YTM Loaded!"
