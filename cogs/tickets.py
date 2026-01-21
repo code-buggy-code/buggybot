@@ -75,7 +75,7 @@ class Tickets(commands.Cog):
         ticket_name="Name of the channel (use {user})",
         prompt="Message sent in ticket (use {user}, {admin}, \\n for line)",
         category="Optional: Category to create tickets in",
-        admin="Optional: Admin role for this ticket",
+        admin="Optional: buggy role for this ticket",
         message_id="Optional: Gate Message ID for reaction verification",
         emoji="Optional: Gate Emoji for reaction verification",
         access="Optional: Role to give when ticket is accepted",
@@ -121,7 +121,7 @@ class Tickets(commands.Cog):
         ticket_name="Name of the channel (use {user})",
         prompt="Message (use {user}, {admin}, \\n for line)",
         category="Category to create tickets in",
-        admin="Admin role for this ticket",
+        admin="buggy role for this ticket",
         message_id="Gate Message ID",
         emoji="Gate Emoji",
         access="Role to give on accept",
@@ -194,7 +194,7 @@ class Tickets(commands.Cog):
             cat_ping = f"<#{s.get('category_id')}>" if s.get('category_id') else "None"
             gate = "Yes" if s.get('gate_message_id') else "No"
             demessage = "Yes" if s.get('demessage_id') else "No"
-            text += f"• **Role:** {role_ping} | **Admin:** {admin_ping} | **Cat:** {cat_ping} | **Gate:** {gate} | **DeMsg:** {demessage}\n"
+            text += f"• **Role:** {role_ping} | **buggy:** {admin_ping} | **Cat:** {cat_ping} | **Gate:** {gate} | **DeMsg:** {demessage}\n"
         
         await interaction.response.send_message(text, ephemeral=True)
 
@@ -402,3 +402,4 @@ class Tickets(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(Tickets(bot))
+    
