@@ -305,7 +305,11 @@ class Music(commands.Cog):
                     
                     if ':' in line:
                         key, value = line.split(':', 1)
-                        header_dict[key.strip()] = value.strip()
+                        key = key.strip()
+                        # Blacklist known OAuth keys to prevent confusion
+                        if key.lower() in ["token_type", "access_token", "refresh_token", "expires_in", "scope", "oauth_credentials"]:
+                            continue
+                        header_dict[key] = value.strip()
             
             if not header_dict:
                  return await interaction.followup.send("❌ Could not parse headers from file. Please ensure it contains 'Key: Value' lines.", ephemeral=True)
@@ -319,7 +323,9 @@ class Music(commands.Cog):
                 msg = "✅ **Success!** `browser.json` created and YTM loaded!"
             except Exception as e:
                 self.ytmusic = None
-                msg = f"⚠️ `browser.json` created, but YTM failed to initialize: `{e}`"
+                # If it failed, delete the bad file so we don't leave trash
+                if os.path.exists('browser.json'): os.remove('browser.json')
+                msg = f"⚠️ `browser.json` created, but YTM failed to initialize: `{e}`. (File deleted)"
 
             await interaction.followup.send(msg, ephemeral=True)
             
