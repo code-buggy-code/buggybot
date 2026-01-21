@@ -276,23 +276,38 @@ class Music(commands.Cog):
             await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
     @app_commands.command(name="setupmusic", description="Admin: Automated setup for YTM browser.json.")
-    @app_commands.describe(headers="The raw header string from ytmusicapi setup")
+    @app_commands.describe(file="Upload a .txt file containing the raw headers")
     @app_commands.checks.has_permissions(administrator=True)
-    async def setupmusic(self, interaction: discord.Interaction, headers: str):
+    async def setupmusic(self, interaction: discord.Interaction, file: discord.Attachment):
+        await interaction.response.defer(ephemeral=True)
         try:
+            # Read the file content
+            content = await file.read()
+            try:
+                headers_str = content.decode('utf-8')
+            except UnicodeDecodeError:
+                return await interaction.followup.send("❌ File must be UTF-8 encoded text.", ephemeral=True)
+
             header_dict = {}
-            lines = headers.split('\n')
-            for line in lines:
-                line = line.strip()
-                if not line: continue
-                if line.startswith(("GET", "POST", "HTTP", ":")): continue
-                if ':' in line:
-                    key, value = line.split(':', 1)
-                    header_dict[key.strip()] = value.strip()
+            
+            # Strategy 1: JSON
+            try:
+                header_dict = json.loads(headers_str)
+            except json.JSONDecodeError:
+                # Strategy 2: Raw Headers (Line by Line)
+                lines = headers_str.split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if not line: continue
+                    # Skip method line or HTTP status or pseudo-headers
+                    if line.startswith(("GET", "POST", "HTTP", ":")): continue
+                    
+                    if ':' in line:
+                        key, value = line.split(':', 1)
+                        header_dict[key.strip()] = value.strip()
             
             if not header_dict:
-                 try: header_dict = json.loads(headers)
-                 except: return await interaction.response.send_message("❌ Could not parse headers.", ephemeral=True)
+                 return await interaction.followup.send("❌ Could not parse headers from file. Please ensure it contains 'Key: Value' lines.", ephemeral=True)
 
             with open('browser.json', 'w') as f:
                 json.dump(header_dict, f, indent=4)
@@ -300,10 +315,10 @@ class Music(commands.Cog):
             self.load_music_services()
             
             msg = "✅ **Success!** `browser.json` created." if self.ytmusic else "⚠️ Created but failed to load."
-            await interaction.response.send_message(msg, ephemeral=True)
+            await interaction.followup.send(msg, ephemeral=True)
             
         except Exception as e:
-            await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ Error processing file: {e}", ephemeral=True)
 
     @app_commands.command(name="setplaylist", description="Admin: Set the YouTube Playlist ID.")
     @app_commands.checks.has_permissions(administrator=True)
