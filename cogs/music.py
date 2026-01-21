@@ -291,44 +291,39 @@ class Music(commands.Cog):
 
             header_dict = {}
             
-            # --- STRICT WHITELIST ---
-            # We only allow these keys. Everything else is ignored to prevent "OAuth" detection errors.
-            ALLOWED_HEADERS = [
-                "cookie", 
-                "user-agent", 
-                "accept", 
-                "accept-language", 
-                "content-type", 
-                "x-goog-authuser", 
-                "x-goog-visitor-id",
-                "x-youtube-client-name",
-                "x-youtube-client-version",
-                "x-youtube-page-cl",
-                "x-youtube-page-label",
-                "x-youtube-utc-offset",
-                "x-youtube-time-zone"
-            ]
+            # --- SUPER STRICT WHITELIST ---
+            # ONLY Cookie and User-Agent are strictly required. X-Goog-AuthUser helps.
+            ALLOWED_HEADERS = ["cookie", "user-agent", "x-goog-authuser"]
 
-            lines = headers_str.split('\n')
-            for line in lines:
-                line = line.strip()
-                if not line: continue
-                
-                # Check for Colon
+            # --- HEADER UNFOLDING ---
+            # Handles multi-line headers (e.g. wrapped Cookies)
+            cleaned_lines = []
+            raw_lines = headers_str.split('\n')
+            current_line = ""
+            
+            for line in raw_lines:
+                # If line starts with whitespace, it's a continuation
+                if line.startswith((' ', '\t')) and current_line:
+                    current_line += " " + line.strip()
+                else:
+                    if current_line: cleaned_lines.append(current_line)
+                    current_line = line.strip()
+            if current_line: cleaned_lines.append(current_line)
+
+            for line in cleaned_lines:
                 if ':' in line:
                     key, value = line.split(':', 1)
                     key = key.strip()
                     value = value.strip()
                     
-                    # Only keep it if it's in our safe list
                     if key.lower() in ALLOWED_HEADERS:
                         header_dict[key] = value
 
             if not header_dict:
-                 return await interaction.followup.send("❌ Could not parse any valid headers (Cookie, User-Agent, etc.) from file.", ephemeral=True)
+                 return await interaction.followup.send("❌ Could not parse any valid headers. I ONLY look for `Cookie` and `User-Agent`.", ephemeral=True)
 
-            if "cookie" not in [k.lower() for k in header_dict.keys()] or "user-agent" not in [k.lower() for k in header_dict.keys()]:
-                 return await interaction.followup.send("⚠️ Warning: Missing `Cookie` or `User-Agent`. These are required for YouTube Music.", ephemeral=True)
+            if "cookie" not in [k.lower() for k in header_dict.keys()]:
+                 return await interaction.followup.send("⚠️ Warning: Missing `Cookie` header. Setup will likely fail.", ephemeral=True)
 
             with open('browser.json', 'w') as f:
                 json.dump(header_dict, f, indent=4)
@@ -336,7 +331,7 @@ class Music(commands.Cog):
             # Explicitly try to load here to capture and show the error to the user
             try:
                 self.ytmusic = YTMusic('browser.json')
-                msg = "✅ **Success!** `browser.json` created and YTM loaded!"
+                msg = f"✅ **Success!** `browser.json` created with keys: `{', '.join(header_dict.keys())}` and YTM loaded!"
             except Exception as e:
                 self.ytmusic = None
                 # If it failed, delete the bad file so we don't leave trash
