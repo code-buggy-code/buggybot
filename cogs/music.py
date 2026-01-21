@@ -290,33 +290,33 @@ class Music(commands.Cog):
 
             # 2. Direct inputs, minimal stripping (just outer whitespace)
             ua_clean = user_agent.strip()
-            cookie_clean = cookie.strip()
+            # Strip quotes just in case the user included them in the copy-paste
+            cookie_clean = cookie.strip().strip('"').strip("'")
 
             # 3. Construct dict - Simplified to bare minimum to prevent detection errors
             header_dict = {
                 "User-Agent": ua_clean,
+                "Accept": "*/*",
+                "Accept-Language": "en-US,en;q=0.9",
                 "Cookie": cookie_clean
             }
 
-            # 4. Write to file
+            # 4. Write to file (for persistence only)
             with open('browser.json', 'w', encoding='utf-8') as f:
                 json.dump(header_dict, f, indent=4)
             
-            # 5. Read back for debug
-            with open('browser.json', 'r', encoding='utf-8') as f:
-                file_content = f.read()
-
-            # 6. Try to load
+            # 5. Load DIRECTLY from dict (Bypasses file reading issues)
             try:
-                self.ytmusic = YTMusic('browser.json')
-                msg = f"✅ **Success!** YTM Loaded!"
+                self.ytmusic = YTMusic(auth=header_dict)
+                msg = f"✅ **Success!** YTM Loaded from inputs!"
             except Exception as e:
                 self.ytmusic = None
-                # Don't delete file, let user debug
-                preview = file_content[:1500] # Grab most of it
+                # Show first 50 chars and last 50 chars
+                preview_start = cookie_clean[:50]
+                preview_end = cookie_clean[-50:]
                 msg = (f"⚠️ **Failed to Initialize:** `{e}`\n\n"
-                       f"🔍 **Debug Output (What I wrote to browser.json):**\n"
-                       f"```json\n{preview}\n```")
+                       f"🔍 **Cookie Preview (Starts/Ends):**\n"
+                       f"`{preview_start} ... {preview_end}`")
 
             await interaction.followup.send(msg, ephemeral=True)
             
