@@ -277,23 +277,38 @@ class Music(commands.Cog):
             await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
     @app_commands.command(name="setupmusic", description="Admin: Manual setup for YTM with User Agent and Cookie.")
-    @app_commands.describe(user_agent="The User-Agent string from your browser", cookie="The Cookie string from your browser")
+    @app_commands.describe(user_agent="The User-Agent string (e.g., Mozilla/5.0...)", cookie="The Cookie string (starts with __Secure...)")
     @app_commands.checks.has_permissions(administrator=True)
     async def setupmusic(self, interaction: discord.Interaction, user_agent: str, cookie: str):
         await interaction.response.defer(ephemeral=True)
         
         try:
-            # Construct the dictionary directly
+            # 1. Clean inputs (Remove "Cookie:" prefix if user pasted the whole line)
+            ua_clean = user_agent.strip()
+            if ua_clean.lower().startswith("user-agent:"):
+                ua_clean = ua_clean[11:].strip()
+
+            cookie_clean = cookie.strip()
+            if cookie_clean.lower().startswith("cookie:"):
+                cookie_clean = cookie_clean[7:].strip()
+
+            # 2. Construct the dictionary with CRITICAL defaults
+            # ytmusicapi expects these to behave like a real browser
             header_dict = {
-                "User-Agent": user_agent.strip(),
-                "Cookie": cookie.strip()
+                "User-Agent": ua_clean,
+                "Accept": "*/*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Content-Type": "application/json",
+                "X-Goog-AuthUser": "0", # Crucial for avoiding OAuth confusion
+                "x-origin": "https://music.youtube.com",
+                "Cookie": cookie_clean
             }
 
-            # Write to browser.json
+            # 3. Write to browser.json
             with open('browser.json', 'w') as f:
                 json.dump(header_dict, f, indent=4)
             
-            # Try to load YTM
+            # 4. Try to load YTM
             try:
                 self.ytmusic = YTMusic('browser.json')
                 msg = f"✅ **Success!** `browser.json` created and YTM loaded!"
