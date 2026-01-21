@@ -291,28 +291,44 @@ class Music(commands.Cog):
 
             header_dict = {}
             
-            # Strategy 1: JSON
-            try:
-                header_dict = json.loads(headers_str)
-            except json.JSONDecodeError:
-                # Strategy 2: Raw Headers (Line by Line)
-                lines = headers_str.split('\n')
-                for line in lines:
-                    line = line.strip()
-                    if not line: continue
-                    # Skip method line or HTTP status or pseudo-headers
-                    if line.startswith(("GET", "POST", "HTTP", ":")): continue
+            # --- STRICT WHITELIST ---
+            # We only allow these keys. Everything else is ignored to prevent "OAuth" detection errors.
+            ALLOWED_HEADERS = [
+                "cookie", 
+                "user-agent", 
+                "accept", 
+                "accept-language", 
+                "content-type", 
+                "x-goog-authuser", 
+                "x-goog-visitor-id",
+                "x-youtube-client-name",
+                "x-youtube-client-version",
+                "x-youtube-page-cl",
+                "x-youtube-page-label",
+                "x-youtube-utc-offset",
+                "x-youtube-time-zone"
+            ]
+
+            lines = headers_str.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line: continue
+                
+                # Check for Colon
+                if ':' in line:
+                    key, value = line.split(':', 1)
+                    key = key.strip()
+                    value = value.strip()
                     
-                    if ':' in line:
-                        key, value = line.split(':', 1)
-                        key = key.strip()
-                        # Blacklist known OAuth keys to prevent confusion
-                        if key.lower() in ["token_type", "access_token", "refresh_token", "expires_in", "scope", "oauth_credentials"]:
-                            continue
-                        header_dict[key] = value.strip()
-            
+                    # Only keep it if it's in our safe list
+                    if key.lower() in ALLOWED_HEADERS:
+                        header_dict[key] = value
+
             if not header_dict:
-                 return await interaction.followup.send("❌ Could not parse headers from file. Please ensure it contains 'Key: Value' lines.", ephemeral=True)
+                 return await interaction.followup.send("❌ Could not parse any valid headers (Cookie, User-Agent, etc.) from file.", ephemeral=True)
+
+            if "cookie" not in [k.lower() for k in header_dict.keys()] or "user-agent" not in [k.lower() for k in header_dict.keys()]:
+                 return await interaction.followup.send("⚠️ Warning: Missing `Cookie` or `User-Agent`. These are required for YouTube Music.", ephemeral=True)
 
             with open('browser.json', 'w') as f:
                 json.dump(header_dict, f, indent=4)
