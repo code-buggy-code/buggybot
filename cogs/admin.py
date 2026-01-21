@@ -18,6 +18,7 @@ import os
 # - save_sticky_settings(settings)
 # - get_log_settings()
 # - save_log_settings(settings)
+# - log_to_channel(guild, embed)
 # - on_message(message)
 # - on_message_delete(message)
 # - on_message_edit(before, after)
@@ -28,6 +29,11 @@ import os
 # - stickylist(interaction)
 # - stickytime(interaction, timing, number, unit)
 # - setlogchannel(interaction, channel)
+# - vote_group (Group)
+# - vote_kick(interaction, member) [/vote kick]
+# - vote_role(interaction, role) [/vote role]
+# - vote_remove(interaction, member) [/vote remove]
+# - vote_list(interaction) [/vote list]
 # - vcping_group (Group)
 # - vcping_ignore_group (Group)
 # - vcping_ignore_add(interaction, channel)
@@ -49,6 +55,11 @@ class Admin(commands.Cog):
         self.config = self.load_config()
         self.vc_state = {}
         self.check_vcs.start()
+
+        # Vote Kick Config
+        self.voting_role_id = None
+        self.active_votes = {} # {target_id: set(voter_id)}
+        self.VOTE_THRESHOLD = 3 
 
     def load_config(self):
         if os.path.exists(self.config_file):
@@ -88,6 +99,21 @@ class Admin(commands.Cog):
     def save_log_settings(self, settings):
         """Saves logging settings."""
         self.bot.db.save_collection("log_settings", settings)
+    
+    async def log_to_channel(self, guild, embed):
+        """Helper to send logs to the configured channel."""
+        settings = self.get_log_settings()
+        guild_setting = next((s for s in settings if s['guild_id'] == guild.id), None)
+        
+        if not guild_setting: return
+
+        log_channel = self.bot.get_channel(guild_setting['log_channel_id'])
+        if not log_channel: return
+
+        try:
+            await log_channel.send(embed=embed)
+        except:
+            pass
 
     # --- EVENTS (Sticky/Log) ---
 
@@ -108,14 +134,6 @@ class Admin(commands.Cog):
         if message.author.bot or not message.guild:
             return
 
-        settings = self.get_log_settings()
-        guild_setting = next((s for s in settings if s['guild_id'] == message.guild.id), None)
-        
-        if not guild_setting: return
-
-        log_channel = self.bot.get_channel(guild_setting['log_channel_id'])
-        if not log_channel: return
-
         embed = discord.Embed(
             title="🗑️ Message Deleted",
             description=f"**Author:** {message.author.mention} ({message.author.id})\n**Channel:** {message.channel.mention}",
@@ -128,10 +146,7 @@ class Admin(commands.Cog):
         if message.attachments:
             embed.add_field(name="Attachments", value=f"{len(message.attachments)} file(s)", inline=False)
 
-        try:
-            await log_channel.send(embed=embed)
-        except:
-            pass
+        await self.log_to_channel(message.guild, embed)
 
     @commands.Cog.listener()
     async def on_message_edit(self, before, after):
@@ -143,14 +158,6 @@ class Admin(commands.Cog):
         if before.content == after.content:
             return
 
-        settings = self.get_log_settings()
-        guild_setting = next((s for s in settings if s['guild_id'] == before.guild.id), None)
-        
-        if not guild_setting: return
-
-        log_channel = self.bot.get_channel(guild_setting['log_channel_id'])
-        if not log_channel: return
-
         embed = discord.Embed(
             title="✏️ Message Edited",
             description=f"**Author:** {before.author.mention} ({before.author.id})\n**Channel:** {before.channel.mention}\n**Jump:** [Link]({before.jump_url})",
@@ -160,22 +167,11 @@ class Admin(commands.Cog):
         embed.add_field(name="Before", value=before.content[:1024] or "[No Content]", inline=False)
         embed.add_field(name="After", value=after.content[:1024] or "[No Content]", inline=False)
 
-        try:
-            await log_channel.send(embed=embed)
-        except:
-            pass
+        await self.log_to_channel(before.guild, embed)
 
     @commands.Cog.listener()
     async def on_member_remove(self, member):
         """Logs when a member leaves."""
-        settings = self.get_log_settings()
-        guild_setting = next((s for s in settings if s['guild_id'] == member.guild.id), None)
-        
-        if not guild_setting: return
-
-        log_channel = self.bot.get_channel(guild_setting['log_channel_id'])
-        if not log_channel: return
-
         embed = discord.Embed(
             title="👋 Member Left",
             description=f"{member.mention} has left the server.",
@@ -186,10 +182,7 @@ class Admin(commands.Cog):
         embed.add_field(name="User ID", value=member.id, inline=True)
         embed.add_field(name="Joined At", value=discord.utils.format_dt(member.joined_at, "R") if member.joined_at else "Unknown", inline=True)
 
-        try:
-            await log_channel.send(embed=embed)
-        except:
-            pass
+        await self.log_to_channel(member.guild, embed)
 
     async def handle_sticky(self, message):
         """Resends the sticky message to the bottom."""
@@ -257,7 +250,7 @@ class Admin(commands.Cog):
         except Exception as e:
             print(f"Failed to send sticky: {e}")
 
-    # --- COMMANDS (Sticky/Log) ---
+    # --- COMMANDS (Sticky/Log/Vote) ---
 
     @app_commands.command(name="stick", description="Stick a message to the bottom of this channel.")
     @app_commands.describe(message="The message to sticky")
@@ -385,7 +378,113 @@ class Admin(commands.Cog):
         })
         self.save_log_settings(settings)
         
-        await interaction.response.send_message(f"✅ Logging channel set to {channel.mention}.\nI will now log:\n- Message Deletions\n- Message Edits\n- Member Leaves", ephemeral=True)
+        await interaction.response.send_message(f"✅ Logging channel set to {channel.mention}.\nI will now log:\n- Message Deletions\n- Message Edits\n- Member Leaves\n- Votekick Results", ephemeral=True)
+
+    # --- VOTE KICK COMMANDS ---
+    vote_group = app_commands.Group(name="vote", description="Voting commands")
+
+    @vote_group.command(name="kick", description="Vote to kick a user")
+    @app_commands.describe(member="The member to vote kick")
+    async def vote_kick(self, interaction: discord.Interaction, member: discord.Member):
+        # 1. Check if voting role is set and if user has it
+        if self.voting_role_id is None:
+            await interaction.response.send_message("❌ The voting role has not been set yet. An admin must use `/vote role` first.", ephemeral=True)
+            return
+
+        user_role_ids = [r.id for r in interaction.user.roles]
+        if self.voting_role_id not in user_role_ids and not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ You do not have the required role to vote.", ephemeral=True)
+            return
+
+        if member == interaction.user:
+             await interaction.response.send_message("❌ You cannot vote to kick yourself.", ephemeral=True)
+             return
+             
+        if member.bot:
+             await interaction.response.send_message("❌ You cannot vote to kick a bot.", ephemeral=True)
+             return
+
+        # 2. Add vote
+        if member.id not in self.active_votes:
+            self.active_votes[member.id] = set()
+
+        if interaction.user.id in self.active_votes[member.id]:
+            await interaction.response.send_message(f"⚠️ You have already voted to kick {member.display_name}.", ephemeral=True)
+            return
+
+        self.active_votes[member.id].add(interaction.user.id)
+        current_votes = len(self.active_votes[member.id])
+        
+        # 3. Log the vote (Public Log, but ephemeral confirmation)
+        embed = discord.Embed(description=f"🗳️ **Vote Cast**\n{interaction.user.mention} voted to kick {member.mention}.\nCurrent Votes: **{current_votes}/{self.VOTE_THRESHOLD}**", color=discord.Color.yellow(), timestamp=datetime.datetime.now())
+        await self.log_to_channel(interaction.guild, embed)
+
+        # 4. Check threshold
+        if current_votes >= self.VOTE_THRESHOLD:
+            try:
+                await member.kick(reason=f"Votekicked by {current_votes} users.")
+                
+                # Success Log
+                embed = discord.Embed(description=f"✅ **VOTEKICK SUCCESS**\n{member.mention} was kicked.\nTotal Votes: {current_votes}", color=discord.Color.green(), timestamp=datetime.datetime.now())
+                await self.log_to_channel(interaction.guild, embed)
+                
+                # Notify command user (and everyone else essentially since the user is gone)
+                await interaction.response.send_message(f"✅ {member.mention} has been kicked by vote.", ephemeral=False) 
+                
+                if member.id in self.active_votes:
+                    del self.active_votes[member.id]
+            except discord.Forbidden:
+                await interaction.response.send_message("⚠️ Vote threshold reached, but I do not have permission to kick this user.", ephemeral=True)
+                
+                embed = discord.Embed(description=f"❌ **VOTEKICK FAILED**\nTried to kick {member.mention} but lacked permissions.", color=discord.Color.red(), timestamp=datetime.datetime.now())
+                await self.log_to_channel(interaction.guild, embed)
+        else:
+            # Ephemeral confirmation for anonymity
+            await interaction.response.send_message(f"✅ Vote cast! {member.display_name} has {current_votes}/{self.VOTE_THRESHOLD} votes.", ephemeral=True)
+
+    @vote_group.command(name="role", description="Set the role allowed to vote")
+    @app_commands.describe(role="The role that can use the votekick command")
+    async def vote_role(self, interaction: discord.Interaction, role: discord.Role):
+        # We need to make sure the user running this command has admin perms
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ You need Administrator permissions to set the voting role.", ephemeral=True)
+            return
+
+        self.voting_role_id = role.id
+        
+        # Log the change
+        embed = discord.Embed(description=f"**Vote Role Updated**\nNew Role: {role.mention}\nSet By: {interaction.user.mention}", color=discord.Color.blue(), timestamp=datetime.datetime.now())
+        await self.log_to_channel(interaction.guild, embed)
+
+        await interaction.response.send_message(f"✅ Voting role set to {role.mention}.", ephemeral=True)
+
+    @vote_group.command(name="remove", description="Remove an active vote against a user (Admin only)")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def vote_remove(self, interaction: discord.Interaction, member: discord.Member):
+        if member.id in self.active_votes:
+            del self.active_votes[member.id]
+            
+            embed = discord.Embed(description=f"**Vote Cancelled**\nVotes against {member.mention} were cleared by {interaction.user.mention}.", color=discord.Color.orange(), timestamp=datetime.datetime.now())
+            await self.log_to_channel(interaction.guild, embed)
+
+            await interaction.response.send_message(f"✅ Cleared all votes against {member.display_name}.", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"⚠️ There are no active votes against {member.display_name}.", ephemeral=True)
+
+    @vote_group.command(name="list", description="List active vote kicks")
+    async def vote_list(self, interaction: discord.Interaction):
+        if not self.active_votes:
+            await interaction.response.send_message("No active votes.", ephemeral=True)
+            return
+
+        description = ""
+        for target_id, voters in self.active_votes.items():
+            member = interaction.guild.get_member(target_id)
+            name = member.display_name if member else f"ID: {target_id}"
+            description += f"**{name}**: {len(voters)}/{self.VOTE_THRESHOLD} votes\n"
+
+        embed = discord.Embed(title="🗳️ Active Vote Kicks", description=description, color=discord.Color.blue())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # --- VC PING (New) ---
 
