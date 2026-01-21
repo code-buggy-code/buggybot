@@ -17,14 +17,6 @@ from ytmusicapi import YTMusic
 from spotipy import Spotify
 from spotipy.oauth2 import SpotifyClientCredentials
 
-# Try to import secrets
-sys.path.append('..')
-try:
-    from secret_bot import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
-except ImportError:
-    SPOTIFY_CLIENT_ID = None
-    SPOTIFY_CLIENT_SECRET = None
-
 # Function/Class List:
 # class Music(commands.Cog)
 # - __init__(bot)
@@ -123,13 +115,28 @@ class Music(commands.Cog):
     def load_music_services(self):
         """Loads Spotify and YouTube Music services."""
         # 1. Spotify
-        if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
+        # Load from spotify.json
+        spotify_id = None
+        spotify_secret = None
+        
+        if os.path.exists('spotify.json'):
             try:
-                sp_auth = SpotifyClientCredentials(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET)
+                with open('spotify.json', 'r') as f:
+                    secrets = json.load(f)
+                    spotify_id = secrets.get('spotify_client_id')
+                    spotify_secret = secrets.get('spotify_client_secret')
+            except Exception as e:
+                print(f"❌ Failed to load spotify.json: {e}")
+
+        if spotify_id and spotify_secret:
+            try:
+                sp_auth = SpotifyClientCredentials(client_id=spotify_id, client_secret=spotify_secret)
                 self.spotify = Spotify(auth_manager=sp_auth)
                 print("✅ Spotify Service Loaded.")
             except Exception as e:
                 print(f"❌ Failed to load Spotify: {e}")
+        else:
+             print("⚠️ Spotify credentials not found in spotify.json.")
         
         # 2. YouTube Music
         # Try to load from local file first (standard for ytmusicapi)
@@ -213,25 +220,28 @@ class Music(commands.Cog):
 
     # --- COMMANDS ---
 
-    @app_commands.command(name="checkmusic", description="Admin: Checks if YouTube API and YTM tokens are valid.")
+    @app_commands.command(name="checkmusic", description="Admin: Checks all music API statuses.")
     @app_commands.checks.has_permissions(administrator=True)
     async def checkmusic(self, interaction: discord.Interaction):
         is_valid = await self.load_youtube_service()
+        
         yt_msg = f"✅ **YouTube License Valid!**" if is_valid else "❌ **YouTube License Broken.**"
         ytm_msg = "✅ **YouTube Music Ready!**" if self.ytmusic else "❌ **YouTube Music Not Loaded.**"
+        spot_msg = "✅ **Spotify Ready!**" if self.spotify else "❌ **Spotify Not Loaded.**"
         
-        await interaction.response.send_message(f"{yt_msg}\n{ytm_msg}", ephemeral=True)
+        await interaction.response.send_message(f"{yt_msg}\n{ytm_msg}\n{spot_msg}", ephemeral=True)
 
     @app_commands.command(name="refreshmusic", description="Admin: Starts the OAuth flow to renew YouTube license.")
     @app_commands.checks.has_permissions(administrator=True)
     async def refreshmusic(self, interaction: discord.Interaction):
-        # 1. Reload YTM
+        # 1. Reload YTM and Spotify
         self.load_music_services()
         ytm_status = "✅ **YouTube Music reloaded!**" if self.ytmusic else "❌ **YouTube Music NOT found!**"
+        spot_status = "✅ **Spotify reloaded!**" if self.spotify else "❌ **Spotify NOT found!**"
 
         # 2. Start YouTube Flow
         if not os.path.exists('client_secret.json'):
-             return await interaction.response.send_message(f"{ytm_status}\n❌ Missing `client_secret.json`!", ephemeral=True)
+             return await interaction.response.send_message(f"{ytm_status}\n{spot_status}\n❌ Missing `client_secret.json`!", ephemeral=True)
         
         try:
             self.auth_flow = Flow.from_client_secrets_file(
@@ -242,7 +252,7 @@ class Music(commands.Cog):
             auth_url, _ = self.auth_flow.authorization_url(prompt='consent')
             
             await interaction.response.send_message(
-                f"{ytm_status}\n🔄 **YouTube API Renewal Started!**\n1. Click: [Auth Link]({auth_url})\n2. Type: `/entercode <code>`",
+                f"{ytm_status}\n{spot_status}\n🔄 **YouTube API Renewal Started!**\n1. Click: [Auth Link]({auth_url})\n2. Type: `/entercode <code>`",
                 ephemeral=True
             )
         except Exception as e:
