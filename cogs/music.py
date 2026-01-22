@@ -8,17 +8,17 @@ import re
 import datetime
 import sys
 
-# Music APIs
+# music APIs
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import Flow
-# REMOVED: from ytmusicapi import YTMusic
+# REMOVED: from ytmusicapi import YTmusic
 from spotipy import Spotify
 from spotipy.oauth2 import SpotifyClientCredentials
 
 # Function/Class List:
-# class Music(commands.Cog)
+# class music(commands.Cog)
 # - __init__(bot)
 # - cog_unload()
 # - load_config()
@@ -218,7 +218,7 @@ class music(commands.Cog):
         """Daily check for token validity."""
         valid = await self.load_youtube_service()
         status = "Valid" if valid else "Expired/Broken"
-        print(f"[Music] Daily Token Check: {status}")
+        print(f"[music] Daily Token Check: {status}")
 
     @check_token_validity_task.before_loop
     async def before_check_token(self):
@@ -291,7 +291,7 @@ class music(commands.Cog):
     async def setmusicchannel(self, interaction: discord.Interaction, channel: discord.TextChannel):
         self.config['music_channel_id'] = channel.id
         self.save_config()
-        await interaction.response.send_message(f"✅ Music channel set to {channel.mention}.", ephemeral=True)
+        await interaction.response.send_message(f"✅ music channel set to {channel.mention}.", ephemeral=True)
 
     # --- LISTENER ---
 
@@ -334,4 +334,4 @@ class music(commands.Cog):
                         await message.channel.send(f"⚠️ **Error:** YouTube link failed.\n`{e}`", delete_after=10)
 
 async def setup(bot):
-    await bot.add_cog(Music(bot))
+    await bot.add_cog(music(bot))
