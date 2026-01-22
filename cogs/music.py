@@ -334,33 +334,5 @@ class Music(commands.Cog):
                     except Exception as e:
                         await message.channel.send(f"⚠️ **Error:** YouTube link failed.\n`{e}`", delete_after=10)
 
-            # 3. Plain Text Search (Official API Fallback)
-            elif self.youtube and message.content.strip():
-                search_query = message.content
-                try:
-                    # Search using official API
-                    video_id = await self.search_youtube_official(search_query)
-                    
-                    if video_id:
-                        # Add to Playlist
-                        loop = asyncio.get_running_loop()
-                        req = self.youtube.playlistItems().insert(
-                            part="snippet",
-                            body={
-                                "snippet": {
-                                    "playlistId": self.config['playlist_id'],
-                                    "resourceId": {"kind": "youtube#video", "videoId": video_id}
-                                }
-                            }
-                        )
-                        await loop.run_in_executor(None, req.execute)
-                        
-                        await message.add_reaction("🔎")
-                        await message.add_reaction("🎵")
-                    else:
-                        await message.channel.send(f"⚠️ **Error:** No song found for `{search_query}`", delete_after=10)
-                except Exception as e:
-                    await message.channel.send(f"⚠️ **Search Error:** {e}", delete_after=10)
-
 async def setup(bot):
     await bot.add_cog(Music(bot))
