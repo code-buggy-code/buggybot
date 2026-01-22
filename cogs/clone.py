@@ -25,10 +25,9 @@ import re
 # - clone_list(interaction)
 # setup(bot)
 
-class Clone(commands.Cog):
+class clone(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.description = "Channel mirroring and cloning system."
 
     # --- HELPERS ---
     def get_clone_setups(self):
