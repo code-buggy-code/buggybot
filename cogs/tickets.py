@@ -24,7 +24,6 @@ import asyncio
 class Tickets(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.description = "Ticket management system triggered by roles."
 
     # --- HELPERS ---
     def get_setup(self, role_id):
