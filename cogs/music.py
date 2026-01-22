@@ -36,10 +36,9 @@ from spotipy.oauth2 import SpotifyClientCredentials
 # - on_message(message)
 # setup(bot)
 
-class Music(commands.Cog):
+class music(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.description = "Music management: Spotify to YouTube sync."
         
         self.youtube = None
         self.spotify = None
