@@ -288,12 +288,14 @@ class Music(commands.Cog):
                 # Default to the one you were using in your logs
                 user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0"
 
-            # 2. Direct inputs, minimal stripping (just outer whitespace)
-            ua_clean = user_agent.strip()
-            # Strip quotes just in case the user included them in the copy-paste
-            cookie_clean = cookie.strip().strip('"').strip("'")
+            # 2. Direct inputs
+            # We MUST remove newlines/returns from headers to ensure valid HTTP requests.
+            # This is the "cleaning" that is absolutely necessary for it to work.
+            ua_clean = user_agent.replace("\n", "").strip()
+            # Strip quotes and newlines just in case
+            cookie_clean = cookie.replace("\n", "").replace("\r", "").strip().strip('"').strip("'")
 
-            # 3. Construct dict - Simplified to bare minimum to prevent detection errors
+            # 3. Construct dict
             header_dict = {
                 "User-Agent": ua_clean,
                 "Accept": "*/*",
@@ -301,21 +303,25 @@ class Music(commands.Cog):
                 "Cookie": cookie_clean
             }
 
-            # 4. Write to file (for persistence only)
-            with open('browser.json', 'w', encoding='utf-8') as f:
-                json.dump(header_dict, f, indent=4)
-            
-            # 5. Load DIRECTLY from dict (Bypasses file reading issues)
+            # 4. DIRECT INITIALIZATION (Skips file reading ambiguity)
+            # This feeds the dictionary directly to the API in memory.
             try:
                 self.ytmusic = YTMusic(auth=header_dict)
-                msg = f"✅ **Success!** YTM Loaded from inputs!"
+                
+                # If we get here without error, it worked! 
+                # NOW we save it to the file so it loads next time you restart.
+                with open('browser.json', 'w', encoding='utf-8') as f:
+                    json.dump(header_dict, f, indent=4)
+                    
+                msg = f"✅ **Success!** YTM initialized directly and config saved!"
+                
             except Exception as e:
                 self.ytmusic = None
-                # Show first 50 chars and last 50 chars
+                # Show first 50 chars and last 50 chars for debug
                 preview_start = cookie_clean[:50]
                 preview_end = cookie_clean[-50:]
-                msg = (f"⚠️ **Failed to Initialize:** `{e}`\n\n"
-                       f"🔍 **Cookie Preview (Starts/Ends):**\n"
+                msg = (f"⚠️ **Failed to Initialize (Direct):** `{e}`\n\n"
+                       f"🔍 **Cookie Preview:**\n"
                        f"`{preview_start} ... {preview_end}`")
 
             await interaction.followup.send(msg, ephemeral=True)
