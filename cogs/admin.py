@@ -21,6 +21,8 @@ import re
 # - save_log_settings(settings)
 # - get_dm_settings(guild_id)
 # - save_dm_settings(guild_id, data)
+# - get_vote_data(guild_id)
+# - save_vote_data(guild_id, data)
 # - dm_message_index_autocomplete(interaction, current)
 # - log_to_channel(guild, embed)
 # - on_message(message)
@@ -71,9 +73,7 @@ class Admin(commands.Cog):
         self.vc_state = {}
         self.check_vcs.start()
 
-        # Vote Kick Config
-        self.voting_role_id = None
-        self.active_votes = {} # {target_id: set(voter_id)}
+        # Vote Kick Constants
         self.VOTE_THRESHOLD = 3 
 
         # DM Request Defaults
@@ -154,6 +154,29 @@ class Admin(commands.Cog):
         collection = [d for d in collection if d['guild_id'] != guild_id]
         collection.append(data)
         self.bot.db.save_collection("dm_settings", collection)
+
+    def get_vote_data(self, guild_id):
+        """Fetches voting configuration and active votes for a guild."""
+        collection = self.bot.db.get_collection("vote_data")
+        for doc in collection:
+            if doc['guild_id'] == guild_id:
+                # Ensure structure
+                if 'active_votes' not in doc: doc['active_votes'] = {} # {target_id_str: [voters_list]}
+                if 'voting_role_id' not in doc: doc['voting_role_id'] = None
+                return doc
+        
+        return {
+            "guild_id": guild_id,
+            "voting_role_id": None,
+            "active_votes": {}
+        }
+
+    def save_vote_data(self, guild_id, data):
+        """Saves vote data for a guild."""
+        collection = self.bot.db.get_collection("vote_data")
+        collection = [d for d in collection if d['guild_id'] != guild_id]
+        collection.append(data)
+        self.bot.db.save_collection("vote_data", collection)
 
     async def dm_message_index_autocomplete(self, interaction: discord.Interaction, current: str):
         indices = ["0", "1", "2", "3", "4", "5"]
@@ -612,22 +635,33 @@ class Admin(commands.Cog):
     @app_commands.command(name="vote", description="Vote to kick a user", extras={'public': True})
     @app_commands.describe(member="The member to vote kick")
     async def vote(self, interaction: discord.Interaction, member: discord.Member):
-        if self.voting_role_id is None:
+        data = self.get_vote_data(interaction.guild.id)
+        voting_role_id = data['voting_role_id']
+        active_votes = data['active_votes'] # {target_id_str: [list of voters]}
+
+        if voting_role_id is None:
             return await interaction.response.send_message("❌ The voting role has not been set yet. An admin must use `/vote-role` first.", ephemeral=True)
 
         user_role_ids = [r.id for r in interaction.user.roles]
-        if self.voting_role_id not in user_role_ids and not interaction.user.guild_permissions.administrator:
+        if voting_role_id not in user_role_ids and not interaction.user.guild_permissions.administrator:
             return await interaction.response.send_message("❌ You do not have the required role to vote.", ephemeral=True)
 
         if member == interaction.user: return await interaction.response.send_message("❌ You cannot vote to kick yourself.", ephemeral=True)
         if member.bot: return await interaction.response.send_message("❌ You cannot vote to kick a bot.", ephemeral=True)
 
-        if member.id not in self.active_votes: self.active_votes[member.id] = set()
-        if interaction.user.id in self.active_votes[member.id]:
+        target_id_str = str(member.id)
+        
+        if target_id_str not in active_votes: 
+            active_votes[target_id_str] = []
+        
+        if interaction.user.id in active_votes[target_id_str]:
             return await interaction.response.send_message(f"⚠️ You have already voted to kick {member.display_name}.", ephemeral=True)
 
-        self.active_votes[member.id].add(interaction.user.id)
-        current_votes = len(self.active_votes[member.id])
+        active_votes[target_id_str].append(interaction.user.id)
+        data['active_votes'] = active_votes
+        self.save_vote_data(interaction.guild.id, data)
+        
+        current_votes = len(active_votes[target_id_str])
         
         embed = discord.Embed(description=f"🗳️ **Vote Cast**\n{interaction.user.mention} voted to kick {member.mention}.\nCurrent Votes: **{current_votes}/{self.VOTE_THRESHOLD}**", color=discord.Color.yellow(), timestamp=datetime.datetime.now())
         await self.log_to_channel(interaction.guild, embed)
@@ -638,7 +672,12 @@ class Admin(commands.Cog):
                 embed = discord.Embed(description=f"✅ **VOTEKICK SUCCESS**\n{member.mention} was kicked.\nTotal Votes: {current_votes}", color=discord.Color.green(), timestamp=datetime.datetime.now())
                 await self.log_to_channel(interaction.guild, embed)
                 await interaction.response.send_message(f"✅ {member.mention} has been kicked by vote.", ephemeral=False) 
-                if member.id in self.active_votes: del self.active_votes[member.id]
+                
+                # Cleanup and Save
+                if target_id_str in active_votes: del active_votes[target_id_str]
+                data['active_votes'] = active_votes
+                self.save_vote_data(interaction.guild.id, data)
+
             except discord.Forbidden:
                 await interaction.response.send_message("⚠️ Vote threshold reached, but I do not have permission to kick this user.", ephemeral=True)
                 embed = discord.Embed(description=f"❌ **VOTEKICK FAILED**\nTried to kick {member.mention} but lacked permissions.", color=discord.Color.red(), timestamp=datetime.datetime.now())
@@ -652,7 +691,10 @@ class Admin(commands.Cog):
         if not interaction.user.guild_permissions.administrator:
             return await interaction.response.send_message("❌ You need administrator permissions to set the voting role.", ephemeral=True)
 
-        self.voting_role_id = role.id
+        data = self.get_vote_data(interaction.guild.id)
+        data['voting_role_id'] = role.id
+        self.save_vote_data(interaction.guild.id, data)
+
         embed = discord.Embed(description=f"**Vote Role Updated**\nNew Role: {role.mention}\nSet By: {interaction.user.mention}", color=discord.Color.blue(), timestamp=datetime.datetime.now())
         await self.log_to_channel(interaction.guild, embed)
         await interaction.response.send_message(f"✅ Voting role set to {role.mention}.", ephemeral=True)
@@ -660,8 +702,13 @@ class Admin(commands.Cog):
     @app_commands.command(name="vote-remove", description="Remove an active vote against a user (buggy only)")
     @app_commands.checks.has_permissions(administrator=True)
     async def vote_remove(self, interaction: discord.Interaction, member: discord.Member):
-        if member.id in self.active_votes:
-            del self.active_votes[member.id]
+        data = self.get_vote_data(interaction.guild.id)
+        target_id_str = str(member.id)
+        
+        if target_id_str in data['active_votes']:
+            del data['active_votes'][target_id_str]
+            self.save_vote_data(interaction.guild.id, data)
+            
             embed = discord.Embed(description=f"**Vote Cancelled**\nVotes against {member.mention} were cleared by {interaction.user.mention}.", color=discord.Color.orange(), timestamp=datetime.datetime.now())
             await self.log_to_channel(interaction.guild, embed)
             await interaction.response.send_message(f"✅ Cleared all votes against {member.display_name}.", ephemeral=True)
@@ -670,10 +717,17 @@ class Admin(commands.Cog):
 
     @app_commands.command(name="vote-list", description="List active vote kicks")
     async def vote_list(self, interaction: discord.Interaction):
-        if not self.active_votes: return await interaction.response.send_message("No active votes.", ephemeral=True)
+        data = self.get_vote_data(interaction.guild.id)
+        active_votes = data.get('active_votes', {})
+
+        if not active_votes: 
+            return await interaction.response.send_message("No active votes.", ephemeral=True)
 
         description = ""
-        for target_id, voters in self.active_votes.items():
+        for target_id_str, voters in active_votes.items():
+            try: target_id = int(target_id_str)
+            except: continue
+            
             member = interaction.guild.get_member(target_id)
             name = member.display_name if member else f"ID: {target_id}"
             description += f"**{name}**: {len(voters)}/{self.VOTE_THRESHOLD} votes\n"
