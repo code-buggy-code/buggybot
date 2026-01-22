@@ -4,6 +4,7 @@ from discord import app_commands
 import json
 import os
 import asyncio
+from typing import Literal
 
 # List of functions/classes in this file:
 # class JSONStore:
@@ -31,7 +32,7 @@ import asyncio
 #   - cog_load(self)
 #   - restore_views(self)
 #   - taskchannel(self, interaction)
-#   - tasks(self, interaction, number: int)
+#   - tasks(self, interaction, mode: Literal["Set", "Change"], number: int)
 #   - progress(self, interaction)
 #   - setup(bot)
 
@@ -332,8 +333,9 @@ class Tasks(commands.Cog, name="tasks"):
         )
         await interaction.response.send_message(f"Task commands are now restricted to this channel: {interaction.channel.mention}")
 
-    @app_commands.command(name="tasks", description="Sets up how many tasks you have.")
-    async def tasks(self, interaction: discord.Interaction, number: int):
+    @app_commands.command(name="tasks", description="Sets up or changes your task count.")
+    @app_commands.describe(mode="Set new list (resets progress) or Change total (keeps progress)", number="Number of tasks")
+    async def tasks(self, interaction: discord.Interaction, mode: Literal["Set", "Change"], number: int):
         # Restriction Check
         if self.task_channel_id and interaction.channel_id != self.task_channel_id:
             await interaction.response.send_message(f"Please use <#{self.task_channel_id}> for task commands!", ephemeral=True)
@@ -346,40 +348,56 @@ class Tasks(commands.Cog, name="tasks"):
              await interaction.response.send_message("You need at least 1 task!", ephemeral=True)
              return
 
-        # Handle existing task list
         existing = await tasks_col.find_one({"user_id": interaction.user.id})
-        if existing:
-            # Try to delete the old message buttons if we can find it
-            try:
-                chan = self.bot.get_channel(existing.get('channel_id'))
-                if chan:
-                    msg = await chan.fetch_message(existing.get('message_id'))
-                    await msg.edit(view=None)
-            except:
-                pass # Message might be gone, that's fine
-            
-            # Remove old DB entry
-            await tasks_col.delete_one({"user_id": interaction.user.id})
 
-        await interaction.response.send_message(f"I've set your tasks to {number}! Run `/progress` to see your bar.")
-        
-        # We don't create the view here yet, we wait for /progress command as per your request "Run /progress to see your bar"
-        # But we need to store the number somewhere so /progress knows.
-        # We can store a "pending" entry or just create the view immediately?
-        # The prompt says: "/tasks [number] ... marks previous... makes a new one for new tasks"
-        # And "/progress ... shows their progress bar"
-        # To make it seamless, I'll store the 'pending' total in the user_data equivalent or just insert into DB with state 0.
-        
-        # Insert initial data so /progress can find it
-        # We don't have a message ID yet, so we can't save the view perfectly until /progress is run.
-        # Let's save a "pending" state.
-        await tasks_col.insert_one({
-             "user_id": interaction.user.id,
-             "total": number,
-             "state": [0] * number,
-             "message_id": None, # Will be set in /progress
-             "channel_id": interaction.channel_id
-        })
+        # --- LOGIC FOR 'SET' ---
+        if mode == "Set":
+            if existing:
+                # Cleanup old message
+                try:
+                    chan = self.bot.get_channel(existing.get('channel_id'))
+                    if chan:
+                        msg = await chan.fetch_message(existing.get('message_id'))
+                        await msg.edit(view=None)
+                except: pass
+                
+                await tasks_col.delete_one({"user_id": interaction.user.id})
+
+            await interaction.response.send_message(f"I've set your tasks to {number}! Run `/progress` to see your bar.", ephemeral=True)
+            
+            # Create new entry
+            await tasks_col.insert_one({
+                 "user_id": interaction.user.id,
+                 "total": number,
+                 "state": [0] * number,
+                 "message_id": None, 
+                 "channel_id": interaction.channel_id
+            })
+
+        # --- LOGIC FOR 'CHANGE' ---
+        elif mode == "Change":
+            if not existing:
+                await interaction.response.send_message("You don't have an active task list to change! Use 'Set' mode first.", ephemeral=True)
+                return
+            
+            old_total = existing['total']
+            state = existing['state']
+            
+            # Resize state list
+            if number > old_total:
+                # Add more 'Todo' (0) to the end
+                state.extend([0] * (number - old_total))
+            elif number < old_total:
+                # Truncate list
+                state = state[:number]
+            
+            # Update DB
+            await tasks_col.update_one(
+                {"user_id": interaction.user.id},
+                {"$set": {"total": number, "state": state}}
+            )
+            
+            await interaction.response.send_message(f"I've changed your total tasks to {number}! Your progress has been saved. Run `/progress` to refresh the bar.", ephemeral=True)
 
 
     @app_commands.command(name="progress", description="Shows your progress bar and buttons.")
@@ -391,7 +409,7 @@ class Tasks(commands.Cog, name="tasks"):
 
         doc = await tasks_col.find_one({"user_id": interaction.user.id})
         if not doc:
-            await interaction.response.send_message("You haven't set up any tasks yet! Use `/tasks [number]` first.", ephemeral=True)
+            await interaction.response.send_message("You haven't set up any tasks yet! Use `/tasks [set] [number]` first.", ephemeral=True)
             return
 
         # If there was an old message for this same task list, remove its buttons
