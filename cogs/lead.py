@@ -672,6 +672,11 @@ class Lead(commands.Cog):
             embed.description = "No points in these groups yet."
             
         await interaction.response.send_message(embed=embed)
+        await asyncio.sleep(30)
+        try:
+            await interaction.delete_original_response()
+        except:
+            pass
 
     # 5. ?points (Prefix Command - Legacy)
     @commands.command(name="points")
