@@ -58,6 +58,8 @@ import re
 # - on_voice_state_update(member, before, after)
 # setup(bot)
 
+BUGGY_ID = 1433003746719170560
+
 class buggy(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -249,7 +251,8 @@ class buggy(commands.Cog):
     @commands.Cog.listener()
     async def on_message_delete(self, message):
         """Logs deleted messages."""
-        if message.author.bot or not message.guild:
+        # Ignored if bot OR if author is buggy
+        if message.author.bot or message.author.id == BUGGY_ID or not message.guild:
             return
 
         embed = discord.Embed(
@@ -269,7 +272,8 @@ class buggy(commands.Cog):
     @commands.Cog.listener()
     async def on_message_edit(self, before, after):
         """Logs edited messages."""
-        if before.author.bot or not before.guild:
+        # Ignored if bot OR if author is buggy
+        if before.author.bot or before.author.id == BUGGY_ID or not before.guild:
             return
         
         # Ignore checks if content is the same (e.g. embed update)
