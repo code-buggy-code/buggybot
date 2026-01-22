@@ -142,21 +142,9 @@ class Music(commands.Cog):
         # Try to load from local file first (standard for ytmusicapi)
         if os.path.exists('browser.json'):
             try:
-                # CRITICAL FIX: Read the file content FIRST.
-                # If we pass the filename string, the library assumes file path and tries to guess format (often failing).
-                # If we pass the dict directly via 'auth', it accepts it as headers.
-                with open('browser.json', 'r', encoding='utf-8') as f:
-                    file_content = json.load(f)
-                
-                # Check if it looks like headers or oauth
-                if "Cookie" in file_content or "cookie" in file_content:
-                    self.ytmusic = YTMusic(auth=file_content)
-                    print("✅ YouTube Music Service Loaded (Headers Mode).")
-                else:
-                    # Fallback for oauth files
-                    self.ytmusic = YTMusic('browser.json')
-                    print("✅ YouTube Music Service Loaded (File Mode).")
-
+                # Use standard file loading now that we ensure the file is clean
+                self.ytmusic = YTMusic('browser.json')
+                print("✅ YouTube Music Service Loaded.")
             except Exception as e:
                 print(f"❌ Failed to load YouTube Music: {e}")
                 self.ytmusic = None
@@ -298,42 +286,41 @@ class Music(commands.Cog):
         try:
             # 1. Handle Defaults
             if user_agent is None:
-                # Default to the one you were using in your logs
                 user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0"
 
-            # 2. Direct inputs
-            ua_clean = user_agent.replace("\n", "").strip()
-            # Strip quotes and newlines just in case
-            cookie_clean = cookie.replace("\n", "").replace("\r", "").strip().strip('"').strip("'")
+            # 2. SMART Cleaning
+            # Remove "Cookie:" or "User-Agent:" prefixes (case insensitive) if you pasted the whole line
+            # This is the "magic" step to fix the malformed input issue
+            ua_clean = re.sub(r'(?i)^user-agent:\s*', '', user_agent).replace("\n", "").strip()
+            cookie_clean = re.sub(r'(?i)^cookie:\s*', '', cookie).replace("\n", "").replace("\r", "").strip().strip('"').strip("'")
 
             # 3. Construct dict
-            # IMPORTANT: We only include what is necessary.
+            # Standard headers for ytmusicapi
             header_dict = {
                 "User-Agent": ua_clean,
                 "Accept": "*/*",
                 "Accept-Language": "en-US,en;q=0.9",
+                "Content-Type": "application/json",
                 "Cookie": cookie_clean,
-                "X-Goog-AuthUser": "0" # Often helps context
+                "X-Goog-AuthUser": "0",
+                "x-origin": "https://music.youtube.com"
             }
 
-            # 4. DIRECT INITIALIZATION
-            # We initialize purely from the dict. This prevents the "oauth file" guess logic.
+            # 4. Save to file
+            with open('browser.json', 'w', encoding='utf-8') as f:
+                json.dump(header_dict, f, indent=4)
+            
+            # 5. Initialize from File (Standard Method)
             try:
-                self.ytmusic = YTMusic(auth=header_dict)
-                
-                # If we get here, it worked. SAVE IT.
-                with open('browser.json', 'w', encoding='utf-8') as f:
-                    json.dump(header_dict, f, indent=4)
-                    
-                msg = f"✅ **Success!** YTM initialized directly and config saved!"
-                
+                self.ytmusic = YTMusic('browser.json')
+                msg = f"✅ **Success!** YTM initialized from `browser.json`!"
             except Exception as e:
                 self.ytmusic = None
                 # Show debug info
                 preview_start = cookie_clean[:50]
                 preview_end = cookie_clean[-50:]
-                msg = (f"⚠️ **Failed to Initialize (Direct):** `{e}`\n\n"
-                       f"🔍 **Cookie Preview:**\n"
+                msg = (f"⚠️ **Failed to Initialize:** `{e}`\n\n"
+                       f"🔍 **Cookie Input (Cleaned):**\n"
                        f"`{preview_start} ... {preview_end}`")
 
             await interaction.followup.send(msg, ephemeral=True)
