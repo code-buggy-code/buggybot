@@ -142,8 +142,21 @@ class Music(commands.Cog):
         # Try to load from local file first (standard for ytmusicapi)
         if os.path.exists('browser.json'):
             try:
-                self.ytmusic = YTMusic('browser.json')
-                print("✅ YouTube Music Service Loaded.")
+                # CRITICAL FIX: Read the file content FIRST.
+                # If we pass the filename string, the library assumes file path and tries to guess format (often failing).
+                # If we pass the dict directly via 'auth', it accepts it as headers.
+                with open('browser.json', 'r', encoding='utf-8') as f:
+                    file_content = json.load(f)
+                
+                # Check if it looks like headers or oauth
+                if "Cookie" in file_content or "cookie" in file_content:
+                    self.ytmusic = YTMusic(auth=file_content)
+                    print("✅ YouTube Music Service Loaded (Headers Mode).")
+                else:
+                    # Fallback for oauth files
+                    self.ytmusic = YTMusic('browser.json')
+                    print("✅ YouTube Music Service Loaded (File Mode).")
+
             except Exception as e:
                 print(f"❌ Failed to load YouTube Music: {e}")
                 self.ytmusic = None
@@ -289,27 +302,26 @@ class Music(commands.Cog):
                 user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0"
 
             # 2. Direct inputs
-            # We MUST remove newlines/returns from headers to ensure valid HTTP requests.
-            # This is the "cleaning" that is absolutely necessary for it to work.
             ua_clean = user_agent.replace("\n", "").strip()
             # Strip quotes and newlines just in case
             cookie_clean = cookie.replace("\n", "").replace("\r", "").strip().strip('"').strip("'")
 
             # 3. Construct dict
+            # IMPORTANT: We only include what is necessary.
             header_dict = {
                 "User-Agent": ua_clean,
                 "Accept": "*/*",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Cookie": cookie_clean
+                "Cookie": cookie_clean,
+                "X-Goog-AuthUser": "0" # Often helps context
             }
 
-            # 4. DIRECT INITIALIZATION (Skips file reading ambiguity)
-            # This feeds the dictionary directly to the API in memory.
+            # 4. DIRECT INITIALIZATION
+            # We initialize purely from the dict. This prevents the "oauth file" guess logic.
             try:
                 self.ytmusic = YTMusic(auth=header_dict)
                 
-                # If we get here without error, it worked! 
-                # NOW we save it to the file so it loads next time you restart.
+                # If we get here, it worked. SAVE IT.
                 with open('browser.json', 'w', encoding='utf-8') as f:
                     json.dump(header_dict, f, indent=4)
                     
@@ -317,7 +329,7 @@ class Music(commands.Cog):
                 
             except Exception as e:
                 self.ytmusic = None
-                # Show first 50 chars and last 50 chars for debug
+                # Show debug info
                 preview_start = cookie_clean[:50]
                 preview_end = cookie_clean[-50:]
                 msg = (f"⚠️ **Failed to Initialize (Direct):** `{e}`\n\n"
