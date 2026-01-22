@@ -8,43 +8,9 @@ from datetime import datetime, timezone
 import asyncio
 from typing import Literal, Optional, Union
 
-# Function/Class List:
-# class DatabaseHandler
-# - __init__(db_name="leaderboardDB")
-# - _load_from_file()
-# - _save_to_file()
-# - get_guild_config(guild_id)
-# - save_guild_config(guild_id, config)
-# - update_user_points(guild_id, group_key, user_id, points)
-# - get_group_points(guild_id, group_key)
-# - get_user_points(guild_id, user_id)
-# - clear_points_by_group(guild_id, group_key)
-# class Leaderboard(commands.Cog)
-# - __init__(bot)
-# - cog_unload()
-# - get_config(guild_id)
-# - get_tracked_groups(channel, config)
-# - add_points_to_cache(user_id, guild_id, group_key, points)
-# - create_leaderboard_embed(guild, group_key, group_data)
-# - on_message(message)
-# - on_reaction_add(reaction, user)
-# - on_voice_state_update(member, before, after)
-# - voice_time_checker()
-# - point_saver()
-# - lead_add(interaction, name)
-# - lead_edit(interaction, group_num, name)
-# - lead_track(interaction, group_num, target)
-# - lead_untrack(interaction, group_num, target)
-# - lead_remove(interaction, group_num)
-# - lead_clear(interaction, group_num)
-# - show_leaderboard(interaction, group_num)
-# - award_points(interaction, user, amount)
-# - check_points(ctx, member)
-# setup(bot)
-
 # --- DATABASE HANDLER ---
 class DatabaseHandler:
-    def __init__(self, db_name="leaderboardDB"):
+    def __init__(self, db_name="LeaderboardDB"):
         self.file_path = "leaderbug_database.json"
         self.data = self._load_from_file()
 
@@ -142,11 +108,10 @@ class DatabaseHandler:
         return initial_count - len(new_collection)
 
 # --- LEAD COG ---
-class Leaderboard(commands.Cog):
+class Lead(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.db = DatabaseHandler()
-        self.description = "leaderboards and point tracking"
         
         # Default Point Values (Global defaults, can be made per-server later if needed)
         self.POINT_VALUES = {
@@ -223,7 +188,7 @@ class Leaderboard(commands.Cog):
         else:
             top_users = cache_entry['top_users']
 
-        embed = discord.Embed(title=f"🏆 {group_name} leaderboard", color=discord.Color.gold())
+        embed = discord.Embed(title=f"🏆 {group_name} Leaderboard", color=discord.Color.gold())
         
         desc = ""
         if not top_users:
@@ -351,7 +316,7 @@ class Leaderboard(commands.Cog):
                         await self.db.update_user_points(guild_id, group_key, user_id, points)
             self.point_cache = {}
 
-        # 2. Update leaderboards & Perm Messages
+        # 2. Update Leaderboards & Perm Messages
         # Iterate over all guilds in cache
         for guild_id in list(self.guild_configs.keys()):
             config = self.guild_configs[guild_id]
@@ -386,8 +351,8 @@ class Leaderboard(commands.Cog):
 
     # --- COMMANDS ---
     
-    # 1. /leaderboard GROUP command
-    lead_group = app_commands.Group(name="leaderboard", description="Manage leaderboard groups")
+    # 1. /lead GROUP command
+    lead_group = app_commands.Group(name="lead", description="Manage leaderboard groups")
 
     @lead_group.command(name="add", description="Create a new leaderboard group")
     @app_commands.describe(name="Name of the new group")
@@ -577,4 +542,4 @@ class Leaderboard(commands.Cog):
         await ctx.send(embed=embed)
 
 async def setup(bot):
-    await bot.add_cog(Leaderboard(bot))
+    await bot.add_cog(Lead(bot))
