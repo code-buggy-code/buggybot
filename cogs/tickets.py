@@ -21,7 +21,7 @@ import asyncio
 # - on_raw_reaction_add(payload)
 # setup(bot)
 
-class Tickets(commands.Cog):
+class tickets(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
