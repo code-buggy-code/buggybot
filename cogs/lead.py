@@ -19,7 +19,7 @@ from typing import Literal, Optional, Union
 # - get_group_points(guild_id, group_key)
 # - get_user_points(guild_id, user_id)
 # - clear_points_by_group(guild_id, group_key)
-# class Lead(commands.Cog)
+# class Leaderboard(commands.Cog)
 # - __init__(bot)
 # - cog_unload()
 # - get_config(guild_id)
@@ -142,7 +142,7 @@ class DatabaseHandler:
         return initial_count - len(new_collection)
 
 # --- LEAD COG ---
-class Lead(commands.Cog):
+class Leaderboard(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.db = DatabaseHandler()
@@ -577,4 +577,4 @@ class Lead(commands.Cog):
         await ctx.send(embed=embed)
 
 async def setup(bot):
-    await bot.add_cog(Lead(bot))
+    await bot.add_cog(Leaderboard(bot))
