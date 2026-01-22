@@ -30,7 +30,6 @@ from zoneinfo import ZoneInfo
 class Purge(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.description = "Advanced message purging and scheduling system."
         self.timezone = ZoneInfo("America/New_York")
         self.purge_scheduler.start()
 
