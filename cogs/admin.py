@@ -8,7 +8,7 @@ import os
 import re
 
 # Function/Class List:
-# class Admin(commands.Cog)
+# class admin(commands.Cog)
 # - __init__(bot)
 # - load_config()
 # - save_config()
@@ -60,7 +60,7 @@ import re
 
 BUGGY_ID = 1433003746719170560
 
-class Admin(commands.Cog):
+class admin(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.description = "logging, dm requests, stickies, vc pings, and kick voting"
@@ -370,7 +370,7 @@ class Admin(commands.Cog):
         if message.channel.id not in settings['channels']:
             return
 
-        # Check for Admin Privileges (Bypass deletion)
+        # Check for admin Privileges (Bypass deletion)
         is_admin = message.author.guild_permissions.administrator
 
         # 1. STRICT PARSING
@@ -650,7 +650,7 @@ class Admin(commands.Cog):
     @app_commands.describe(role="The role that can use the votekick command")
     async def vote_role(self, interaction: discord.Interaction, role: discord.Role):
         if not interaction.user.guild_permissions.administrator:
-            return await interaction.response.send_message("❌ You need Administrator permissions to set the voting role.", ephemeral=True)
+            return await interaction.response.send_message("❌ You need administrator permissions to set the voting role.", ephemeral=True)
 
         self.voting_role_id = role.id
         embed = discord.Embed(description=f"**Vote Role Updated**\nNew Role: {role.mention}\nSet By: {interaction.user.mention}", color=discord.Color.blue(), timestamp=datetime.datetime.now())
@@ -799,4 +799,4 @@ class Admin(commands.Cog):
         if after.channel and (not before.channel or before.channel.id != after.channel.id): update_channel_state(after.channel)
 
 async def setup(bot):
-    await bot.add_cog(Admin(bot))
+    await bot.add_cog(admin(bot))
