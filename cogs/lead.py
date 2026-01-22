@@ -10,7 +10,7 @@ from typing import Literal, Optional, Union
 
 # --- DATABASE HANDLER ---
 class DatabaseHandler:
-    def __init__(self, db_name="LeaderboardDB"):
+    def __init__(self, db_name="leaderboardDB"):
         self.file_path = "leaderbug_database.json"
         self.data = self._load_from_file()
 
@@ -188,7 +188,7 @@ class Lead(commands.Cog):
         else:
             top_users = cache_entry['top_users']
 
-        embed = discord.Embed(title=f"🏆 {group_name} Leaderboard", color=discord.Color.gold())
+        embed = discord.Embed(title=f"🏆 {group_name} leaderboard", color=discord.Color.gold())
         
         desc = ""
         if not top_users:
@@ -316,7 +316,7 @@ class Lead(commands.Cog):
                         await self.db.update_user_points(guild_id, group_key, user_id, points)
             self.point_cache = {}
 
-        # 2. Update Leaderboards & Perm Messages
+        # 2. Update leaderboards & Perm Messages
         # Iterate over all guilds in cache
         for guild_id in list(self.guild_configs.keys()):
             config = self.guild_configs[guild_id]
@@ -351,8 +351,8 @@ class Lead(commands.Cog):
 
     # --- COMMANDS ---
     
-    # 1. /lead GROUP command
-    lead_group = app_commands.Group(name="lead", description="Manage leaderboard groups")
+    # 1. /leaderboard GROUP command
+    lead_group = app_commands.Group(name="leaderboard", description="Manage leaderboard groups")
 
     @lead_group.command(name="add", description="Create a new leaderboard group")
     @app_commands.describe(name="Name of the new group")
