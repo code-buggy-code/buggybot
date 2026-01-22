@@ -18,7 +18,7 @@ from spotipy import Spotify
 from spotipy.oauth2 import SpotifyClientCredentials
 
 # Function/Class List:
-# class music(commands.Cog)
+# class Music(commands.Cog)
 # - __init__(bot)
 # - cog_unload()
 # - load_config()
@@ -36,7 +36,7 @@ from spotipy.oauth2 import SpotifyClientCredentials
 # - on_message(message)
 # setup(bot)
 
-class music(commands.Cog):
+class Music(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         
@@ -334,4 +334,4 @@ class music(commands.Cog):
                         await message.channel.send(f"⚠️ **Error:** YouTube link failed.\n`{e}`", delete_after=10)
 
 async def setup(bot):
-    await bot.add_cog(music(bot))
+    await bot.add_cog(Music(bot))
