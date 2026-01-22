@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
+from discord import app_commands
 from discord.ui import View, Button
-import math
 
 # List of functions/classes in this file:
 # class TaskView(View):
@@ -16,9 +16,9 @@ import math
 #   - complete(self, interaction, button)
 # class Tasks(commands.Cog, name="tasks"):
 #   - __init__(self, bot)
-#   - taskchannel(self, ctx)
-#   - tasks(self, ctx, number: int)
-#   - progress(self, ctx)
+#   - taskchannel(self, interaction)
+#   - tasks(self, interaction, number: int)
+#   - progress(self, interaction)
 #   - setup(bot)
 
 class TaskView(View):
@@ -113,37 +113,37 @@ class TaskView(View):
         await interaction.response.edit_message(embed=embed, view=self)
 
 class Tasks(commands.Cog, name="tasks"):
-    """ """ 
-    # Empty docstring ensures no description in help command
-
+    """ """
     def __init__(self, bot):
         self.bot = bot
         # Structure: {user_id: {'total': int, 'current': int, 'last_msg': (channel_id, message_id)}}
         self.user_data = {}
         self.task_channel_id = None
 
-    @commands.command(name="taskchannel")
-    @commands.is_owner()
-    async def taskchannel(self, ctx):
-        """Sets the current channel as the only channel for task commands."""
-        self.task_channel_id = ctx.channel.id
-        await ctx.send(f"Task commands are now restricted to this channel: {ctx.channel.mention}")
+    @app_commands.command(name="taskchannel", description="Sets the current channel as the only channel for task commands (Owner Only).")
+    async def taskchannel(self, interaction: discord.Interaction):
+        # Check if user is owner
+        if not await self.bot.is_owner(interaction.user):
+            await interaction.response.send_message("Only my owner can use this command!", ephemeral=True)
+            return
 
-    @commands.command(name="tasks")
-    async def tasks(self, ctx, number: int):
-        """Sets up how many tasks you have."""
+        self.task_channel_id = interaction.channel_id
+        await interaction.response.send_message(f"Task commands are now restricted to this channel: {interaction.channel.mention}")
+
+    @app_commands.command(name="tasks", description="Sets up how many tasks you have.")
+    async def tasks(self, interaction: discord.Interaction, number: int):
         # Check restriction
-        if self.task_channel_id and ctx.channel.id != self.task_channel_id:
-            await ctx.send(f"Please use <#{self.task_channel_id}> for task commands!", delete_after=5)
+        if self.task_channel_id and interaction.channel_id != self.task_channel_id:
+            await interaction.response.send_message(f"Please use <#{self.task_channel_id}> for task commands!", ephemeral=True)
             return
 
         if number <= 0:
-            await ctx.send("You need to have at least 1 task, buggy!")
+            await interaction.response.send_message("You need to have at least 1 task, buggy!", ephemeral=True)
             return
 
         # Handle previous progress bar if it exists
-        if ctx.author.id in self.user_data:
-            old_data = self.user_data[ctx.author.id]
+        if interaction.user.id in self.user_data:
+            old_data = self.user_data[interaction.user.id]
             if 'last_msg' in old_data:
                 try:
                     chan_id, msg_id = old_data['last_msg']
@@ -156,26 +156,25 @@ class Tasks(commands.Cog, name="tasks"):
                     pass # Message might be deleted, that's okay
 
         # Initialize new data
-        self.user_data[ctx.author.id] = {
+        self.user_data[interaction.user.id] = {
             'total': number,
             'current': 0
         }
 
-        await ctx.send(f"I've set your tasks to {number}! Run `/progress` to see your bar.")
+        await interaction.response.send_message(f"I've set your tasks to {number}! Run `/progress` to see your bar.")
 
-    @commands.command(name="progress")
-    async def progress(self, ctx):
-        """Shows your progress bar and buttons."""
+    @app_commands.command(name="progress", description="Shows your progress bar and buttons.")
+    async def progress(self, interaction: discord.Interaction):
         # Check restriction
-        if self.task_channel_id and ctx.channel.id != self.task_channel_id:
-            await ctx.send(f"Please use <#{self.task_channel_id}> for task commands!", delete_after=5)
+        if self.task_channel_id and interaction.channel_id != self.task_channel_id:
+            await interaction.response.send_message(f"Please use <#{self.task_channel_id}> for task commands!", ephemeral=True)
             return
 
-        if ctx.author.id not in self.user_data:
-            await ctx.send("You haven't set up any tasks yet! Use `/tasks [number]` first.")
+        if interaction.user.id not in self.user_data:
+            await interaction.response.send_message("You haven't set up any tasks yet! Use `/tasks [number]` first.", ephemeral=True)
             return
 
-        data = self.user_data[ctx.author.id]
+        data = self.user_data[interaction.user.id]
         
         # If there's an old message active, remove its buttons first
         if 'last_msg' in data:
@@ -189,7 +188,7 @@ class Tasks(commands.Cog, name="tasks"):
                 pass 
 
         # Create new view and embed
-        view = TaskView(self, ctx.author.id, data['total'], data['current'])
+        view = TaskView(self, interaction.user.id, data['total'], data['current'])
         
         embed = discord.Embed(
             title="Task Progress",
@@ -197,10 +196,12 @@ class Tasks(commands.Cog, name="tasks"):
             color=discord.Color.blue()
         )
         
-        msg = await ctx.send(embed=embed, view=view)
+        await interaction.response.send_message(embed=embed, view=view)
         
         # Save this message location so we can disable it later
-        self.user_data[ctx.author.id]['last_msg'] = (ctx.channel.id, msg.id)
+        # We need to fetch the original response message object to get its ID
+        msg = await interaction.original_response()
+        self.user_data[interaction.user.id]['last_msg'] = (interaction.channel_id, msg.id)
 
 async def setup(bot):
     await bot.add_cog(Tasks(bot))
