@@ -609,7 +609,7 @@ class admin(commands.Cog):
 
     # --- VOTE KICK COMMANDS ---
     
-    @app_commands.command(name="vote", description="Vote to kick a user")
+    @app_commands.command(name="vote", description="Vote to kick a user", extras={'public': True})
     @app_commands.describe(member="The member to vote kick")
     async def vote(self, interaction: discord.Interaction, member: discord.Member):
         if self.voting_role_id is None:
