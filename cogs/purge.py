@@ -7,7 +7,7 @@ import re
 from zoneinfo import ZoneInfo
 
 # Function/Class List:
-# class Purge(commands.Cog)
+# class purge(commands.Cog)
 # - __init__(bot)
 # - cog_unload()
 # - purge_scheduler()
@@ -94,7 +94,7 @@ class purge(commands.Cog):
         schedules = self.get_schedules()
         if not schedules: return
 
-        print(f"[Purge] Starting scheduled purge for {len(schedules)} channels.")
+        print(f"[purge] Starting scheduled purge for {len(schedules)} channels.")
 
         for sch in schedules:
             channel_id = sch['channel_id']
@@ -111,7 +111,7 @@ class purge(commands.Cog):
             try:
                 await channel.purge(limit=None, check=check)
             except Exception as e:
-                print(f"[Purge] Failed to purge channel {channel_id}: {e}")
+                print(f"[purge] Failed to purge channel {channel_id}: {e}")
 
     @purge_scheduler.before_loop
     async def before_scheduler(self):
@@ -137,7 +137,7 @@ class purge(commands.Cog):
 
     # --- COMMANDS ---
 
-    # 1. Scheduled Purge Commands
+    # 1. Scheduled purge Commands
 
     @purge_group.command(name="add", description="Add this channel to the 4am EST purge schedule.")
     @app_commands.describe(keep_media="Keep images/videos?", keep_links="Keep messages with links?")
@@ -192,7 +192,7 @@ class purge(commands.Cog):
         if not guild_schedules:
             return await interaction.response.send_message("📝 No channels scheduled for purging in this server.", ephemeral=True)
 
-        text = "**🗑️ Scheduled 4am EST Purges:**\n"
+        text = "**🗑️ Scheduled 4am EST purges:**\n"
         for s in guild_schedules:
             channel = interaction.guild.get_channel(s['channel_id'])
             name = channel.mention if channel else f"ID:{s['channel_id']} (Deleted)"
@@ -204,7 +204,7 @@ class purge(commands.Cog):
 
         await interaction.response.send_message(text, ephemeral=True)
 
-    # 2. Pins Purge Command
+    # 2. Pins purge Command
 
     @purge_group.command(name="pins", description="Toggle auto-deletion of 'user pinned a message' announcements.")
     @app_commands.describe(enabled="True to delete pin messages, False to keep them.")
@@ -220,9 +220,9 @@ class purge(commands.Cog):
         status = "enabled (messages will be deleted)" if enabled else "disabled"
         await interaction.response.send_message(f"📌 Pin announcement cleaner is now **{status}** for this server.", ephemeral=True)
 
-    # 3. User Purge Command
+    # 3. User purge Command
 
-    @purge_group.command(name="user", description="Purge messages from a specific user.")
+    @purge_group.command(name="user", description="purge messages from a specific user.")
     @app_commands.describe(target="The user to purge", amount="Number of messages or 'all'", scope_id="Optional: Scope ID")
     async def purge_user(self, interaction: discord.Interaction, target: discord.User, amount: str, scope_id: str = None):
         await interaction.response.defer(thinking=True, ephemeral=True)
@@ -261,11 +261,11 @@ class purge(commands.Cog):
                     if limit <= 0: break
             except Exception as e: print(f"Failed to purge in {channel.name}: {e}")
 
-        await interaction.followup.send(f"✅ Purged **{count_deleted}** messages from {target.mention}.")
+        await interaction.followup.send(f"✅ purged **{count_deleted}** messages from {target.mention}.")
 
-    # 4. Message/Till Purge Command
+    # 4. Message/Till purge Command
 
-    @purge_group.command(name="messages", description="Purge a number of messages or until a specific message.")
+    @purge_group.command(name="messages", description="purge a number of messages or until a specific message.")
     @app_commands.describe(
         amount_or_till="Number of messages (e.g. 50) OR type 'till' to use message_id",
         message_id="The message ID to stop at (required if 'till' is used)",
@@ -288,9 +288,9 @@ class purge(commands.Cog):
 
         try:
             deleted = await interaction.channel.purge(limit=limit, after=after_msg, check=check)
-            await interaction.followup.send(f"✅ Purged **{len(deleted)}** messages.")
+            await interaction.followup.send(f"✅ purged **{len(deleted)}** messages.")
         except Exception as e:
             await interaction.followup.send(f"❌ Failed to purge: {e}")
 
 async def setup(bot):
-    await bot.add_cog(Purge(bot))
+    await bot.add_cog(purge(bot))
