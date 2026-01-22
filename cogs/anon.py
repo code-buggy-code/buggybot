@@ -14,16 +14,19 @@ class Anon(commands.Cog):
 
     @app_commands.command(name="anon", description="Send a message anonymously.", extras={'public': True})
     @app_commands.describe(message="The message you want to send", name="The name to display (optional)")
-    async def anon(self, interaction: discord.Interaction, message: str, name: str = "Anonymous"):
+    async def anon(self, interaction: discord.Interaction, message: str, name: str = None):
         """Sends a message anonymously to the current channel."""
-        # Defer the interaction ephemerally so the user sees "Thinking..." briefly,
-        # preventing the "Application did not respond" error.
+        # Defer the interaction ephemerally to prevent timeout errors while processing
         await interaction.response.defer(ephemeral=True)
         
-        # Send the actual anonymous message to the channel
-        await interaction.channel.send(f"**{name}**: {message}")
+        if name:
+            # If a name is provided, show it
+            await interaction.channel.send(f"**{name}**: {message}")
+        else:
+            # If no name is provided, just send the raw message
+            await interaction.channel.send(message)
         
-        # Delete the deferred response to remove the "Thinking..." message
+        # Delete the hidden loading state so the command looks invisible
         await interaction.delete_original_response()
 
 async def setup(bot):
