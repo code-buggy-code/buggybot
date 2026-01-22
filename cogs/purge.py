@@ -137,8 +137,6 @@ class Purge(commands.Cog):
 
     # --- COMMANDS ---
 
-    purge_group = app_commands.Group(name="purge", description="Manage purging and auto-deletion")
-
     # 1. Scheduled Purge Commands
 
     @purge_group.command(name="add", description="Add this channel to the 4am EST purge schedule.")
