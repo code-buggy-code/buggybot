@@ -8,7 +8,7 @@ import os
 import re
 
 # Function/Class List:
-# class admin(commands.Cog)
+# class Admin(commands.Cog)
 # - __init__(bot)
 # - load_config()
 # - save_config()
@@ -60,7 +60,7 @@ import re
 
 BUGGY_ID = 1433003746719170560
 
-class admin(commands.Cog):
+class Admin(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.description = "logging, dm requests, stickies, vc pings, and kick voting"
@@ -799,4 +799,4 @@ class admin(commands.Cog):
         if after.channel and (not before.channel or before.channel.id != after.channel.id): update_channel_state(after.channel)
 
 async def setup(bot):
-    await bot.add_cog(admin(bot))
+    await bot.add_cog(Admin(bot))
