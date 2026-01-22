@@ -7,7 +7,7 @@ import re
 from zoneinfo import ZoneInfo
 
 # Function/Class List:
-# class purge(commands.Cog)
+# class Purge(commands.Cog)
 # - __init__(bot)
 # - cog_unload()
 # - purge_scheduler()
@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 # - purge_messages(interaction, amount_or_till, message_id, keep_media, keep_links)
 # setup(bot)
 
-class purge(commands.Cog):
+class Purge(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.timezone = ZoneInfo("America/New_York")
@@ -136,6 +136,8 @@ class purge(commands.Cog):
                     pass
 
     # --- COMMANDS ---
+    
+    purge_group = app_commands.Group(name="purge", description="Manage message purging")
 
     # 1. Scheduled purge Commands
 
@@ -293,4 +295,4 @@ class purge(commands.Cog):
             await interaction.followup.send(f"❌ Failed to purge: {e}")
 
 async def setup(bot):
-    await bot.add_cog(purge(bot))
+    await bot.add_cog(Purge(bot))
