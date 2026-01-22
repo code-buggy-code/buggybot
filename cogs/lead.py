@@ -8,6 +8,40 @@ from datetime import datetime, timezone
 import asyncio
 from typing import Literal, Optional, Union
 
+# Function/Class List:
+# class DatabaseHandler
+# - __init__(db_name="leaderboardDB")
+# - _load_from_file()
+# - _save_to_file()
+# - get_guild_config(guild_id)
+# - save_guild_config(guild_id, config)
+# - update_user_points(guild_id, group_key, user_id, points)
+# - get_group_points(guild_id, group_key)
+# - get_user_points(guild_id, user_id)
+# - clear_points_by_group(guild_id, group_key)
+# class Lead(commands.Cog)
+# - __init__(bot)
+# - cog_unload()
+# - get_config(guild_id)
+# - get_tracked_groups(channel, config)
+# - add_points_to_cache(user_id, guild_id, group_key, points)
+# - create_leaderboard_embed(guild, group_key, group_data)
+# - on_message(message)
+# - on_reaction_add(reaction, user)
+# - on_voice_state_update(member, before, after)
+# - voice_time_checker()
+# - point_saver()
+# - lead_add(interaction, name)
+# - lead_edit(interaction, group_num, name)
+# - lead_track(interaction, group_num, target)
+# - lead_untrack(interaction, group_num, target)
+# - lead_remove(interaction, group_num)
+# - lead_clear(interaction, group_num)
+# - show_leaderboard(interaction, group_num)
+# - award_points(interaction, user, amount)
+# - check_points(ctx, member)
+# setup(bot)
+
 # --- DATABASE HANDLER ---
 class DatabaseHandler:
     def __init__(self, db_name="leaderboardDB"):
@@ -112,6 +146,7 @@ class Lead(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.db = DatabaseHandler()
+        self.description = "leaderboards and point tracking"
         
         # Default Point Values (Global defaults, can be made per-server later if needed)
         self.POINT_VALUES = {
