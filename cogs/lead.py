@@ -38,9 +38,11 @@ from typing import Literal, Optional, Union
 #   - lead_untrack(interaction, group_num, target)
 #   - lead_remove(interaction, group_num)
 #   - lead_clear(interaction, group_num)
+#   - lead_list(interaction)
 # - show_leaderboard(interaction, group_num)
 # - award_points(interaction, user, amount)
-# - check_points(ctx, member)
+# - points(interaction, user) [/points]
+# - check_points(ctx, member) [?points]
 # setup(bot)
 
 # --- DATABASE HANDLER ---
@@ -497,6 +499,33 @@ class Lead(commands.Cog):
             
         await interaction.response.send_message(f"Values reset! Cleared points for {count} users in Group {group_num}.", ephemeral=True)
 
+    @lead_group.command(name="list", description="List all leaderboard groups and tracked channels")
+    async def lead_list(self, interaction: discord.Interaction):
+        config = await self.get_config(interaction.guild_id)
+        groups = config.get("groups", {})
+
+        if not groups:
+            return await interaction.response.send_message("📝 No leaderboard groups set up.", ephemeral=True)
+
+        text = "**📊 Leaderboard Groups**\n"
+        for group_key, data in groups.items():
+            name = data.get("name", "Unnamed")
+            tracked = data.get("tracked_ids", [])
+            
+            tracked_names = []
+            for tid in tracked:
+                # Try to find channel or category
+                obj = interaction.guild.get_channel(int(tid))
+                if obj:
+                    tracked_names.append(obj.mention)
+                else:
+                    tracked_names.append(f"ID:{tid} (Deleted)")
+            
+            track_str = ", ".join(tracked_names) if tracked_names else "None"
+            text += f"**[{group_key}] {name}**\nTracking: {track_str}\n\n"
+        
+        await interaction.response.send_message(text, ephemeral=True)
+
     # 2. /leaderboard
     @app_commands.command(name="leaderboard", description="Show the leaderboard for a group")
     @app_commands.describe(group_num="The Group ID to show")
@@ -539,7 +568,39 @@ class Lead(commands.Cog):
         group_names = [config["groups"][k]["name"] for k in tracked]
         await interaction.response.send_message(f"✅ Awarded **{amount}** points to {user.mention} in groups: {', '.join(group_names)}.")
 
-    # 4. ?points (Prefix Command)
+    # 4. /points (Slash Command)
+    @app_commands.command(name="points", description="Check points for yourself or another user")
+    @app_commands.describe(user="The user to check points for (leave empty for yourself)")
+    async def points(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
+        target = user or interaction.user
+        config = await self.get_config(interaction.guild_id)
+        
+        tracked_keys = self.get_tracked_groups(interaction.channel, config)
+        
+        if not tracked_keys:
+            return await interaction.response.send_message("⚠️ This channel isn't tracked by any groups, so I can't show context-specific points here.", ephemeral=True)
+
+        embed = discord.Embed(title=f"🌟 Points for {target.display_name}", color=discord.Color.purple())
+        found_any = False
+        
+        for group_key in tracked_keys:
+            data = await self.db.get_user_points(interaction.guild_id, target.id)
+            pts = data.get(group_key, 0)
+            
+            gid = str(interaction.guild_id)
+            if gid in self.point_cache and group_key in self.point_cache[gid]:
+                pts += self.point_cache[gid][group_key].get(str(target.id), 0)
+                
+            group_name = config["groups"][group_key]["name"]
+            embed.add_field(name=group_name, value=f"{pts} pts", inline=False)
+            found_any = True
+            
+        if not found_any:
+            embed.description = "No points in these groups yet."
+            
+        await interaction.response.send_message(embed=embed)
+
+    # 5. ?points (Prefix Command - Legacy)
     @commands.command(name="points")
     async def check_points(self, ctx, member: discord.Member = None):
         target = member or ctx.author
