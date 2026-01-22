@@ -13,7 +13,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import Flow
-from ytmusicapi import YTMusic
+# REMOVED: from ytmusicapi import YTMusic
 from spotipy import Spotify
 from spotipy.oauth2 import SpotifyClientCredentials
 
@@ -26,11 +26,11 @@ from spotipy.oauth2 import SpotifyClientCredentials
 # - load_youtube_service()
 # - load_music_services()
 # - process_spotify_link(url)
+# - search_youtube_official(query)
 # - check_token_validity_task()
 # - checkmusic(interaction)
 # - refreshmusic(interaction)
 # - entercode(interaction, code)
-# - setupmusic(interaction, cookie, user_agent)
 # - setplaylist(interaction, playlist_id)
 # - setmusicchannel(interaction, channel)
 # - on_message(message)
@@ -42,7 +42,6 @@ class Music(commands.Cog):
         self.description = "Music management: Spotify to YouTube sync."
         
         self.youtube = None
-        self.ytmusic = None
         self.spotify = None
         self.auth_flow = None
         
@@ -113,7 +112,7 @@ class Music(commands.Cog):
         return False
 
     def load_music_services(self):
-        """Loads Spotify and YouTube Music services."""
+        """Loads Spotify service only (YTM removed)."""
         # 1. Spotify
         # Load from spotify.json
         spotify_id = None
@@ -137,25 +136,34 @@ class Music(commands.Cog):
                 print(f"❌ Failed to load Spotify: {e}")
         else:
              print("⚠️ Spotify credentials not found in spotify.json.")
-        
-        # 2. YouTube Music
-        # Try to load from local file first (standard for ytmusicapi)
-        if os.path.exists('browser.json'):
-            try:
-                # Use standard file loading now that we ensure the file is clean
-                self.ytmusic = YTMusic('browser.json')
-                print("✅ YouTube Music Service Loaded.")
-            except Exception as e:
-                print(f"❌ Failed to load YouTube Music: {e}")
-                self.ytmusic = None
-        else:
-            print("❌ browser.json not found for YTM.")
+
+    async def search_youtube_official(self, query):
+        """Uses the Official YouTube Data API to find a video ID."""
+        if not self.youtube: return None
+
+        try:
+            loop = asyncio.get_running_loop()
+            # Perform a standard YouTube Search
+            request = self.youtube.search().list(
+                part="snippet",
+                maxResults=1,
+                q=query,
+                type="video"
+            )
+            response = await loop.run_in_executor(None, request.execute)
+            
+            if response.get('items'):
+                # Return the video ID of the first result
+                return response['items'][0]['id']['videoId']
+        except Exception as e:
+            print(f"YouTube Search Error: {e}")
+            return None
+        return None
 
     async def process_spotify_link(self, url):
         """Converts Spotify link to YouTube video and adds to playlist."""
         errors = []
         if not self.spotify: errors.append("Spotify service not loaded.")
-        if not self.ytmusic: errors.append("YouTube Music service not loaded.")
         if not self.youtube: errors.append("YouTube API not loaded.")
         if not self.config['playlist_id']: errors.append("Playlist ID not set.")
 
@@ -173,17 +181,14 @@ class Music(commands.Cog):
             except Exception as e:
                 return f"Spotify Error: {e}"
 
+            # Make search query
             search_query = f"{track['artists'][0]['name']} - {track['name']}"
 
-            # 2. Search on YouTube Music
-            try:
-                # Lambda required because run_in_executor expects a callable
-                search_results = await loop.run_in_executor(None, lambda: self.ytmusic.search(search_query, "songs"))
-            except Exception as e:
-                return f"YTM Search Error: {e}"
+            # 2. Search on YouTube (Official API)
+            video_id = await self.search_youtube_official(search_query)
 
-            if not search_results: 
-                return f"Could not find '{search_query}' on YouTube Music."
+            if not video_id: 
+                return f"Could not find '{search_query}' on YouTube."
 
             # 3. Add to YouTube Playlist
             try:
@@ -194,7 +199,7 @@ class Music(commands.Cog):
                             "playlistId": self.config['playlist_id'],
                             "resourceId": {
                                 "kind": "youtube#video", 
-                                "videoId": search_results[0]['videoId']
+                                "videoId": video_id
                             }
                         }
                     }
@@ -228,22 +233,20 @@ class Music(commands.Cog):
         is_valid = await self.load_youtube_service()
         
         yt_msg = f"✅ **YouTube License Valid!**" if is_valid else "❌ **YouTube License Broken.**"
-        ytm_msg = "✅ **YouTube Music Ready!**" if self.ytmusic else "❌ **YouTube Music Not Loaded.**"
         spot_msg = "✅ **Spotify Ready!**" if self.spotify else "❌ **Spotify Not Loaded.**"
         
-        await interaction.response.send_message(f"{yt_msg}\n{ytm_msg}\n{spot_msg}", ephemeral=True)
+        await interaction.response.send_message(f"{yt_msg}\n{spot_msg}", ephemeral=True)
 
     @app_commands.command(name="refreshmusic", description="Admin: Starts the OAuth flow to renew YouTube license.")
     @app_commands.checks.has_permissions(administrator=True)
     async def refreshmusic(self, interaction: discord.Interaction):
-        # 1. Reload YTM and Spotify
+        # 1. Reload Spotify
         self.load_music_services()
-        ytm_status = "✅ **YouTube Music reloaded!**" if self.ytmusic else "❌ **YouTube Music NOT found!**"
         spot_status = "✅ **Spotify reloaded!**" if self.spotify else "❌ **Spotify NOT found!**"
 
         # 2. Start YouTube Flow
         if not os.path.exists('client_secret.json'):
-             return await interaction.response.send_message(f"{ytm_status}\n{spot_status}\n❌ Missing `client_secret.json`!", ephemeral=True)
+             return await interaction.response.send_message(f"{spot_status}\n❌ Missing `client_secret.json`!", ephemeral=True)
         
         try:
             self.auth_flow = Flow.from_client_secrets_file(
@@ -254,7 +257,7 @@ class Music(commands.Cog):
             auth_url, _ = self.auth_flow.authorization_url(prompt='consent')
             
             await interaction.response.send_message(
-                f"{ytm_status}\n{spot_status}\n🔄 **YouTube API Renewal Started!**\n1. Click: [Auth Link]({auth_url})\n2. Type: `/entercode <code>`",
+                f"{spot_status}\n🔄 **YouTube API Renewal Started!**\n1. Click: [Auth Link]({auth_url})\n2. Type: `/entercode <code>`",
                 ephemeral=True
             )
         except Exception as e:
@@ -276,57 +279,6 @@ class Music(commands.Cog):
             await interaction.response.send_message("✅ **Success!** License renewed and saved.", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
-
-    @app_commands.command(name="setupmusic", description="Admin: Manual setup for YTM with Cookie (User Agent optional).")
-    @app_commands.describe(cookie="The raw Cookie string", user_agent="Optional: The raw User-Agent string (Defaults to Firefox 147)")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def setupmusic(self, interaction: discord.Interaction, cookie: str, user_agent: str = None):
-        await interaction.response.defer(ephemeral=True)
-        
-        try:
-            # 1. Handle Defaults
-            if user_agent is None:
-                user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0"
-
-            # 2. SMART Cleaning
-            # Remove "Cookie:" or "User-Agent:" prefixes (case insensitive) if you pasted the whole line
-            # This is the "magic" step to fix the malformed input issue
-            ua_clean = re.sub(r'(?i)^user-agent:\s*', '', user_agent).replace("\n", "").strip()
-            cookie_clean = re.sub(r'(?i)^cookie:\s*', '', cookie).replace("\n", "").replace("\r", "").strip().strip('"').strip("'")
-
-            # 3. Construct dict
-            # Standard headers for ytmusicapi
-            header_dict = {
-                "User-Agent": ua_clean,
-                "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Content-Type": "application/json",
-                "Cookie": cookie_clean,
-                "X-Goog-AuthUser": "0",
-                "x-origin": "https://music.youtube.com"
-            }
-
-            # 4. Save to file
-            with open('browser.json', 'w', encoding='utf-8') as f:
-                json.dump(header_dict, f, indent=4)
-            
-            # 5. Initialize from File (Standard Method)
-            try:
-                self.ytmusic = YTMusic('browser.json')
-                msg = f"✅ **Success!** YTM initialized from `browser.json`!"
-            except Exception as e:
-                self.ytmusic = None
-                # Show debug info
-                preview_start = cookie_clean[:50]
-                preview_end = cookie_clean[-50:]
-                msg = (f"⚠️ **Failed to Initialize:** `{e}`\n\n"
-                       f"🔍 **Cookie Input (Cleaned):**\n"
-                       f"`{preview_start} ... {preview_end}`")
-
-            await interaction.followup.send(msg, ephemeral=True)
-            
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @app_commands.command(name="setplaylist", description="Admin: Set the YouTube Playlist ID.")
     @app_commands.checks.has_permissions(administrator=True)
@@ -381,6 +333,34 @@ class Music(commands.Cog):
                         await message.add_reaction("🎵")
                     except Exception as e:
                         await message.channel.send(f"⚠️ **Error:** YouTube link failed.\n`{e}`", delete_after=10)
+
+            # 3. Plain Text Search (Official API Fallback)
+            elif self.youtube and message.content.strip():
+                search_query = message.content
+                try:
+                    # Search using official API
+                    video_id = await self.search_youtube_official(search_query)
+                    
+                    if video_id:
+                        # Add to Playlist
+                        loop = asyncio.get_running_loop()
+                        req = self.youtube.playlistItems().insert(
+                            part="snippet",
+                            body={
+                                "snippet": {
+                                    "playlistId": self.config['playlist_id'],
+                                    "resourceId": {"kind": "youtube#video", "videoId": video_id}
+                                }
+                            }
+                        )
+                        await loop.run_in_executor(None, req.execute)
+                        
+                        await message.add_reaction("🔎")
+                        await message.add_reaction("🎵")
+                    else:
+                        await message.channel.send(f"⚠️ **Error:** No song found for `{search_query}`", delete_after=10)
+                except Exception as e:
+                    await message.channel.send(f"⚠️ **Search Error:** {e}", delete_after=10)
 
 async def setup(bot):
     await bot.add_cog(Music(bot))
