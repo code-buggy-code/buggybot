@@ -36,6 +36,7 @@ from typing import Literal, Optional, Union
 #   - lead_edit(interaction, group_num, name)
 #   - lead_track(interaction, group_num, target)
 #   - lead_untrack(interaction, group_num, target)
+#   - lead_points(interaction, ...)
 #   - lead_remove(interaction, group_num)
 #   - lead_clear(interaction, group_num)
 #   - lead_list(interaction)
@@ -66,6 +67,8 @@ class DatabaseHandler:
     async def get_guild_config(self, guild_id):
         guild_id = str(guild_id)
         configs = self.data.get("guild_configs", {})
+        
+        needs_save = False
         if guild_id not in configs:
             # Default Config Structure
             configs[guild_id] = {
@@ -73,8 +76,23 @@ class DatabaseHandler:
                     "1": {"name": "General", "tracked_ids": [], "last_lb_msg": None}
                 }
             }
+            needs_save = True
+
+        # Ensure point_values exists
+        if "point_values" not in configs[guild_id]:
+            configs[guild_id]["point_values"] = {
+                'message': 1,
+                'attachment': 2,
+                'voice_minute': 1,
+                'reaction_add': 1,
+                'reaction_receive': 2
+            }
+            needs_save = True
+
+        if needs_save:
             self.data["guild_configs"] = configs
             self._save_to_file()
+            
         return configs[guild_id]
 
     async def save_guild_config(self, guild_id, config):
@@ -150,11 +168,11 @@ class Lead(commands.Cog):
         self.bot = bot
         self.db = DatabaseHandler()
         
-        # Default Point Values (Global defaults, can be made per-server later if needed)
-        self.POINT_VALUES = {
+        # Default Point Values (Fallback)
+        self.DEFAULT_POINT_VALUES = {
             'message': 1,
             'attachment': 2,
-            'voice_interval': 1,
+            'voice_minute': 1,
             'reaction_add': 1,
             'reaction_receive': 2
         }
@@ -252,8 +270,9 @@ class Lead(commands.Cog):
         tracked_groups = self.get_tracked_groups(message.channel, config)
         
         if tracked_groups:
-            points = self.POINT_VALUES['message']
-            extras = (len(message.attachments) + len(message.embeds)) * self.POINT_VALUES['attachment']
+            p_vals = config.get("point_values", self.DEFAULT_POINT_VALUES)
+            points = p_vals.get('message', 1)
+            extras = (len(message.attachments) + len(message.embeds)) * p_vals.get('attachment', 2)
             total = points + extras
             
             for group_key in tracked_groups:
@@ -268,15 +287,17 @@ class Lead(commands.Cog):
         tracked_groups = self.get_tracked_groups(reaction.message.channel, config)
         
         if tracked_groups:
+            p_vals = config.get("point_values", self.DEFAULT_POINT_VALUES)
+            
             # Reactor points
             for group_key in tracked_groups:
-                self.add_points_to_cache(user.id, reaction.message.guild.id, group_key, self.POINT_VALUES['reaction_add'])
+                self.add_points_to_cache(user.id, reaction.message.guild.id, group_key, p_vals.get('reaction_add', 1))
             
             # Author points
             author = reaction.message.author
             if not author.bot and author.id != user.id:
                 for group_key in tracked_groups:
-                    self.add_points_to_cache(author.id, reaction.message.guild.id, group_key, self.POINT_VALUES['reaction_receive'])
+                    self.add_points_to_cache(author.id, reaction.message.guild.id, group_key, p_vals.get('reaction_receive', 2))
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
@@ -288,15 +309,10 @@ class Lead(commands.Cog):
         if user_id in self.voice_tracker:
             # Check if they left the tracked channel or VC entirely
             if not after.channel or (before.channel and before.channel.id != after.channel.id):
-                # Calculate final time chunk if needed? 
-                # Actually, the task handles the accumulation. We just remove them from tracking if they leave tracked areas.
-                # But to be safe, we just remove them. The task adds points every 30s.
                 del self.voice_tracker[user_id]
 
         # Handle Joining
         if after.channel:
-            # We don't know the guild config here efficiently without fetching.
-            # We will store the guild_id in tracker and check validity in the loop.
             self.voice_tracker[user_id] = {
                 'time': time.time(),
                 'guild_id': member.guild.id,
@@ -305,7 +321,7 @@ class Lead(commands.Cog):
 
     # --- TASKS ---
 
-    @tasks.loop(seconds=30.0)
+    @tasks.loop(seconds=60.0)
     async def voice_time_checker(self):
         # Iterate over a snapshot of items to safely modify
         for user_id, data in list(self.voice_tracker.items()):
@@ -327,16 +343,17 @@ class Lead(commands.Cog):
             if len(non_bots) < 2:
                 continue
 
-            # Check time interval
-            if time.time() - data['time'] >= 30.0:
-                # Find which groups track this VC
+            # Check time interval (60 seconds)
+            if time.time() - data['time'] >= 60.0:
                 config = await self.get_config(guild_id)
-                # Need a dummy channel object or fetch it
+                p_vals = config.get("point_values", self.DEFAULT_POINT_VALUES)
+                
+                # Find which groups track this VC
                 channel = member.voice.channel
                 tracked_groups = self.get_tracked_groups(channel, config)
                 
                 if tracked_groups:
-                    pts = self.POINT_VALUES['voice_interval']
+                    pts = p_vals.get('voice_minute', 1)
                     for group_key in tracked_groups:
                         self.add_points_to_cache(user_id, guild_id, group_key, pts)
                 
@@ -463,6 +480,62 @@ class Lead(commands.Cog):
         config["groups"][group_key]["tracked_ids"].remove(target.id)
         await self.db.save_guild_config(interaction.guild_id, config)
         await interaction.response.send_message(f"✅ Stopped tracking **{target.name}** for Group {group_num}.", ephemeral=True)
+
+    @lead_group.command(name="points", description="View or edit point values for activities")
+    @app_commands.describe(
+        message="Points per message",
+        attachment="Points per attachment",
+        reaction_give="Points for giving a reaction",
+        reaction_receive="Points for receiving a reaction",
+        vc_minute="Points per minute in VC"
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def lead_points(self, interaction: discord.Interaction, 
+                          message: int = None, 
+                          attachment: int = None, 
+                          reaction_give: int = None, 
+                          reaction_receive: int = None, 
+                          vc_minute: int = None):
+        config = await self.get_config(interaction.guild_id)
+        p_vals = config.get("point_values", self.DEFAULT_POINT_VALUES)
+
+        # Check if we are updating anything
+        updated = False
+        if message is not None:
+            p_vals['message'] = message
+            updated = True
+        if attachment is not None:
+            p_vals['attachment'] = attachment
+            updated = True
+        if reaction_give is not None:
+            p_vals['reaction_add'] = reaction_give
+            updated = True
+        if reaction_receive is not None:
+            p_vals['reaction_receive'] = reaction_receive
+            updated = True
+        if vc_minute is not None:
+            p_vals['voice_minute'] = vc_minute
+            updated = True
+
+        if updated:
+            config['point_values'] = p_vals
+            await self.db.save_guild_config(interaction.guild_id, config)
+            # Update cache if needed
+            self.guild_configs[str(interaction.guild_id)] = config
+
+        embed = discord.Embed(title="⚙️ Leaderboard Point Values", color=discord.Color.blue())
+        embed.add_field(name="✉️ Message", value=f"{p_vals.get('message', 1)} pts", inline=True)
+        embed.add_field(name="📎 Attachment", value=f"{p_vals.get('attachment', 2)} pts", inline=True)
+        embed.add_field(name="😀 Give React", value=f"{p_vals.get('reaction_add', 1)} pts", inline=True)
+        embed.add_field(name="⭐ Get React", value=f"{p_vals.get('reaction_receive', 2)} pts", inline=True)
+        embed.add_field(name="🎙️ VC (1 min)", value=f"{p_vals.get('voice_minute', 1)} pts", inline=True)
+        
+        if updated:
+            embed.set_footer(text="✅ Values updated successfully!")
+        else:
+            embed.set_footer(text="Use arguments to change these values.")
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @lead_group.command(name="remove", description="Delete a group entirely")
     @app_commands.describe(group_num="Group ID to delete")
@@ -617,10 +690,6 @@ class Lead(commands.Cog):
         found_any = False
         
         # Check cache + DB
-        # Note: Logic here simplifies to just checking DB because cache is flushed often, 
-        # but for perfect accuracy we should check cache too. 
-        # For simplicity in this structure, we query DB which is "safe enough" for a user check command.
-        
         for group_key in tracked_keys:
             data = await self.db.get_user_points(ctx.guild.id, target.id)
             pts = data.get(group_key, 0)
