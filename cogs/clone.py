@@ -5,7 +5,7 @@ import asyncio
 import re
 
 # Function/Class List:
-# class Clone(commands.Cog)
+# class clone(commands.Cog)
 # - __init__(bot)
 # - get_clone_setups()
 # - save_clone_setups(setups)
@@ -39,7 +39,7 @@ class clone(commands.Cog):
         self.bot.db.save_collection("clone_setups", setups)
 
     def get_history(self):
-        """Returns the mapping history (Source MSG -> Clone MSG)."""
+        """Returns the mapping history (Source MSG -> clone MSG)."""
         return self.bot.db.get_collection("clone_history")
     
     def save_history(self, history):
@@ -53,9 +53,9 @@ class clone(commands.Cog):
         webhooks = await channel.webhooks()
         for wh in webhooks:
             # We reuse our own webhook if found
-            if wh.user == self.bot.user or wh.name == "BuggyClone":
+            if wh.user == self.bot.user or wh.name == "Buggyclone":
                 return wh
-        return await channel.create_webhook(name="BuggyClone")
+        return await channel.create_webhook(name="Buggyclone")
 
     async def resolve_mentions(self, content, guild):
         """
@@ -446,7 +446,7 @@ class clone(commands.Cog):
             if rid not in grouped: grouped[rid] = []
             grouped[rid].append(s)
 
-        text = "**🐏 Clone Setups (This Server):**\n"
+        text = "**🐏 clone Setups (This Server):**\n"
         
         for rid, source_list in grouped.items():
             # Receiver is guaranteed to be in current_guild_map
@@ -491,4 +491,4 @@ class clone(commands.Cog):
         await interaction.response.send_message(text[:2000], ephemeral=True)
 
 async def setup(bot):
-    await bot.add_cog(Clone(bot))
+    await bot.add_cog(clone(bot))
