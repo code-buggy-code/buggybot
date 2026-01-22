@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 # - purge_messages(interaction, amount_or_till, message_id, keep_media, keep_links)
 # setup(bot)
 
-class Purge(commands.Cog):
+class purge(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.timezone = ZoneInfo("America/New_York")
