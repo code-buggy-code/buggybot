@@ -1,6 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
+import datetime
 
 # Function/Class List:
 # class Anon(commands.Cog)
@@ -32,6 +33,7 @@ class Anon(commands.Cog):
         # Defer the interaction ephemerally to prevent timeout errors while processing
         await interaction.response.defer(ephemeral=True)
         
+        # Send the actual message
         if name:
             await interaction.channel.send(f"**{name}**: {message}")
         else:
@@ -39,6 +41,33 @@ class Anon(commands.Cog):
         
         # Delete the hidden loading state so the command looks invisible
         await interaction.delete_original_response()
+
+        # --- LOGGING LOGIC ---
+        try:
+            log_settings = self.bot.db.get_collection("log_settings")
+            if not isinstance(log_settings, list): log_settings = []
+            
+            log_data = next((s for s in log_settings if s.get('guild_id') == interaction.guild_id), None)
+            
+            if log_data and log_data.get('log_channel_id'):
+                log_channel = self.bot.get_channel(log_data['log_channel_id'])
+                if log_channel:
+                    embed = discord.Embed(
+                        title="🕵️ Anonymous Message Sent",
+                        description=f"**Author:** {interaction.user.mention} ({interaction.user.id})\n**Channel:** {interaction.channel.mention}",
+                        color=discord.Color.dark_grey(),
+                        timestamp=datetime.datetime.now()
+                    )
+                    
+                    # If a name was used, show it
+                    if name:
+                        embed.add_field(name="Display Name", value=name, inline=True)
+                    
+                    embed.add_field(name="Content", value=message[:1024], inline=False)
+                    
+                    await log_channel.send(embed=embed)
+        except Exception as e:
+            print(f"Failed to log anon message: {e}")
 
     @app_commands.command(name="anonset", description="Allow /anon messages in this channel.")
     @app_commands.checks.has_permissions(administrator=True)
