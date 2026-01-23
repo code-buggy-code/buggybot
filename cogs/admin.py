@@ -10,8 +10,8 @@ import re
 # Function/Class List:
 # class Admin(commands.Cog)
 # - __init__(bot)
-# - load_config()
-# - save_config()
+# - load_config() [REMOVED - Uses main DB]
+# - save_config() [REMOVED - Uses main DB]
 # - cog_unload()
 # - get_stickies()
 # - save_stickies(stickies)
@@ -23,6 +23,8 @@ import re
 # - save_dm_settings(guild_id, data)
 # - get_vote_data(guild_id)
 # - save_vote_data(guild_id, data)
+# - get_vcping_config(guild_id) [NEW]
+# - save_vcping_config(guild_id, config) [NEW]
 # - dm_message_index_autocomplete(interaction, current)
 # - log_to_channel(guild, embed)
 # - on_message(message)
@@ -67,9 +69,6 @@ class Admin(commands.Cog):
         self.bot = bot
         self.description = "logging, dm requests, stickies, vc pings, and kick voting"
         
-        # VC Ping Config
-        self.config_file = 'vcping_config.json'
-        self.config = self.load_config()
         self.vc_state = {}
         self.check_vcs.start()
 
@@ -86,16 +85,6 @@ class Admin(commands.Cog):
             "5": "sorry they dont have dm roles yet :sob:, buggy's working on this"
         }
         self.DEFAULT_DM_REACTS = ["👍", "👎"]
-
-    def load_config(self):
-        if os.path.exists(self.config_file):
-            with open(self.config_file, 'r') as f:
-                return json.load(f)
-        return {}
-
-    def save_config(self):
-        with open(self.config_file, 'w') as f:
-            json.dump(self.config, f, indent=4)
 
     def cog_unload(self):
         self.check_vcs.cancel()
@@ -177,6 +166,17 @@ class Admin(commands.Cog):
         collection = [d for d in collection if d['guild_id'] != guild_id]
         collection.append(data)
         self.bot.db.save_collection("vote_data", collection)
+
+    def get_vcping_config(self):
+        """Fetches VC Ping config for all guilds."""
+        # Stored as a dict {guild_id: settings}
+        data = self.bot.db.get_collection("vcping_config")
+        if isinstance(data, list): return {} # Migration safety
+        return data
+
+    def save_vcping_config(self, config):
+        """Saves VC Ping config."""
+        self.bot.db.save_collection("vcping_config", config)
 
     async def dm_message_index_autocomplete(self, interaction: discord.Interaction, current: str):
         indices = ["0", "1", "2", "3", "4", "5"]
@@ -744,11 +744,12 @@ class Admin(commands.Cog):
     @app_commands.describe(channel="The Voice Channel to ignore")
     async def vcping_ignore_add(self, interaction: discord.Interaction, channel: discord.VoiceChannel):
         guild_id = str(interaction.guild_id)
-        if guild_id not in self.config: self.config[guild_id] = {'ignored': [], 'role': None, 'people': 2, 'minutes': 5}
+        config = self.get_vcping_config()
+        if guild_id not in config: config[guild_id] = {'ignored': [], 'role': None, 'people': 2, 'minutes': 5}
         
-        if channel.id not in self.config[guild_id]['ignored']:
-            self.config[guild_id]['ignored'].append(channel.id)
-            self.save_config()
+        if channel.id not in config[guild_id]['ignored']:
+            config[guild_id]['ignored'].append(channel.id)
+            self.save_vcping_config(config)
             await interaction.response.send_message(f"Added {channel.mention} to the ignore list.", ephemeral=True)
         else:
             await interaction.response.send_message(f"{channel.mention} is already ignored.", ephemeral=True)
@@ -757,9 +758,10 @@ class Admin(commands.Cog):
     @app_commands.describe(channel="The Voice Channel to un-ignore")
     async def vcping_ignore_remove(self, interaction: discord.Interaction, channel: discord.VoiceChannel):
         guild_id = str(interaction.guild_id)
-        if guild_id in self.config and channel.id in self.config[guild_id]['ignored']:
-            self.config[guild_id]['ignored'].remove(channel.id)
-            self.save_config()
+        config = self.get_vcping_config()
+        if guild_id in config and channel.id in config[guild_id]['ignored']:
+            config[guild_id]['ignored'].remove(channel.id)
+            self.save_vcping_config(config)
             await interaction.response.send_message(f"Removed {channel.mention} from the ignore list.", ephemeral=True)
         else:
             await interaction.response.send_message(f"{channel.mention} is not in the ignore list.", ephemeral=True)
@@ -767,8 +769,9 @@ class Admin(commands.Cog):
     @vcping_ignore_group.command(name="list", description="List ignored Voice Channels")
     async def vcping_ignore_list(self, interaction: discord.Interaction):
         guild_id = str(interaction.guild_id)
-        if guild_id in self.config and self.config[guild_id]['ignored']:
-            channels = [f"<#{cid}>" for cid in self.config[guild_id]['ignored']]
+        config = self.get_vcping_config()
+        if guild_id in config and config[guild_id]['ignored']:
+            channels = [f"<#{cid}>" for cid in config[guild_id]['ignored']]
             await interaction.response.send_message(f"Ignored VCs: {', '.join(channels)}", ephemeral=True)
         else:
             await interaction.response.send_message("No VCs are currently ignored.", ephemeral=True)
@@ -777,17 +780,19 @@ class Admin(commands.Cog):
     @app_commands.describe(role="The role to ping", people="Number of people required", minutes="Minutes to wait before pinging")
     async def vcping_set(self, interaction: discord.Interaction, role: discord.Role, people: int, minutes: int):
         guild_id = str(interaction.guild_id)
-        if guild_id not in self.config: self.config[guild_id] = {'ignored': []}
-        self.config[guild_id].update({'role': role.id, 'people': people, 'minutes': minutes})
-        self.save_config()
+        config = self.get_vcping_config()
+        if guild_id not in config: config[guild_id] = {'ignored': []}
+        config[guild_id].update({'role': role.id, 'people': people, 'minutes': minutes})
+        self.save_vcping_config(config)
         await interaction.response.send_message(f"Settings updated: Ping {role.mention} when {people} people are in a VC for {minutes} minutes.", ephemeral=True)
 
     @tasks.loop(seconds=60)
     async def check_vcs(self):
+        config = self.get_vcping_config()
         for guild_id, state_data in self.vc_state.items():
-            if guild_id not in self.config: continue
+            if guild_id not in config: continue
             
-            settings = self.config[guild_id]
+            settings = config[guild_id]
             threshold_minutes = settings.get('minutes', 5)
             ping_role_id = settings.get('role')
 
@@ -823,9 +828,10 @@ class Admin(commands.Cog):
         if member.bot: return
 
         guild_id = str(member.guild.id)
-        if guild_id not in self.config: return
+        config = self.get_vcping_config()
+        if guild_id not in config: return
 
-        settings = self.config[guild_id]
+        settings = config[guild_id]
         threshold_people = settings.get('people', 2)
         ignored_vcs = settings.get('ignored', [])
 
