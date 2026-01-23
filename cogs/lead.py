@@ -642,7 +642,7 @@ class Lead(commands.Cog):
         await interaction.response.send_message(f"✅ Awarded **{amount}** points to {user.mention} in groups: {', '.join(group_names)}.")
 
     # 4. /points (Slash Command)
-    @app_commands.command(name="points", description="Check points for yourself or another user")
+    @app_commands.command(name="points", description="Check points for yourself or another user", extras={'public': True})
     @app_commands.describe(user="The user to check points for (leave empty for yourself)")
     async def points(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
         target = user or interaction.user
