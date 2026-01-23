@@ -13,7 +13,6 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import Flow
-# REMOVED: from ytmusicapi import YTmusic
 from spotipy import Spotify
 from spotipy.oauth2 import SpotifyClientCredentials
 
@@ -21,11 +20,11 @@ from spotipy.oauth2 import SpotifyClientCredentials
 # class Music(commands.Cog)
 # - __init__(bot)
 # - cog_unload()
-# - load_config()
-# - save_config()
+# - load_config(guild_id)
+# - save_config(guild_id, config)
 # - load_youtube_service()
 # - load_music_services()
-# - process_spotify_link(url)
+# - process_spotify_link(url, guild_id)
 # - search_youtube_official(query)
 # - check_token_validity_task()
 # - checkmusic(interaction)
@@ -44,16 +43,6 @@ class Music(commands.Cog):
         self.spotify = None
         self.auth_flow = None
         
-        # Config cache
-        self.config = {
-            "playlist_id": "",
-            "music_channel_id": 0,
-            "youtube_token_json": ""
-        }
-        
-        # Load initial state
-        self.load_config()
-        
         # Start services
         self.load_music_services()
         self.bot.loop.create_task(self.load_youtube_service())
@@ -62,26 +51,37 @@ class Music(commands.Cog):
     def cog_unload(self):
         self.check_token_validity_task.cancel()
 
-    def load_config(self):
-        """Loads music config from the bot's DB."""
-        # We'll store music settings in a 'music_config' collection
+    def load_config(self, guild_id):
+        """Loads music config for a specific guild from DB."""
+        # Using "music_config" collection (Dict of {guild_id: config})
         data = self.bot.db.get_collection("music_config")
-        if data:
-            if isinstance(data, dict):
-                 self.config.update(data)
-            elif isinstance(data, list) and len(data) > 0:
-                 # Handle if DB returns list of docs
-                 self.config.update(data[0])
+        if isinstance(data, list): data = {} # Migration safety
+        
+        return data.get(str(guild_id), {
+            "playlist_id": "",
+            "music_channel_id": 0
+        })
 
-    def save_config(self):
-        """Saves current config to DB."""
-        # Save as a single document/dict
-        self.bot.db.save_collection("music_config", self.config)
+    def save_config(self, guild_id, config):
+        """Saves guild config to DB."""
+        data = self.bot.db.get_collection("music_config")
+        if isinstance(data, list): data = {}
+        
+        data[str(guild_id)] = config
+        self.bot.db.save_collection("music_config", data)
 
     async def load_youtube_service(self):
         """Loads the YouTube API service from stored token."""
         self.youtube = None
-        token_json = self.config.get('youtube_token_json')
+        
+        # Token is global, not per-server
+        global_config = self.bot.db.get_collection("global_music_settings")
+        # If it returns a list (default empty), make it a dict
+        if isinstance(global_config, list): 
+            if global_config: global_config = global_config[0]
+            else: global_config = {}
+
+        token_json = global_config.get('youtube_token_json')
         
         # Fallback to local file if DB is empty
         if not token_json and os.path.exists('token.json'):
@@ -98,8 +98,12 @@ class Music(commands.Cog):
                 if creds and creds.expired and creds.refresh_token:
                     try:
                         creds.refresh(Request())
-                        self.config['youtube_token_json'] = creds.to_json()
-                        self.save_config()
+                        global_config['youtube_token_json'] = creds.to_json()
+                        # Save Global settings
+                        # We save it as a list with one item if we want to stick to list convention, 
+                        # or just overwrite "global_music_settings" key with the dict. 
+                        # DatabaseHandler supports generic data, so we'll save the dict directly.
+                        self.bot.db.save_collection("global_music_settings", global_config)
                     except: 
                         return False
                 
@@ -159,12 +163,14 @@ class Music(commands.Cog):
             return None
         return None
 
-    async def process_spotify_link(self, url):
+    async def process_spotify_link(self, url, guild_id):
         """Converts Spotify link to YouTube video and adds to playlist."""
         errors = []
         if not self.spotify: errors.append("Spotify service not loaded.")
         if not self.youtube: errors.append("YouTube API not loaded.")
-        if not self.config['playlist_id']: errors.append("Playlist ID not set.")
+        
+        config = self.load_config(guild_id)
+        if not config['playlist_id']: errors.append("Playlist ID not set.")
 
         if errors:
             return "Setup Errors:\n" + "\n".join([f"- {e}" for e in errors])
@@ -195,7 +201,7 @@ class Music(commands.Cog):
                     part="snippet",
                     body={
                         "snippet": {
-                            "playlistId": self.config['playlist_id'],
+                            "playlistId": config['playlist_id'],
                             "resourceId": {
                                 "kind": "youtube#video", 
                                 "videoId": video_id
@@ -271,8 +277,12 @@ class Music(commands.Cog):
         
         try:
             self.auth_flow.fetch_token(code=code)
-            self.config['youtube_token_json'] = self.auth_flow.credentials.to_json()
-            self.save_config()
+            
+            # Save Global Token
+            global_config = self.bot.db.get_collection("global_music_settings")
+            if isinstance(global_config, list): global_config = {}
+            global_config['youtube_token_json'] = self.auth_flow.credentials.to_json()
+            self.bot.db.save_collection("global_music_settings", global_config)
             
             await self.load_youtube_service()
             await interaction.response.send_message("✅ **Success!** License renewed and saved.", ephemeral=True)
@@ -282,15 +292,17 @@ class Music(commands.Cog):
     @app_commands.command(name="setplaylist", description="Admin: Set the YouTube Playlist ID.")
     @app_commands.checks.has_permissions(administrator=True)
     async def setplaylist(self, interaction: discord.Interaction, playlist_id: str):
-        self.config['playlist_id'] = playlist_id
-        self.save_config()
+        config = self.load_config(interaction.guild_id)
+        config['playlist_id'] = playlist_id
+        self.save_config(interaction.guild_id, config)
         await interaction.response.send_message(f"✅ Playlist ID set to `{playlist_id}`.", ephemeral=True)
 
     @app_commands.command(name="setmusicchannel", description="Admin: Set the music sharing channel.")
     @app_commands.checks.has_permissions(administrator=True)
     async def setmusicchannel(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        self.config['music_channel_id'] = channel.id
-        self.save_config()
+        config = self.load_config(interaction.guild_id)
+        config['music_channel_id'] = channel.id
+        self.save_config(interaction.guild_id, config)
         await interaction.response.send_message(f"✅ music channel set to {channel.mention}.", ephemeral=True)
 
     # --- LISTENER ---
@@ -299,12 +311,14 @@ class Music(commands.Cog):
     async def on_message(self, message):
         if message.author.bot or not message.guild: return
         
+        config = self.load_config(message.guild.id)
+        
         # Check if in music channel
-        if self.config['music_channel_id'] != 0 and message.channel.id == self.config['music_channel_id']:
+        if config['music_channel_id'] != 0 and message.channel.id == config['music_channel_id']:
             
             # 1. Spotify Link
             if "spotify.com" in message.content.lower():
-                result = await self.process_spotify_link(message.content)
+                result = await self.process_spotify_link(message.content, message.guild.id)
                 if result is True:
                     await message.add_reaction("🎵")
                 else:
@@ -324,7 +338,7 @@ class Music(commands.Cog):
                             part="snippet",
                             body={
                                 "snippet": {
-                                    "playlistId": self.config['playlist_id'],
+                                    "playlistId": config['playlist_id'],
                                     "resourceId": {"kind": "youtube#video", "videoId": v_id}
                                 }
                             }
