@@ -333,7 +333,7 @@ class Tasks(commands.Cog, name="tasks"):
         )
         await interaction.response.send_message(f"Task commands are now restricted to this channel: {interaction.channel.mention}")
 
-    @app_commands.command(name="tasks", description="Sets up or changes your task count.")
+    @app_commands.command(name="tasks", description="Sets up or changes your task count.", extras={'public': True})
     @app_commands.describe(mode="Set new list (resets progress) or Change total (keeps progress)", number="Number of tasks")
     async def tasks(self, interaction: discord.Interaction, mode: Literal["Set", "Change"], number: int):
         # Restriction Check
@@ -400,7 +400,7 @@ class Tasks(commands.Cog, name="tasks"):
             await interaction.response.send_message(f"I've changed your total tasks to {number}! Your progress has been saved. Run `/progress` to refresh the bar.", ephemeral=True)
 
 
-    @app_commands.command(name="progress", description="Shows your progress bar and buttons.")
+    @app_commands.command(name="progress", description="Shows your progress bar and buttons.", extras={'public': True})
     async def progress(self, interaction: discord.Interaction):
         # Restriction Check
         if self.task_channel_id and interaction.channel_id != self.task_channel_id:
