@@ -7,14 +7,6 @@ import asyncio
 from typing import Literal
 
 # List of functions/classes in this file:
-# class JSONStore:
-#   - _load_all(self)
-#   - _save_all(self, data)
-#   - find_one(self, query)
-#   - find_all(self)
-#   - insert_one(self, doc)
-#   - delete_one(self, query)
-#   - update_one(self, query, update, upsert=False)
 # class TaskView(discord.ui.View):
 #   - __init__(self, cog, user_id, total, state=None, message_id=None)
 #   - get_emoji_bar(self)
@@ -36,73 +28,8 @@ from typing import Literal
 #   - progress(self, interaction)
 #   - setup(bot)
 
-# --- DATABASE HANDLER (Replicated logic) ---
-DB_FILE = "tasks.json"
-
-class JSONStore:
-    def __init__(self, name):
-        self.name = name
-
-    def _load_all(self):
-        try:
-            if not os.path.exists(DB_FILE):
-                return {}
-            with open(DB_FILE, "r") as f:
-                return json.load(f)
-        except: return {}
-
-    def _save_all(self, data):
-        with open(DB_FILE, "w") as f:
-            json.dump(data, f, indent=4, default=str)
-
-    async def find_one(self, query):
-        all_data = self._load_all()
-        collection = all_data.get(self.name, [])
-        for doc in collection:
-            if all(doc.get(k) == v for k, v in query.items()):
-                return doc
-        return None
-
-    async def find_all(self):
-        all_data = self._load_all()
-        return all_data.get(self.name, [])
-
-    async def insert_one(self, doc):
-        all_data = self._load_all()
-        if self.name not in all_data: all_data[self.name] = []
-        all_data[self.name].append(doc)
-        self._save_all(all_data)
-
-    async def delete_one(self, query):
-        all_data = self._load_all()
-        collection = all_data.get(self.name, [])
-        new_collection = [doc for doc in collection if not all(doc.get(k) == v for k, v in query.items())]
-        all_data[self.name] = new_collection
-        self._save_all(all_data)
-
-    async def update_one(self, query, update, upsert=False):
-        all_data = self._load_all()
-        if self.name not in all_data: all_data[self.name] = []
-        
-        found = False
-        for doc in all_data[self.name]:
-            if all(doc.get(k) == v for k, v in query.items()):
-                if "$set" in update:
-                    doc.update(update["$set"])
-                found = True
-                break
-        
-        if not found and upsert:
-            new_doc = query.copy()
-            if "$set" in update:
-                new_doc.update(update["$set"])
-            all_data[self.name].append(new_doc)
-
-        self._save_all(all_data)
-
-# Collections
-tasks_col = JSONStore("active_tasks")
-config_col = JSONStore("config")
+# UPDATED: No separate JSONStore. Using bot.db (main.py)
+# Collections: "tasks_active", "tasks_config"
 
 class TaskView(discord.ui.View):
     def __init__(self, cog, user_id, total, state=None, message_id=None):
@@ -182,16 +109,15 @@ class TaskView(discord.ui.View):
         
         # DB Update
         if finished:
-            await tasks_col.delete_one({"message_id": self.message_id})
+            # Use main DB method
+            self.cog.bot.db.delete_doc("tasks_active", "message_id", self.message_id)
         else:
             await self.update_db()
 
     async def update_db(self):
         if self.message_id:
-            await tasks_col.update_one(
-                {"message_id": self.message_id}, 
-                {"$set": {"state": self.state}}
-            )
+            # Update 'state' in 'tasks_active' collection where message_id matches
+            self.cog.bot.db.update_doc("tasks_active", "message_id", self.message_id, {"state": self.state})
 
     def get_next_index(self):
         try:
@@ -213,8 +139,12 @@ class TaskView(discord.ui.View):
         greens = [x for x in self.state if x == 1]
         percent_complete = int((len(greens) / self.total) * 100) if self.total > 0 else 0
         
-        # Celebratory messages (Defaults if config missing)
-        celebratory_messages = self.cog.config_cache.get("celebratory_messages", {
+        # Fetch celebration messages from config
+        # Config structure: {guild_id: {task_channel_id, celebratory_messages}}
+        guild_id = str(interaction.guild_id)
+        config_data = self.cog.bot.db.get_collection("tasks_config")
+        guild_config = config_data.get(guild_id, {})
+        celebratory_messages = guild_config.get("celebratory_messages", {
             "1": "Good start! Keep it up!",           # 0-24
             "2": "You're making progress!",           # 25-49
             "3": "Almost there, doing great!",        # 50-74
@@ -284,16 +214,8 @@ class Tasks(commands.Cog, name="tasks"):
 
     def __init__(self, bot):
         self.bot = bot
-        self.task_channel_id = None
-        self.config_cache = {}
 
     async def cog_load(self):
-        # Load config logic
-        data = await config_col.find_one({"_id": "settings"})
-        if data:
-            self.task_channel_id = data.get("task_channel_id")
-            self.config_cache["celebratory_messages"] = data.get("celebratory_messages", {})
-        
         # Restore views logic
         asyncio.create_task(self.restore_views())
 
@@ -301,7 +223,9 @@ class Tasks(commands.Cog, name="tasks"):
         # We need to wait until the bot is ready to add views
         await self.bot.wait_until_ready()
         
-        active_tasks = await tasks_col.find_all()
+        # Load all active tasks from main DB
+        active_tasks = self.bot.db.get_collection("tasks_active")
+        
         count = 0
         for doc in active_tasks:
             try:
@@ -318,27 +242,33 @@ class Tasks(commands.Cog, name="tasks"):
                 print(f"Failed to restore task view: {e}")
         print(f"Restored {count} active task trackers in Tasks Cog.")
 
+    def get_task_channel_id(self, guild_id):
+        configs = self.bot.db.get_collection("tasks_config")
+        return configs.get(str(guild_id), {}).get("task_channel_id")
+
     @app_commands.command(name="taskchannel", description="Sets the current channel as the only channel for task commands (Owner Only).")
     async def taskchannel(self, interaction: discord.Interaction):
         if not await self.bot.is_owner(interaction.user):
             await interaction.response.send_message("Only my owner can use this command!", ephemeral=True)
             return
 
-        self.task_channel_id = interaction.channel_id
-        # Save to DB
-        await config_col.update_one(
-            {"_id": "settings"}, 
-            {"$set": {"task_channel_id": self.task_channel_id}}, 
-            upsert=True
-        )
+        guild_id = str(interaction.guild_id)
+        configs = self.bot.db.get_collection("tasks_config")
+        if isinstance(configs, list): configs = {} # safety
+        
+        if guild_id not in configs: configs[guild_id] = {}
+        configs[guild_id]["task_channel_id"] = interaction.channel_id
+        
+        self.bot.db.save_collection("tasks_config", configs)
         await interaction.response.send_message(f"Task commands are now restricted to this channel: {interaction.channel.mention}")
 
     @app_commands.command(name="tasks", description="Sets up or changes your task count.", extras={'public': True})
     @app_commands.describe(mode="Set new list (resets progress) or Change total (keeps progress)", number="Number of tasks")
     async def tasks(self, interaction: discord.Interaction, mode: Literal["Set", "Change"], number: int):
         # Restriction Check
-        if self.task_channel_id and interaction.channel_id != self.task_channel_id:
-            await interaction.response.send_message(f"Please use <#{self.task_channel_id}> for task commands!", ephemeral=True)
+        channel_limit = self.get_task_channel_id(interaction.guild_id)
+        if channel_limit and interaction.channel_id != channel_limit:
+            await interaction.response.send_message(f"Please use <#{channel_limit}> for task commands!", ephemeral=True)
             return
 
         if number > 100:
@@ -348,40 +278,53 @@ class Tasks(commands.Cog, name="tasks"):
              await interaction.response.send_message("You need at least 1 task!", ephemeral=True)
              return
 
-        existing = await tasks_col.find_one({"user_id": interaction.user.id})
+        # Find existing tasks for this user in this server
+        active_tasks = self.bot.db.get_collection("tasks_active")
+        existing_doc = next((doc for doc in active_tasks if doc['user_id'] == interaction.user.id), None)
+        # Note: We technically could filter by guild_id here if we want tasks to be per-server.
+        # But for now, we'll keep it per-user as before, or add guild_id check if desired. 
+        # Adding guild_id to search for better separation:
+        existing_doc = next((doc for doc in active_tasks if doc['user_id'] == interaction.user.id and doc.get('guild_id') == interaction.guild_id), None)
 
         # --- LOGIC FOR 'SET' ---
         if mode == "Set":
-            if existing:
+            if existing_doc:
                 # Cleanup old message
                 try:
-                    chan = self.bot.get_channel(existing.get('channel_id'))
+                    chan = self.bot.get_channel(existing_doc.get('channel_id'))
                     if chan:
-                        msg = await chan.fetch_message(existing.get('message_id'))
+                        msg = await chan.fetch_message(existing_doc.get('message_id'))
                         await msg.edit(view=None)
                 except: pass
                 
-                await tasks_col.delete_one({"user_id": interaction.user.id})
+                # Remove from DB
+                self.bot.db.delete_doc("tasks_active", "message_id", existing_doc['message_id'])
 
             await interaction.response.send_message(f"I've set your tasks to {number}! Run `/progress` to see your bar.", ephemeral=True)
             
             # Create new entry
-            await tasks_col.insert_one({
+            new_doc = {
                  "user_id": interaction.user.id,
+                 "guild_id": interaction.guild.id, # ADDED guild_id
                  "total": number,
                  "state": [0] * number,
                  "message_id": None, 
                  "channel_id": interaction.channel_id
-            })
+            }
+            # Append directly to collection list via update_doc helper logic or manual append
+            # To be safe, we fetch fresh collection list
+            current_active = self.bot.db.get_collection("tasks_active")
+            current_active.append(new_doc)
+            self.bot.db.save_collection("tasks_active", current_active)
 
         # --- LOGIC FOR 'CHANGE' ---
         elif mode == "Change":
-            if not existing:
+            if not existing_doc:
                 await interaction.response.send_message("You don't have an active task list to change! Use 'Set' mode first.", ephemeral=True)
                 return
             
-            old_total = existing['total']
-            state = existing['state']
+            old_total = existing_doc['total']
+            state = existing_doc['state']
             
             # Resize state list
             if number > old_total:
@@ -392,10 +335,7 @@ class Tasks(commands.Cog, name="tasks"):
                 state = state[:number]
             
             # Update DB
-            await tasks_col.update_one(
-                {"user_id": interaction.user.id},
-                {"$set": {"total": number, "state": state}}
-            )
+            self.bot.db.update_doc("tasks_active", "message_id", existing_doc['message_id'], {"total": number, "state": state})
             
             await interaction.response.send_message(f"I've changed your total tasks to {number}! Your progress has been saved. Run `/progress` to refresh the bar.", ephemeral=True)
 
@@ -403,11 +343,14 @@ class Tasks(commands.Cog, name="tasks"):
     @app_commands.command(name="progress", description="Shows your progress bar and buttons.", extras={'public': True})
     async def progress(self, interaction: discord.Interaction):
         # Restriction Check
-        if self.task_channel_id and interaction.channel_id != self.task_channel_id:
-            await interaction.response.send_message(f"Please use <#{self.task_channel_id}> for task commands!", ephemeral=True)
+        channel_limit = self.get_task_channel_id(interaction.guild_id)
+        if channel_limit and interaction.channel_id != channel_limit:
+            await interaction.response.send_message(f"Please use <#{channel_limit}> for task commands!", ephemeral=True)
             return
 
-        doc = await tasks_col.find_one({"user_id": interaction.user.id})
+        active_tasks = self.bot.db.get_collection("tasks_active")
+        doc = next((d for d in active_tasks if d['user_id'] == interaction.user.id and d.get('guild_id') == interaction.guild_id), None)
+        
         if not doc:
             await interaction.response.send_message("You haven't set up any tasks yet! Use `/tasks [set] [number]` first.", ephemeral=True)
             return
@@ -437,10 +380,9 @@ class Tasks(commands.Cog, name="tasks"):
         # Update DB with new message ID
         msg = await interaction.original_response()
         view.message_id = msg.id
-        await tasks_col.update_one(
-            {"user_id": interaction.user.id},
-            {"$set": {"message_id": msg.id, "channel_id": interaction.channel_id}}
-        )
+        
+        self.bot.db.update_doc("tasks_active", "message_id", doc['message_id'], # Use old message_id to find doc
+                               {"message_id": msg.id, "channel_id": interaction.channel_id}) # Update to new
 
 async def setup(bot):
     await bot.add_cog(Tasks(bot))
