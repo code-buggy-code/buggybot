@@ -100,6 +100,7 @@ class Tickets(commands.Cog):
             return await interaction.response.send_message(f"❌ Error: A setup for {role.mention} already exists. Use `/ticket edit` instead.", ephemeral=True)
 
         new_setup = {
+            "guild_id": interaction.guild.id, # ADDED Guild ID
             "role_id": role.id,
             "ticket_name": ticket_name,
             "prompt": prompt,
@@ -130,7 +131,7 @@ class Tickets(commands.Cog):
                    role: discord.Role, 
                    ticket_name: str = None, 
                    prompt: str = None, 
-                   category: discord.CategoryChannel = None,
+                   category: discord.CategoryChannel = None, 
                    admin: discord.Role = None, 
                    message_id: str = None, 
                    emoji: str = None, 
@@ -318,6 +319,7 @@ class Tickets(commands.Cog):
         # 6. Save Active Ticket
         ticket_data = {
             "channel_id": channel.id,
+            "guild_id": guild.id, # ADDED Guild ID
             "user_id": member.id,
             "setup_role_id": setup['role_id'],
             "is_gated": has_gate
