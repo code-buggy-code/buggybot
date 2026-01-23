@@ -9,20 +9,15 @@ import asyncio
 from typing import Literal, Optional, Union
 
 # Function/Class List:
-# class DatabaseHandler
-# - __init__(db_name)
-# - _load_from_file()
-# - _save_to_file()
-# - get_guild_config(guild_id)
-# - save_guild_config(guild_id, config)
-# - update_user_points(guild_id, group_key, user_id, points)
-# - get_group_points(guild_id, group_key)
-# - get_user_points(guild_id, user_id)
-# - clear_points_by_group(guild_id, group_key)
 # class Lead(commands.Cog)
 # - __init__(bot)
 # - cog_unload()
 # - get_config(guild_id)
+# - save_config(guild_id, config)
+# - update_user_points(guild_id, group_key, user_id, points)
+# - get_group_points(guild_id, group_key)
+# - get_user_points(guild_id, user_id)
+# - clear_points_by_group(guild_id, group_key)
 # - get_tracked_groups(channel, config)
 # - add_points_to_cache(user_id, guild_id, group_key, points)
 # - create_leaderboard_embed(guild, group_key, group_data)
@@ -46,67 +41,68 @@ from typing import Literal, Optional, Union
 # - check_points(ctx, member) [?points]
 # setup(bot)
 
-# --- DATABASE HANDLER ---
-class DatabaseHandler:
-    def __init__(self, db_name="LeaderboardDB"):
-        self.file_path = "leaderbug_database.json"
-        self.data = self._load_from_file()
-
-    def _load_from_file(self):
-        try:
-            with open(self.file_path, "r") as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {"guild_configs": {}, "user_points": []}
-
-    def _save_to_file(self):
-        with open(self.file_path, "w") as f:
-            json.dump(self.data, f, indent=4, default=str)
-
-    # --- Guild Specific Configs ---
-    async def get_guild_config(self, guild_id):
-        guild_id = str(guild_id)
-        configs = self.data.get("guild_configs", {})
+# --- LEAD COG ---
+class Lead(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
         
-        needs_save = False
+        # Default Point Values (Fallback)
+        self.DEFAULT_POINT_VALUES = {
+            'message': 1,
+            'attachment': 2,
+            'voice_minute': 1,
+            'reaction_add': 1,
+            'reaction_receive': 2
+        }
+
+        # Caches
+        self.voice_tracker = {} 
+        self.point_cache = {}          
+        self.leaderboard_cache = {}    
+
+        # Start tasks
+        self.voice_time_checker.start()
+        self.point_saver.start()
+
+    def cog_unload(self):
+        self.voice_time_checker.cancel()
+        self.point_saver.cancel()
+
+    # --- DB HELPERS (Centralized) ---
+
+    async def get_config(self, guild_id):
+        guild_id = str(guild_id)
+        # Fetch from main DB "leaderboard_configs" collection (dict of configs)
+        configs = self.bot.db.get_collection("leaderboard_configs")
+        if isinstance(configs, list): configs = {} # Migration safety
+
         if guild_id not in configs:
-            # Default Config Structure
-            configs[guild_id] = {
+             # Default Config
+             configs[guild_id] = {
                 "groups": {
                     "1": {"name": "General", "tracked_ids": [], "last_lb_msg": None}
-                }
-            }
-            needs_save = True
-
-        # Ensure point_values exists
-        if "point_values" not in configs[guild_id]:
-            configs[guild_id]["point_values"] = {
-                'message': 1,
-                'attachment': 2,
-                'voice_minute': 1,
-                'reaction_add': 1,
-                'reaction_receive': 2
-            }
-            needs_save = True
-
-        if needs_save:
-            self.data["guild_configs"] = configs
-            self._save_to_file()
-            
+                },
+                "point_values": self.DEFAULT_POINT_VALUES.copy()
+             }
+             self.bot.db.save_collection("leaderboard_configs", configs)
+        
         return configs[guild_id]
 
-    async def save_guild_config(self, guild_id, config):
+    async def save_config(self, guild_id, config):
         guild_id = str(guild_id)
-        if "guild_configs" not in self.data:
-            self.data["guild_configs"] = {}
-        self.data["guild_configs"][guild_id] = config
-        self._save_to_file()
+        configs = self.bot.db.get_collection("leaderboard_configs")
+        if isinstance(configs, list): configs = {}
+        
+        configs[guild_id] = config
+        self.bot.db.save_collection("leaderboard_configs", configs)
 
-    # --- Point Management ---
     async def update_user_points(self, guild_id, group_key, user_id, points):
-        user_id = str(user_id)
         guild_id = str(guild_id)
-        collection = self.data.get("user_points", [])
+        user_id = str(user_id)
+        
+        # Using "leaderboard_points" collection in main DB
+        # Structure: List of documents {guild_id, user_id, group_key, points}
+        collection = self.bot.db.get_collection("leaderboard_points")
         
         found = False
         for doc in collection:
@@ -126,12 +122,11 @@ class DatabaseHandler:
             }
             collection.append(new_doc)
             
-        self.data["user_points"] = collection
-        self._save_to_file()
+        self.bot.db.save_collection("leaderboard_points", collection)
 
     async def get_group_points(self, guild_id, group_key):
         guild_id = str(guild_id)
-        collection = self.data.get("user_points", [])
+        collection = self.bot.db.get_collection("leaderboard_points")
         results = {}
         for doc in collection:
             if doc.get("guild_id") == guild_id and doc.get("group_key") == group_key:
@@ -141,7 +136,7 @@ class DatabaseHandler:
     async def get_user_points(self, guild_id, user_id):
         guild_id = str(guild_id)
         user_id = str(user_id)
-        collection = self.data.get("user_points", [])
+        collection = self.bot.db.get_collection("leaderboard_points")
         results = {}
         for doc in collection:
             if doc.get("guild_id") == guild_id and doc.get("user_id") == user_id:
@@ -150,7 +145,7 @@ class DatabaseHandler:
 
     async def clear_points_by_group(self, guild_id, group_key):
         guild_id = str(guild_id)
-        collection = self.data.get("user_points", [])
+        collection = self.bot.db.get_collection("leaderboard_points")
         initial_count = len(collection)
         
         new_collection = [
@@ -158,45 +153,10 @@ class DatabaseHandler:
             if not (doc.get("guild_id") == guild_id and doc.get("group_key") == group_key)
         ]
         
-        self.data["user_points"] = new_collection
-        self._save_to_file()
+        self.bot.db.save_collection("leaderboard_points", new_collection)
         return initial_count - len(new_collection)
 
-# --- LEAD COG ---
-class Lead(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-        self.db = DatabaseHandler()
-        
-        # Default Point Values (Fallback)
-        self.DEFAULT_POINT_VALUES = {
-            'message': 1,
-            'attachment': 2,
-            'voice_minute': 1,
-            'reaction_add': 1,
-            'reaction_receive': 2
-        }
-
-        # Caches
-        self.guild_configs = {} # Cache for guild settings
-        self.voice_tracker = {} 
-        self.point_cache = {}          
-        self.leaderboard_cache = {}    
-
-        # Start tasks
-        self.voice_time_checker.start()
-        self.point_saver.start()
-
-    def cog_unload(self):
-        self.voice_time_checker.cancel()
-        self.point_saver.cancel()
-
     # --- HELPERS ---
-    async def get_config(self, guild_id):
-        """Helper to get guild config from cache or DB."""
-        if str(guild_id) not in self.guild_configs:
-            self.guild_configs[str(guild_id)] = await self.db.get_guild_config(guild_id)
-        return self.guild_configs[str(guild_id)]
 
     def get_tracked_groups(self, channel, config):
         """Returns a list of group keys that track this channel/category."""
@@ -237,7 +197,7 @@ class Lead(commands.Cog):
         
         # If no cache, fetch from DB
         if not cache_entry:
-            points_data = await self.db.get_group_points(guild_id, group_key)
+            points_data = await self.get_group_points(guild_id, group_key)
             sorted_users = sorted(points_data.items(), key=lambda x: x[1], reverse=True)
             top_users = sorted_users[:20]
         else:
@@ -367,13 +327,16 @@ class Lead(commands.Cog):
             for guild_id, groups in self.point_cache.items():
                 for group_key, users in groups.items():
                     for user_id, points in users.items():
-                        await self.db.update_user_points(guild_id, group_key, user_id, points)
+                        await self.update_user_points(guild_id, group_key, user_id, points)
             self.point_cache = {}
 
         # 2. Update Leaderboards & Perm Messages
-        # Iterate over all guilds in cache
-        for guild_id in list(self.guild_configs.keys()):
-            config = self.guild_configs[guild_id]
+        # Need to iterate over active guilds
+        configs = self.bot.db.get_collection("leaderboard_configs")
+        if isinstance(configs, list): configs = {}
+
+        for guild_id in list(configs.keys()):
+            config = configs[guild_id]
             guild = self.bot.get_guild(int(guild_id))
             if not guild: continue
 
@@ -382,7 +345,7 @@ class Lead(commands.Cog):
 
             for group_key, group_data in config.get("groups", {}).items():
                 # Refresh Data
-                points = await self.db.get_group_points(guild_id, group_key)
+                points = await self.get_group_points(guild_id, group_key)
                 sorted_users = sorted(points.items(), key=lambda x: x[1], reverse=True)
                 self.leaderboard_cache[guild_id][group_key] = {
                     'updated': time.time(),
@@ -401,7 +364,7 @@ class Lead(commands.Cog):
                     except (discord.NotFound, discord.Forbidden):
                         # Reset if deleted
                         group_data["last_lb_msg"] = None
-                        await self.db.save_guild_config(guild_id, config)
+                        await self.save_config(guild_id, config)
 
     # --- COMMANDS ---
     
@@ -423,7 +386,7 @@ class Lead(commands.Cog):
             "tracked_ids": [],
             "last_lb_msg": None
         }
-        await self.db.save_guild_config(interaction.guild_id, config)
+        await self.save_config(interaction.guild_id, config)
         await interaction.response.send_message(f"✅ Created group **{name}** (ID: {next_id})", ephemeral=True)
 
     @lead_group.command(name="edit", description="Edit a group's name or rename it")
@@ -439,7 +402,7 @@ class Lead(commands.Cog):
             
         old_name = config["groups"][group_key]["name"]
         config["groups"][group_key]["name"] = name
-        await self.db.save_guild_config(interaction.guild_id, config)
+        await self.save_config(interaction.guild_id, config)
         
         await interaction.response.send_message(f"✅ Renamed Group {group_num} from **{old_name}** to **{name}**.", ephemeral=True)
 
@@ -459,7 +422,7 @@ class Lead(commands.Cog):
             return
 
         config["groups"][group_key]["tracked_ids"].append(target.id)
-        await self.db.save_guild_config(interaction.guild_id, config)
+        await self.save_config(interaction.guild_id, config)
         await interaction.response.send_message(f"✅ Group {group_num} is now tracking **{target.name}**.", ephemeral=True)
 
     @lead_group.command(name="untrack", description="Stop tracking a channel or category")
@@ -478,7 +441,7 @@ class Lead(commands.Cog):
             return
 
         config["groups"][group_key]["tracked_ids"].remove(target.id)
-        await self.db.save_guild_config(interaction.guild_id, config)
+        await self.save_config(interaction.guild_id, config)
         await interaction.response.send_message(f"✅ Stopped tracking **{target.name}** for Group {group_num}.", ephemeral=True)
 
     @lead_group.command(name="points", description="View or edit point values for activities")
@@ -519,9 +482,7 @@ class Lead(commands.Cog):
 
         if updated:
             config['point_values'] = p_vals
-            await self.db.save_guild_config(interaction.guild_id, config)
-            # Update cache if needed
-            self.guild_configs[str(interaction.guild_id)] = config
+            await self.save_config(interaction.guild_id, config)
 
         embed = discord.Embed(title="⚙️ Leaderboard Point Values", color=discord.Color.blue())
         embed.add_field(name="✉️ Message", value=f"{p_vals.get('message', 1)} pts", inline=True)
@@ -550,7 +511,7 @@ class Lead(commands.Cog):
 
         name = config["groups"][group_key]["name"]
         del config["groups"][group_key]
-        await self.db.save_guild_config(interaction.guild_id, config)
+        await self.save_config(interaction.guild_id, config)
         await interaction.response.send_message(f"🗑️ Deleted group **{name}** (ID: {group_num}).", ephemeral=True)
 
     @lead_group.command(name="clear", description="Clear all points for a group")
@@ -563,7 +524,7 @@ class Lead(commands.Cog):
             await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
             return
             
-        count = await self.db.clear_points_by_group(interaction.guild_id, group_key)
+        count = await self.clear_points_by_group(interaction.guild_id, group_key)
         
         # Clear cache too
         gid = str(interaction.guild_id)
@@ -622,7 +583,7 @@ class Lead(commands.Cog):
             "channel_id": interaction.channel_id,
             "message_id": msg.id
         }
-        await self.db.save_guild_config(interaction.guild_id, config)
+        await self.save_config(interaction.guild_id, config)
 
     # 3. /award
     @app_commands.command(name="award", description="Award points to a user in the current channel's group(s)")
@@ -636,7 +597,7 @@ class Lead(commands.Cog):
             return
             
         for group_key in tracked:
-            await self.db.update_user_points(interaction.guild_id, group_key, user.id, amount)
+            await self.update_user_points(interaction.guild_id, group_key, user.id, amount)
             
         group_names = [config["groups"][k]["name"] for k in tracked]
         await interaction.response.send_message(f"✅ Awarded **{amount}** points to {user.mention} in groups: {', '.join(group_names)}.")
@@ -657,7 +618,7 @@ class Lead(commands.Cog):
         found_any = False
         
         for group_key in tracked_keys:
-            data = await self.db.get_user_points(interaction.guild_id, target.id)
+            data = await self.get_user_points(interaction.guild_id, target.id)
             pts = data.get(group_key, 0)
             
             gid = str(interaction.guild_id)
@@ -696,7 +657,7 @@ class Lead(commands.Cog):
         
         # Check cache + DB
         for group_key in tracked_keys:
-            data = await self.db.get_user_points(ctx.guild.id, target.id)
+            data = await self.get_user_points(ctx.guild.id, target.id)
             pts = data.get(group_key, 0)
             
             # Check pending cache
