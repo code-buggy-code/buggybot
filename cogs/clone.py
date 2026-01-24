@@ -96,8 +96,11 @@ class Clone(commands.Cog):
     @app_commands.describe(source="Where messages come FROM", destination="Where messages go TO")
     @app_commands.checks.has_permissions(administrator=True)
     async def clone_channel(self, interaction: discord.Interaction, source: discord.TextChannel, destination: discord.TextChannel):
+        # Defer immediately to prevent "Application did not respond"
+        await interaction.response.defer(ephemeral=True)
+        
         if source.id == destination.id:
-            return await interaction.response.send_message("❌ Source and Destination cannot be the same.", ephemeral=True)
+            return await interaction.followup.send("❌ Source and Destination cannot be the same.")
 
         mappings = self.get_clone_mapping()
         
@@ -108,19 +111,21 @@ class Clone(commands.Cog):
             mappings.append(entry)
         
         if destination.id in entry['dest_ids']:
-             return await interaction.response.send_message("⚠️ This clone link already exists.", ephemeral=True)
+             return await interaction.followup.send("⚠️ This clone link already exists.")
 
         entry['dest_ids'].append(destination.id)
         
-        # Fixed logic: Save the entire modified collection list
+        # Save the entire modified collection list
         self.save_clone_mapping(mappings)
         
-        await interaction.response.send_message(f"✅ Messages from {source.mention} will now be cloned to {destination.mention}.", ephemeral=True)
+        await interaction.followup.send(f"✅ Messages from {source.mention} will now be cloned to {destination.mention}.")
 
     @clone_group.command(name="remove", description="Stop cloning messages to this destination.")
     @app_commands.describe(destination="The channel to stop receiving messages")
     @app_commands.checks.has_permissions(administrator=True)
     async def unclone_channel(self, interaction: discord.Interaction, destination: discord.TextChannel):
+        await interaction.response.defer(ephemeral=True)
+        
         mappings = self.get_clone_mapping()
         found = False
 
@@ -136,9 +141,9 @@ class Clone(commands.Cog):
 
         if found:
             self.save_clone_mapping(new_mappings)
-            await interaction.response.send_message(f"✅ Stopped cloning messages to {destination.mention}.", ephemeral=True)
+            await interaction.followup.send(f"✅ Stopped cloning messages to {destination.mention}.")
         else:
-            await interaction.response.send_message(f"⚠️ {destination.mention} is not receiving any cloned messages.", ephemeral=True)
+            await interaction.followup.send(f"⚠️ {destination.mention} is not receiving any cloned messages.")
 
     @clone_group.command(name="list", description="List all active clones.")
     async def list_clones(self, interaction: discord.Interaction):
