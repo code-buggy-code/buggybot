@@ -172,8 +172,8 @@ class Music(commands.Cog):
         if errors:
             return "Setup Errors:\n" + "\n".join([f"- {e}" for e in errors])
 
-        # Logic: Link is already regex-verified by on_message, so we can trust it somewhat.
-        # But we still strip potential query params just in case.
+        # Logic: Link is already regex-verified by on_message, so we can trust it.
+        # We strip query parameters just to be safe.
         clean_url = url.split("?")[0]
         
         loop = asyncio.get_running_loop()
@@ -319,7 +319,8 @@ class Music(commands.Cog):
 
             # Regex Definitions
             # Spotify: https://open.spotify.com/track/ID
-            spotify_match = re.search(r'(https?://open\.spotify\.com/(?:track|album|playlist|artist)/[a-zA-Z0-9]+)', content)
+            # Matches open.spotify.com/track/ID, open.spotify.com/album/ID, etc.
+            spotify_match = re.search(r'(https?://(?:open\.|www\.)?spotify\.com/(?:track|album|playlist|artist)/[a-zA-Z0-9_-]+)', content)
             
             # YouTube Music: https://music.youtube.com/watch?v=ID
             yt_music_match = re.search(r'https?://music\.youtube\.com/watch\?v=([a-zA-Z0-9_-]+)', content)
