@@ -30,7 +30,7 @@ from spotipy.oauth2 import SpotifyClientCredentials
 # - checkmusic(interaction)
 # - refreshmusic(interaction)
 # - entercode(interaction, code)
-# - setplaylist(interaction, playlist_id)
+# - setplaylist(interaction, playlist)
 # - setmusicchannel(interaction, channel)
 # - on_message(message)
 # setup(bot)
@@ -288,13 +288,23 @@ class Music(commands.Cog):
         except Exception as e:
             await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
-    @app_commands.command(name="setplaylist", description="Admin: Set the YouTube Playlist ID.")
+    @app_commands.command(name="setplaylist", description="Admin: Set the YouTube Playlist Link or ID.")
     @app_commands.checks.has_permissions(administrator=True)
-    async def setplaylist(self, interaction: discord.Interaction, playlist_id: str):
+    async def setplaylist(self, interaction: discord.Interaction, playlist: str):
+        # Extract ID if a full link is provided
+        # Regex matches 'list=ID' in a URL (handles ?list= and &list=)
+        match = re.search(r'list=([a-zA-Z0-9_-]+)', playlist)
+        
+        if match:
+            clean_id = match.group(1)
+        else:
+            # Assume input is just the ID if no "list=" pattern is found
+            clean_id = playlist
+
         config = self.load_config(interaction.guild_id)
-        config['playlist_id'] = playlist_id
+        config['playlist_id'] = clean_id
         self.save_config(interaction.guild_id, config)
-        await interaction.response.send_message(f"✅ Playlist ID set to `{playlist_id}`.", ephemeral=True)
+        await interaction.response.send_message(f"✅ Playlist set to ID: `{clean_id}`", ephemeral=True)
 
     @app_commands.command(name="setmusicchannel", description="Admin: Set the music sharing channel.")
     @app_commands.checks.has_permissions(administrator=True)
@@ -313,54 +323,56 @@ class Music(commands.Cog):
         config = self.load_config(message.guild.id)
         
         # Check if in music channel
-        if config['music_channel_id'] != 0 and message.channel.id == config['music_channel_id']:
+        # If music_channel_id is 0, we allow all channels.
+        if config['music_channel_id'] != 0 and message.channel.id != config['music_channel_id']:
+            return
             
-            content = message.content
+        content = message.content
 
-            # Regex Definitions
-            # Spotify: https://open.spotify.com/track/ID
-            # Matches open.spotify.com/track/ID, open.spotify.com/album/ID, etc.
-            spotify_match = re.search(r'(https?://(?:open\.|www\.)?spotify\.com/(?:track|album|playlist|artist)/[a-zA-Z0-9_-]+)', content)
-            
-            # YouTube Music: https://music.youtube.com/watch?v=ID
-            yt_music_match = re.search(r'https?://music\.youtube\.com/watch\?v=([a-zA-Z0-9_-]+)', content)
-            
-            # YouTube Standard: https://www.youtube.com/watch?v=ID
-            yt_standard_match = re.search(r'https?://(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]+)', content)
-            
-            # YouTube Short: https://youtu.be/ID
-            yt_short_match = re.search(r'https?://youtu\.be/([a-zA-Z0-9_-]+)', content)
+        # Regex Definitions
+        # Spotify: https://open.spotify.com/track/ID
+        # Matches open.spotify.com/track/ID, open.spotify.com/album/ID, etc.
+        spotify_match = re.search(r'(https?://(?:open\.|www\.)?spotify\.com/(?:track|album|playlist|artist)/[a-zA-Z0-9_-]+)', content)
+        
+        # YouTube Music: https://music.youtube.com/watch?v=ID
+        yt_music_match = re.search(r'https?://music\.youtube\.com/watch\?v=([a-zA-Z0-9_-]+)', content)
+        
+        # YouTube Standard: https://www.youtube.com/watch?v=ID
+        yt_standard_match = re.search(r'https?://(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]+)', content)
+        
+        # YouTube Short: https://youtu.be/ID
+        yt_short_match = re.search(r'https?://youtu\.be/([a-zA-Z0-9_-]+)', content)
 
-            # 1. Handle Spotify
-            if spotify_match:
-                result = await self.process_spotify_link(spotify_match.group(1), message.guild.id)
-                if result is True:
-                    await message.add_reaction("🎵")
-                else:
-                    await message.channel.send(f"⚠️ **Error:** Spotify link failed.\n`{result}`", delete_after=10)
+        # 1. Handle Spotify
+        if spotify_match:
+            result = await self.process_spotify_link(spotify_match.group(1), message.guild.id)
+            if result is True:
+                await message.add_reaction("🎵")
+            else:
+                await message.channel.send(f"⚠️ **Error:** Spotify link failed.\n`{result}`", delete_after=10)
 
-            # 2. Handle YouTube (Music, Standard, Short)
-            elif self.youtube and (yt_music_match or yt_standard_match or yt_short_match):
-                # Extract Video ID based on which one matched
-                v_id = None
-                if yt_music_match: v_id = yt_music_match.group(1)
-                elif yt_standard_match: v_id = yt_standard_match.group(1)
-                elif yt_short_match: v_id = yt_short_match.group(1)
+        # 2. Handle YouTube (Music, Standard, Short)
+        elif self.youtube and (yt_music_match or yt_standard_match or yt_short_match):
+            # Extract Video ID based on which one matched
+            v_id = None
+            if yt_music_match: v_id = yt_music_match.group(1)
+            elif yt_standard_match: v_id = yt_standard_match.group(1)
+            elif yt_short_match: v_id = yt_short_match.group(1)
 
-                if v_id:
-                    try:
-                        self.youtube.playlistItems().insert(
-                            part="snippet",
-                            body={
-                                "snippet": {
-                                    "playlistId": config['playlist_id'],
-                                    "resourceId": {"kind": "youtube#video", "videoId": v_id}
-                                }
+            if v_id:
+                try:
+                    self.youtube.playlistItems().insert(
+                        part="snippet",
+                        body={
+                            "snippet": {
+                                "playlistId": config['playlist_id'],
+                                "resourceId": {"kind": "youtube#video", "videoId": v_id}
                             }
-                        ).execute()
-                        await message.add_reaction("🎵")
-                    except Exception as e:
-                        await message.channel.send(f"⚠️ **Error:** YouTube link failed.\n`{e}`", delete_after=10)
+                        }
+                    ).execute()
+                    await message.add_reaction("🎵")
+                except Exception as e:
+                    await message.channel.send(f"⚠️ **Error:** YouTube link failed.\n`{e}`", delete_after=10)
 
 async def setup(bot):
     await bot.add_cog(Music(bot))
