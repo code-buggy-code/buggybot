@@ -32,18 +32,19 @@ class Clone(commands.Cog):
 
     # --- HELPERS ---
     def get_clone_setups(self):
-        """Returns the list of all clone setups."""
+        """Returns the list of all clone setups from the database."""
         return self.bot.db.get_collection("clone_setups")
 
     def save_clone_setups(self, setups):
-        """Saves the list of setups."""
+        """Saves the list of setups to the database."""
         self.bot.db.save_collection("clone_setups", setups)
 
     def get_history(self):
-        """Returns the mapping history (Source MSG -> Clone MSG)."""
+        """Returns the mapping history (Source MSG -> Clone MSG) from the database."""
         return self.bot.db.get_collection("clone_history")
     
     def save_history(self, history):
+        """Saves the mapping history to the database."""
         self.bot.db.save_collection("clone_history", history)
 
     async def get_webhook(self, channel):
@@ -302,7 +303,6 @@ class Clone(commands.Cog):
                     if total >= min_reacts:
                         await self.execute_clone(message, s)
                         # We stop after one clone to prevent duplicate messages if multiple setups match
-                        # (Though prompt said no channel should receive from multiple setups, so this is safe)
                         break
                 except:
                     pass
@@ -360,6 +360,7 @@ class Clone(commands.Cog):
         # Create new setup object
         new_setup = {
             "receive_id": receive_channel.id,
+            "guild_id": interaction.guild.id, # Stored to ensure data persistence matches the server
             "source_id": s_id,
             "ignore_channels": [ignore_channel.id] if ignore_channel else [],
             "attachments_only": attachments_only,
@@ -434,8 +435,15 @@ class Clone(commands.Cog):
         # 1. Map current guild channels for fast local lookup
         current_guild_map = {c.id: c.name for c in interaction.guild.channels}
 
-        # 2. Filter setups: Only show if receiver is in this guild
-        filtered_setups = [s for s in setups if s['receive_id'] in current_guild_map]
+        # 2. Filter setups: Only show if they belong to this guild (by ID or channel presence)
+        filtered_setups = []
+        for s in setups:
+            # Check explicit guild_id (New Standard)
+            if s.get('guild_id') == interaction.guild.id:
+                filtered_setups.append(s)
+            # Check implicit location (Old Standard / Fallback)
+            elif s['receive_id'] in current_guild_map:
+                filtered_setups.append(s)
 
         if not filtered_setups:
             return await interaction.response.send_message("📝 No clone setups found for this server.", ephemeral=True)
@@ -450,8 +458,12 @@ class Clone(commands.Cog):
         text = "**🐏 Clone Setups (This Server):**\n"
         
         for rid, source_list in grouped.items():
-            # Receiver is guaranteed to be in current_guild_map
-            r_name = current_guild_map[rid]
+            # Resolve Receiver Name (Use map or fetch)
+            if rid in current_guild_map:
+                r_name = current_guild_map[rid]
+            else:
+                r_channel = self.bot.get_channel(rid)
+                r_name = r_channel.name if r_channel else f"ID:{rid}"
             
             text += f"\n📂 **Receiver: {r_name}**\n"
             for s in source_list:
