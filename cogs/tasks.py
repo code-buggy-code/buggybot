@@ -23,7 +23,8 @@ from typing import Literal
 #   - __init__(self, bot)
 #   - cog_load(self)
 #   - restore_views(self)
-#   - taskchannel(self, interaction)
+#   - get_task_channel_id(self, guild_id)
+#   - taskchannel(self, ctx) [Prefix - Changed]
 #   - tasks(self, interaction, mode: Literal["Set", "Change"], number: int)
 #   - progress(self, interaction)
 #   - setup(bot)
@@ -246,21 +247,20 @@ class Tasks(commands.Cog, name="tasks"):
         configs = self.bot.db.get_collection("tasks_config")
         return configs.get(str(guild_id), {}).get("task_channel_id")
 
-    @app_commands.command(name="taskchannel", description="Sets the current channel as the only channel for task commands (Owner Only).")
-    async def taskchannel(self, interaction: discord.Interaction):
-        if not await self.bot.is_owner(interaction.user):
-            await interaction.response.send_message("Only my owner can use this command!", ephemeral=True)
-            return
-
-        guild_id = str(interaction.guild_id)
+    # CHANGED: Converted to prefix command
+    @commands.command(name="taskchannel")
+    @commands.is_owner()
+    async def taskchannel(self, ctx):
+        """Sets the current channel as the only channel for task commands (Owner Only)."""
+        guild_id = str(ctx.guild.id)
         configs = self.bot.db.get_collection("tasks_config")
         if isinstance(configs, list): configs = {} # safety
         
         if guild_id not in configs: configs[guild_id] = {}
-        configs[guild_id]["task_channel_id"] = interaction.channel_id
+        configs[guild_id]["task_channel_id"] = ctx.channel.id
         
         self.bot.db.save_collection("tasks_config", configs)
-        await interaction.response.send_message(f"Task commands are now restricted to this channel: {interaction.channel.mention}")
+        await ctx.send(f"✅ Task commands are now restricted to this channel: {ctx.channel.mention}")
 
     @app_commands.command(name="tasks", description="Sets up or changes your task count.", extras={'public': True})
     @app_commands.describe(mode="Set new list (resets progress) or Change total (keeps progress)", number="Number of tasks")
@@ -280,11 +280,15 @@ class Tasks(commands.Cog, name="tasks"):
 
         # Find existing tasks for this user in this server
         active_tasks = self.bot.db.get_collection("tasks_active")
-        existing_doc = next((doc for doc in active_tasks if doc['user_id'] == interaction.user.id), None)
-        # Note: We technically could filter by guild_id here if we want tasks to be per-server.
-        # But for now, we'll keep it per-user as before, or add guild_id check if desired. 
-        # Adding guild_id to search for better separation:
         existing_doc = next((doc for doc in active_tasks if doc['user_id'] == interaction.user.id and doc.get('guild_id') == interaction.guild_id), None)
+
+        # LINK GENERATION LOGIC
+        # Try to find the command ID for 'progress'
+        progress_mention = "`/progress`"
+        if hasattr(self.bot, 'cmd_cache') and interaction.guild_id in self.bot.cmd_cache:
+            cmd_id = self.bot.cmd_cache[interaction.guild_id].get('progress')
+            if cmd_id:
+                progress_mention = f"</progress:{cmd_id}>"
 
         # --- LOGIC FOR 'SET' ---
         if mode == "Set":
@@ -300,12 +304,13 @@ class Tasks(commands.Cog, name="tasks"):
                 # Remove from DB
                 self.bot.db.delete_doc("tasks_active", "message_id", existing_doc['message_id'])
 
-            await interaction.response.send_message(f"I've set your tasks to {number}! Run `/progress` to see your bar.", ephemeral=True)
+            # UPDATED RESPONSE
+            await interaction.response.send_message(f"I've set your tasks to {number}! Run {progress_mention} to see your bar.", ephemeral=True)
             
             # Create new entry
             new_doc = {
                  "user_id": interaction.user.id,
-                 "guild_id": interaction.guild.id, # ADDED guild_id
+                 "guild_id": interaction.guild.id, 
                  "total": number,
                  "state": [0] * number,
                  "message_id": None, 
@@ -337,7 +342,8 @@ class Tasks(commands.Cog, name="tasks"):
             # Update DB
             self.bot.db.update_doc("tasks_active", "message_id", existing_doc['message_id'], {"total": number, "state": state})
             
-            await interaction.response.send_message(f"I've changed your total tasks to {number}! Your progress has been saved. Run `/progress` to refresh the bar.", ephemeral=True)
+            # UPDATED RESPONSE
+            await interaction.response.send_message(f"I've changed your total tasks to {number}! Your progress has been saved. Run {progress_mention} to refresh the bar.", ephemeral=True)
 
 
     @app_commands.command(name="progress", description="Shows your progress bar and buttons.", extras={'public': True})
