@@ -12,6 +12,7 @@ from typing import Union, Optional
 # - migrate_data()
 # - on_message(message)
 # - on_raw_reaction_add(payload)
+# - perform_clone(message, dest_ids)
 # - clone_channel(interaction, source, destination, ignore_channel, attachments_only, return_replies, min_reactions)
 # - unclone_channel(interaction, destination)
 # - list_clones(interaction)
@@ -65,6 +66,7 @@ class Clone(commands.Cog):
         mappings = self.get_clone_mapping()
         
         # 1. Handle Forward Cloning (Source -> Dests)
+        # We search for the current channel ID or its category ID across all global mappings
         source_entry = next((m for m in mappings if m['source_id'] == message.channel.id or m['source_id'] == (message.channel.category.id if message.channel.category else None)), None)
         
         if source_entry:
@@ -83,10 +85,8 @@ class Clone(commands.Cog):
             await self.perform_clone(message, source_entry['dest_ids'])
 
         # 2. Handle Return Replies (Dest -> Source)
-        # Find if this channel is a destination for a setup that has return_replies enabled
         for entry in mappings:
             if entry.get('return_replies') and message.channel.id in entry['dest_ids']:
-                # Send back to the source channel
                 await self.perform_clone(message, [entry['source_id']])
 
     @commands.Cog.listener()
@@ -106,12 +106,9 @@ class Clone(commands.Cog):
         
         try:
             message = await channel.fetch_message(payload.message_id)
-            # Count total unique reactions
             total_reacts = sum(count.count for count in message.reactions)
             
             if total_reacts >= entry['min_reactions']:
-                # Check if already cloned (to prevent duplicates)
-                # We can use a simple cache or just check if we've reacted with a checkmark
                 if not any(r.emoji == "✅" and r.me for r in message.reactions):
                     await self.perform_clone(message, entry['dest_ids'])
                     await message.add_reaction("✅")
@@ -119,8 +116,9 @@ class Clone(commands.Cog):
             pass
 
     async def perform_clone(self, message, dest_ids):
-        """Internal helper to send the formatted embed to multiple destinations."""
+        """Internal helper to send the formatted embed to multiple destinations across servers."""
         for dest_id in dest_ids:
+            # bot.get_channel searches across all guilds the bot is in
             dest_channel = self.bot.get_channel(dest_id)
             if dest_channel:
                 try:
@@ -128,7 +126,6 @@ class Clone(commands.Cog):
                     files = []
                     if message.attachments:
                         for attachment in message.attachments:
-                            # Use try/except for attachment fetching
                             try: files.append(await attachment.to_file())
                             except: pass
                     
@@ -136,9 +133,9 @@ class Clone(commands.Cog):
                     embed.set_author(name=message.author.display_name, icon_url=message.author.display_avatar.url)
                     
                     if message.reference:
-                         embed.set_footer(text=f"Replying to a message in #{message.channel.name}")
+                         embed.set_footer(text=f"Replying to a message in {message.guild.name} -> #{message.channel.name}")
                     else:
-                         embed.set_footer(text=f"Sent from #{message.channel.name}")
+                         embed.set_footer(text=f"Sent from {message.guild.name} -> #{message.channel.name}")
 
                     await dest_channel.send(embed=embed, files=files)
                 except Exception as e:
@@ -165,7 +162,6 @@ class Clone(commands.Cog):
                             attachments_only: bool = False,
                             return_replies: bool = False,
                             min_reactions: int = 0):
-        # Defer immediately to prevent "Application did not respond"
         await interaction.response.defer(ephemeral=True)
         
         if source.id == destination.id:
@@ -187,7 +183,6 @@ class Clone(commands.Cog):
             }
             mappings.append(entry)
         else:
-            # Update existing settings if provided
             entry['attachments_only'] = attachments_only
             entry['return_replies'] = return_replies
             entry['min_reactions'] = min_reactions
@@ -207,7 +202,7 @@ class Clone(commands.Cog):
         if min_reactions > 0: opts.append(f"{min_reactions}+ Reactions Required")
         opt_str = f" ({', '.join(opts)})" if opts else ""
         
-        await interaction.followup.send(f"✅ Messages from **{source.name}** will now be cloned to {destination.mention}{opt_str}.")
+        await interaction.followup.send(f"✅ Messages from **{source.name}** ({source.guild.name}) will now be cloned to {destination.mention}{opt_str}.")
 
     @clone_group.command(name="remove", description="Stop cloning messages to this destination.")
     @app_commands.describe(destination="The channel to stop receiving messages")
@@ -237,20 +232,28 @@ class Clone(commands.Cog):
     async def list_clones(self, interaction: discord.Interaction):
         mappings = self.get_clone_mapping()
         
+        # Only show clones that originate from the current guild to keep the list relevant
         guild_mappings = [m for m in mappings if m.get('guild_id') == interaction.guild.id]
         
         if not guild_mappings:
-            return await interaction.response.send_message("📝 No active clones.", ephemeral=True)
+            return await interaction.response.send_message("📝 No active clones originating from this server.", ephemeral=True)
 
         text = "**Active Channel Clones:**\n"
         for entry in guild_mappings:
-            source = interaction.guild.get_channel(entry['source_id'])
+            source = self.bot.get_channel(entry['source_id'])
             source_name = f"**{source.name}**" if source else f"ID:{entry['source_id']}"
             
             dest_names = []
             for d in entry['dest_ids']:
-                chan = interaction.guild.get_channel(d)
-                dest_names.append(chan.mention if chan else f"ID:{d}")
+                chan = self.bot.get_channel(d)
+                if chan:
+                    # Show the server name if it's cross-server
+                    if chan.guild.id != interaction.guild.id:
+                        dest_names.append(f"{chan.mention} ({chan.guild.name})")
+                    else:
+                        dest_names.append(chan.mention)
+                else:
+                    dest_names.append(f"ID:{d}")
             
             opts = []
             if entry.get('attachments_only'): opts.append("MediaOnly")
