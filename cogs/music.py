@@ -27,11 +27,12 @@ from spotipy.oauth2 import SpotifyClientCredentials
 # - process_spotify_link(url, guild_id)
 # - search_youtube_official(query)
 # - check_token_validity_task()
-# - checkmusic(interaction)
-# - refreshmusic(interaction)
-# - entercode(interaction, code)
-# - setplaylist(interaction, playlist)
-# - setmusicchannel(interaction, channel)
+# - music (Group) [Prefix]
+#   - check(ctx)
+#   - refresh(ctx)
+#   - code(ctx, code)
+#   - playlist(ctx, playlist)
+#   - channel(ctx, channel)
 # - on_message(message)
 # setup(bot)
 
@@ -229,28 +230,36 @@ class Music(commands.Cog):
     async def before_check_token(self):
         await self.bot.wait_until_ready()
 
-    # --- COMMANDS ---
+    # --- PREFIX COMMANDS (Admin) ---
 
-    @app_commands.command(name="checkmusic", description="Admin: Checks all music API statuses.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def checkmusic(self, interaction: discord.Interaction):
+    @commands.group(name="music", invoke_without_command=True)
+    @commands.has_permissions(administrator=True)
+    async def music_group(self, ctx):
+        """Manage music settings."""
+        await ctx.send("Commands: `check`, `refresh`, `code`, `playlist`, `channel`")
+
+    @music_group.command(name="check")
+    @commands.has_permissions(administrator=True)
+    async def music_check(self, ctx):
+        """Checks all music API statuses."""
         is_valid = await self.load_youtube_service()
         
         yt_msg = f"✅ **YouTube License Valid!**" if is_valid else "❌ **YouTube License Broken.**"
         spot_msg = "✅ **Spotify Ready!**" if self.spotify else "❌ **Spotify Not Loaded.**"
         
-        await interaction.response.send_message(f"{yt_msg}\n{spot_msg}", ephemeral=True)
+        await ctx.send(f"{yt_msg}\n{spot_msg}")
 
-    @app_commands.command(name="refreshmusic", description="Admin: Starts the OAuth flow to renew YouTube license.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def refreshmusic(self, interaction: discord.Interaction):
+    @music_group.command(name="refresh")
+    @commands.has_permissions(administrator=True)
+    async def music_refresh(self, ctx):
+        """Starts the OAuth flow to renew YouTube license."""
         # 1. Reload Spotify
         self.load_music_services()
         spot_status = "✅ **Spotify reloaded!**" if self.spotify else "❌ **Spotify NOT found!**"
 
         # 2. Start YouTube Flow
         if not os.path.exists('client_secret.json'):
-             return await interaction.response.send_message(f"{spot_status}\n❌ Missing `client_secret.json`!", ephemeral=True)
+             return await ctx.send(f"{spot_status}\n❌ Missing `client_secret.json`!")
         
         try:
             self.auth_flow = Flow.from_client_secrets_file(
@@ -260,19 +269,18 @@ class Music(commands.Cog):
             )
             auth_url, _ = self.auth_flow.authorization_url(prompt='consent')
             
-            await interaction.response.send_message(
-                f"{spot_status}\n🔄 **YouTube API Renewal Started!**\n1. Click: [Auth Link]({auth_url})\n2. Type: `/entercode <code>`",
-                ephemeral=True
+            await ctx.send(
+                f"{spot_status}\n🔄 **YouTube API Renewal Started!**\n1. Click: [Auth Link]({auth_url})\n2. Type: `?music code <code>`"
             )
         except Exception as e:
-            await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+            await ctx.send(f"❌ Error: {e}")
 
-    @app_commands.command(name="entercode", description="Admin: Completes the YouTube renewal with the code.")
-    @app_commands.describe(code="The authorization code from Google")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def entercode(self, interaction: discord.Interaction, code: str):
+    @music_group.command(name="code")
+    @commands.has_permissions(administrator=True)
+    async def music_code(self, ctx, code: str):
+        """Completes the YouTube renewal with the code."""
         if not self.auth_flow:
-            return await interaction.response.send_message("❌ Run `/refreshmusic` first!", ephemeral=True)
+            return await ctx.send("❌ Run `?music refresh` first!")
         
         try:
             self.auth_flow.fetch_token(code=code)
@@ -284,35 +292,35 @@ class Music(commands.Cog):
             self.bot.db.save_collection("global_music_settings", global_config)
             
             await self.load_youtube_service()
-            await interaction.response.send_message("✅ **Success!** License renewed and saved.", ephemeral=True)
+            await ctx.send("✅ **Success!** License renewed and saved.")
         except Exception as e:
-            await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+            await ctx.send(f"❌ Error: {e}")
 
-    @app_commands.command(name="setplaylist", description="Admin: Set the YouTube Playlist Link or ID.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def setplaylist(self, interaction: discord.Interaction, playlist: str):
+    @music_group.command(name="playlist")
+    @commands.has_permissions(administrator=True)
+    async def music_playlist(self, ctx, playlist: str):
+        """Set the YouTube Playlist Link or ID."""
         # Extract ID if a full link is provided
-        # Regex matches 'list=ID' in a URL (handles ?list= and &list=)
         match = re.search(r'list=([a-zA-Z0-9_-]+)', playlist)
         
         if match:
             clean_id = match.group(1)
         else:
-            # Assume input is just the ID if no "list=" pattern is found
             clean_id = playlist
 
-        config = self.load_config(interaction.guild_id)
+        config = self.load_config(ctx.guild.id)
         config['playlist_id'] = clean_id
-        self.save_config(interaction.guild_id, config)
-        await interaction.response.send_message(f"✅ Playlist set to ID: `{clean_id}`", ephemeral=True)
+        self.save_config(ctx.guild.id, config)
+        await ctx.send(f"✅ Playlist set to ID: `{clean_id}`")
 
-    @app_commands.command(name="setmusicchannel", description="Admin: Set the music sharing channel.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def setmusicchannel(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        config = self.load_config(interaction.guild_id)
+    @music_group.command(name="channel")
+    @commands.has_permissions(administrator=True)
+    async def music_channel(self, ctx, channel: discord.TextChannel):
+        """Set the music sharing channel."""
+        config = self.load_config(ctx.guild.id)
         config['music_channel_id'] = channel.id
-        self.save_config(interaction.guild_id, config)
-        await interaction.response.send_message(f"✅ music channel set to {channel.mention}.", ephemeral=True)
+        self.save_config(ctx.guild.id, config)
+        await ctx.send(f"✅ music channel set to {channel.mention}.")
 
     # --- LISTENER ---
 
@@ -330,17 +338,9 @@ class Music(commands.Cog):
         content = message.content
 
         # Regex Definitions
-        # Spotify: https://open.spotify.com/track/ID
-        # Matches open.spotify.com/track/ID, open.spotify.com/album/ID, etc.
         spotify_match = re.search(r'(https?://(?:open\.|www\.)?spotify\.com/(?:track|album|playlist|artist)/[a-zA-Z0-9_-]+)', content)
-        
-        # YouTube Music: https://music.youtube.com/watch?v=ID
         yt_music_match = re.search(r'https?://music\.youtube\.com/watch\?v=([a-zA-Z0-9_-]+)', content)
-        
-        # YouTube Standard: https://www.youtube.com/watch?v=ID
         yt_standard_match = re.search(r'https?://(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]+)', content)
-        
-        # YouTube Short: https://youtu.be/ID
         yt_short_match = re.search(r'https?://youtu\.be/([a-zA-Z0-9_-]+)', content)
 
         # 1. Handle Spotify
