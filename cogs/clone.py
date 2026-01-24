@@ -13,7 +13,7 @@ from typing import Union, Optional
 # - on_message(message)
 # - on_raw_reaction_add(payload)
 # - perform_clone(message, dest_ids)
-# - clone_channel(interaction, source, destination, ignore_channel, attachments_only, return_replies, min_reactions)
+# - clone_channel(interaction, destination, source, source_id, ignore_channel, attachments_only, return_replies, min_reactions)
 # - unclone_channel(interaction, destination)
 # - list_clones(interaction)
 # setup(bot)
@@ -21,7 +21,7 @@ from typing import Union, Optional
 class Clone(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.description = "Clone messages from one channel to another with advanced filters."
+        self.description = "Clone messages from one channel to another, even across different servers."
         self.migrate_data() # Ensure data structure is correct
 
     # --- HELPERS ---
@@ -66,7 +66,7 @@ class Clone(commands.Cog):
         mappings = self.get_clone_mapping()
         
         # 1. Handle Forward Cloning (Source -> Dests)
-        # We search for the current channel ID or its category ID across all global mappings
+        # Search globally for the source channel or category
         source_entry = next((m for m in mappings if m['source_id'] == message.channel.id or m['source_id'] == (message.channel.category.id if message.channel.category else None)), None)
         
         if source_entry:
@@ -78,7 +78,7 @@ class Clone(commands.Cog):
             if source_entry.get('attachments_only') and not message.attachments:
                 return
 
-            # Check reaction requirement (if 0, clone instantly)
+            # Check reaction requirement
             if source_entry.get('min_reactions', 0) > 0:
                 return
 
@@ -101,6 +101,7 @@ class Clone(commands.Cog):
         if not entry:
             return
 
+        # Look up channel across all servers
         channel = self.bot.get_channel(payload.channel_id)
         if not channel: return
         
@@ -116,9 +117,9 @@ class Clone(commands.Cog):
             pass
 
     async def perform_clone(self, message, dest_ids):
-        """Internal helper to send the formatted embed to multiple destinations across servers."""
+        """Internal helper to send the formatted embed to multiple destinations globally."""
         for dest_id in dest_ids:
-            # bot.get_channel searches across all guilds the bot is in
+            # Search globally for the destination channel
             dest_channel = self.bot.get_channel(dest_id)
             if dest_channel:
                 try:
@@ -147,8 +148,9 @@ class Clone(commands.Cog):
 
     @clone_group.command(name="add", description="Clone messages from Source to Destination.")
     @app_commands.describe(
-        source="Where messages come FROM (Channel or Category)", 
         destination="Where messages go TO",
+        source="Where messages come FROM (Channel/Category object)", 
+        source_id="OR provide a Raw ID (for cross-server channels not in current guild)",
         ignore_channel="Optional: Channel to ignore (if source is category)",
         attachments_only="Only clone messages with attachments?",
         return_replies="Allow replies in receiving channel to be sent back?",
@@ -156,24 +158,32 @@ class Clone(commands.Cog):
     )
     @app_commands.checks.has_permissions(administrator=True)
     async def clone_channel(self, interaction: discord.Interaction, 
-                            source: Union[discord.TextChannel, discord.CategoryChannel], 
                             destination: discord.TextChannel,
+                            source: Optional[Union[discord.TextChannel, discord.CategoryChannel]] = None,
+                            source_id: Optional[str] = None,
                             ignore_channel: Optional[discord.TextChannel] = None,
                             attachments_only: bool = False,
                             return_replies: bool = False,
                             min_reactions: int = 0):
         await interaction.response.defer(ephemeral=True)
         
-        if source.id == destination.id:
+        # Validation
+        if not source and not source_id:
+            return await interaction.followup.send("❌ You must provide either a `source` channel or a `source_id`!")
+        
+        final_source_id = source.id if source else int(source_id)
+        
+        if final_source_id == destination.id:
             return await interaction.followup.send("❌ Source and Destination cannot be the same.")
 
         mappings = self.get_clone_mapping()
         
-        entry = next((m for m in mappings if m['source_id'] == source.id), None)
+        # Check if setup exists globally for this source
+        entry = next((m for m in mappings if m['source_id'] == final_source_id), None)
         
         if not entry:
             entry = {
-                "source_id": source.id, 
+                "source_id": final_source_id, 
                 "dest_ids": [], 
                 "guild_id": interaction.guild.id,
                 "ignore_ids": [],
@@ -202,7 +212,11 @@ class Clone(commands.Cog):
         if min_reactions > 0: opts.append(f"{min_reactions}+ Reactions Required")
         opt_str = f" ({', '.join(opts)})" if opts else ""
         
-        await interaction.followup.send(f"✅ Messages from **{source.name}** ({source.guild.name}) will now be cloned to {destination.mention}{opt_str}.")
+        # Try to find a name for display
+        source_obj = source or self.bot.get_channel(final_source_id)
+        source_name = source_obj.name if source_obj else f"ID:{final_source_id}"
+        
+        await interaction.followup.send(f"✅ Messages from **{source_name}** will now be cloned to {destination.mention}{opt_str}.")
 
     @clone_group.command(name="remove", description="Stop cloning messages to this destination.")
     @app_commands.describe(destination="The channel to stop receiving messages")
@@ -232,7 +246,7 @@ class Clone(commands.Cog):
     async def list_clones(self, interaction: discord.Interaction):
         mappings = self.get_clone_mapping()
         
-        # Only show clones that originate from the current guild to keep the list relevant
+        # Show clones originating from this server
         guild_mappings = [m for m in mappings if m.get('guild_id') == interaction.guild.id]
         
         if not guild_mappings:
@@ -247,7 +261,6 @@ class Clone(commands.Cog):
             for d in entry['dest_ids']:
                 chan = self.bot.get_channel(d)
                 if chan:
-                    # Show the server name if it's cross-server
                     if chan.guild.id != interaction.guild.id:
                         dest_names.append(f"{chan.mention} ({chan.guild.name})")
                     else:
