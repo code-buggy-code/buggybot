@@ -23,19 +23,19 @@ import asyncio
 # - check_lockout_loop(self)
 # - on_voice_state_update(self, member, before, after)
 # - on_message(self, message)
-# - lockout_group (Group)
-# - config_group (Group parent=lockout_group)
-# - zone_group (Group parent=lockout_group)
-# - myset(self, interaction, start, end, repeat)
-# - myview(self, interaction)
-# - myclear(self, interaction)
-# - adminclear(self, interaction, member)
-# - timeout(self, interaction, member, minutes, cancel)
-# - set_target_role(self, interaction, role)
-# - set_jail_channel(self, interaction, channel)
-# - add_zone(self, interaction, role, offset)
-# - remove_zone(self, interaction, role)
-# - list_zones(self, interaction)
+# - myschedule(self, interaction, start, end, repeat) [Slash - Public]
+# - myview(self, interaction) [Slash - Public]
+# - myclear(self, interaction) [Slash - Public]
+# - timeout(self, ctx, member, minutes, cancel) [Prefix]
+# - adminclear(self, ctx, member) [Prefix]
+# - lockout (Group) [Prefix]
+#   - config (Group)
+#     - target_role(self, ctx, role)
+#     - jail_channel(self, ctx, channel)
+#   - zone (Group)
+#     - add(self, ctx, role, offset)
+#     - remove(self, ctx, role)
+#     - list(self, ctx)
 # setup(bot)
 
 class Lockout(commands.Cog):
@@ -397,21 +397,17 @@ class Lockout(commands.Cog):
             await self.update_jail_sticky(message.guild)
 
 
-    # --- COMMANDS ---
-
-    lockout_group = app_commands.Group(name="lockout", description="Manage lockout settings")
-    config_group = app_commands.Group(name="config", parent=lockout_group, description="Configure server lockout settings")
-    zone_group = app_commands.Group(name="zone", parent=lockout_group, description="Manage timezone roles")
-
-    # USER COMMANDS
-    @app_commands.command(name="myschedule", description="Set your personal lockout schedule (HH:MM format).")
+    # --- SLASH COMMANDS (USER) ---
+    
+    @app_commands.command(name="myschedule", description="Set your personal lockout schedule (HH:MM format).", extras={'public': True})
     @app_commands.describe(start="Start time (e.g. 23:00)", end="End time (e.g. 07:00)", repeat="How often to repeat")
     @app_commands.choices(repeat=[
         app_commands.Choice(name="Daily (Every Day)", value="daily"),
         app_commands.Choice(name="Weekdays (Mon-Fri)", value="weekdays"),
         app_commands.Choice(name="Weekends (Sat-Sun)", value="weekends")
     ])
-    async def myset(self, interaction: discord.Interaction, start: str, end: str, repeat: app_commands.Choice[str] = None):
+    async def myschedule(self, interaction: discord.Interaction, start: str, end: str, repeat: app_commands.Choice[str] = None):
+        """Set your personal lockout schedule (HH:MM format)."""
         try:
             datetime.datetime.strptime(start, "%H:%M")
             datetime.datetime.strptime(end, "%H:%M")
@@ -429,8 +425,9 @@ class Lockout(commands.Cog):
         self.save_user_schedule(interaction.guild_id, interaction.user.id, data)
         await interaction.response.send_message(f"✅ Schedule set! Lockout from **{start}** to **{end}** ({repeat_val.capitalize()}).", ephemeral=True)
 
-    @app_commands.command(name="myview", description="View your current lockout schedule.")
+    @app_commands.command(name="myview", description="View your current lockout schedule.", extras={'public': True})
     async def myview(self, interaction: discord.Interaction):
+        """View your current lockout schedule."""
         data = self.get_user_schedule(interaction.guild_id, interaction.user.id)
         if not data:
             return await interaction.response.send_message("You don't have a schedule set.", ephemeral=True)
@@ -438,8 +435,9 @@ class Lockout(commands.Cog):
         repeat_val = data.get('repeat', 'daily').capitalize()
         await interaction.response.send_message(f"📅 **Your Schedule:** {data['start']} - {data['end']} ({repeat_val})", ephemeral=True)
 
-    @app_commands.command(name="myclear", description="Delete your lockout schedule.")
+    @app_commands.command(name="myclear", description="Delete your lockout schedule.", extras={'public': True})
     async def myclear(self, interaction: discord.Interaction):
+        """Delete your lockout schedule."""
         data = self.get_user_schedule(interaction.guild_id, interaction.user.id)
         if not data:
             return await interaction.response.send_message("You don't have a schedule set.", ephemeral=True)
@@ -474,39 +472,40 @@ class Lockout(commands.Cog):
         self.delete_user_schedule(interaction.guild_id, interaction.user.id)
         await interaction.response.send_message("✅ Schedule cleared.", ephemeral=True)
 
-    # ADMIN COMMANDS
-    @app_commands.command(name="timeout", description="Timeout (Jail) a user for a set time. Use cancel:True to release.")
-    @app_commands.describe(member="The user to timeout", minutes="How long (minutes)", cancel="Set True to release user")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def timeout(self, interaction: discord.Interaction, member: discord.Member, minutes: int = None, cancel: bool = False):
-        config = self.get_config(interaction.guild_id)
+    # --- PREFIX COMMANDS (ADMIN) ---
+
+    @commands.command(name="timeout")
+    @commands.has_permissions(administrator=True)
+    async def timeout(self, ctx, member: discord.Member, minutes: int = 0, cancel: bool = False):
+        """Timeout (Jail) a user. Usage: ?timeout <user> <minutes> [False] OR ?timeout <user> 0 True (to release)"""
+        config = self.get_config(ctx.guild.id)
         
         if cancel:
-            jail_data = self.get_jail_data(interaction.guild_id, member.id)
+            jail_data = self.get_jail_data(ctx.guild.id, member.id)
             if not jail_data:
-                return await interaction.response.send_message(f"⚠️ {member.mention} is not currently in timeout.", ephemeral=True)
+                return await ctx.send(f"⚠️ {member.mention} is not currently in timeout.")
             
             # Release Logic
-            target_role = interaction.guild.get_role(config.get('target_role_id')) if config else None
+            target_role = ctx.guild.get_role(config.get('target_role_id')) if config else None
             if target_role:
                 try: await member.add_roles(target_role)
                 except: pass
             
-            self.delete_jail_data(interaction.guild_id, member.id)
-            await self.update_jail_sticky(interaction.guild)
-            return await interaction.response.send_message(f"✅ Released {member.mention} from timeout.", ephemeral=False)
+            self.delete_jail_data(ctx.guild.id, member.id)
+            await self.update_jail_sticky(ctx.guild)
+            return await ctx.send(f"✅ Released {member.mention} from timeout.")
 
         # Start Timeout Logic
-        if not minutes:
-            return await interaction.response.send_message("❌ You must specify minutes unless canceling.", ephemeral=True)
+        if minutes <= 0:
+            return await ctx.send("❌ You must specify positive minutes.")
 
         if not config or not config.get('jail_channel_id'):
-            return await interaction.response.send_message("❌ Jail channel not configured.", ephemeral=True)
+            return await ctx.send("❌ Jail channel not configured.")
         
         if not config.get('target_role_id'):
-             return await interaction.response.send_message("❌ Target role not configured.", ephemeral=True)
+             return await ctx.send("❌ Target role not configured.")
 
-        target_role = interaction.guild.get_role(config['target_role_id'])
+        target_role = ctx.guild.get_role(config['target_role_id'])
         if target_role:
             try: await member.remove_roles(target_role)
             except: pass
@@ -519,42 +518,59 @@ class Lockout(commands.Cog):
         }
         
         # Check if already in jail VC
-        jail_vc = interaction.guild.get_channel(config['jail_channel_id'])
+        jail_vc = ctx.guild.get_channel(config['jail_channel_id'])
         if member.voice and member.voice.channel and member.voice.channel.id == config['jail_channel_id']:
             data['last_check'] = datetime.datetime.now().timestamp()
             
-        self.save_jail_data(interaction.guild_id, member.id, data)
-        await interaction.response.send_message(f"🔒 {member.mention} has been jailed for {minutes} minutes. Go to {jail_vc.mention} to count down.", ephemeral=False)
-        await self.update_jail_sticky(interaction.guild)
+        self.save_jail_data(ctx.guild.id, member.id, data)
+        await ctx.send(f"🔒 {member.mention} has been jailed for {minutes} minutes. Go to {jail_vc.mention} to count down.")
+        await self.update_jail_sticky(ctx.guild)
 
-    @app_commands.command(name="adminclear", description="Force clear a user's schedule.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def adminclear(self, interaction: discord.Interaction, member: discord.Member):
-        self.delete_user_schedule(interaction.guild_id, member.id)
-        await interaction.response.send_message(f"✅ Cleared schedule for {member.display_name}.", ephemeral=True)
+    @commands.command(name="adminclear")
+    @commands.has_permissions(administrator=True)
+    async def adminclear(self, ctx, member: discord.Member):
+        """Force clear a user's schedule."""
+        self.delete_user_schedule(ctx.guild.id, member.id)
+        await ctx.send(f"✅ Cleared schedule for {member.display_name}.")
 
-    # CONFIG COMMANDS
-    @config_group.command(name="target_role", description="Set the role to remove/add (e.g. NSFW role).")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def set_target_role(self, interaction: discord.Interaction, role: discord.Role):
-        config = self.get_config(interaction.guild_id) or {"guild_id": interaction.guild_id}
+    # --- PREFIX CONFIG GROUPS ---
+
+    @commands.group(name="lockout", invoke_without_command=True)
+    @commands.has_permissions(administrator=True)
+    async def lockout_group(self, ctx):
+        await ctx.send("Commands: `config`, `zone`")
+
+    @lockout_group.group(name="config", invoke_without_command=True)
+    @commands.has_permissions(administrator=True)
+    async def config_group(self, ctx):
+        await ctx.send("Commands: `target_role`, `jail_channel`")
+
+    @config_group.command(name="target_role")
+    @commands.has_permissions(administrator=True)
+    async def config_target_role(self, ctx, role: discord.Role):
+        config = self.get_config(ctx.guild.id) or {"guild_id": ctx.guild.id}
         config['target_role_id'] = role.id
-        self.save_config(interaction.guild_id, config)
-        await interaction.response.send_message(f"✅ Target role set to {role.mention}.", ephemeral=True)
+        self.save_config(ctx.guild.id, config)
+        await ctx.send(f"✅ Target role set to {role.mention}.")
 
-    @config_group.command(name="jail_channel", description="Set the voice channel for timeouts.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def set_jail_channel(self, interaction: discord.Interaction, channel: discord.VoiceChannel):
-        config = self.get_config(interaction.guild_id) or {"guild_id": interaction.guild_id}
+    @config_group.command(name="jail_channel")
+    @commands.has_permissions(administrator=True)
+    async def config_jail_channel(self, ctx, channel: discord.VoiceChannel):
+        config = self.get_config(ctx.guild.id) or {"guild_id": ctx.guild.id}
         config['jail_channel_id'] = channel.id
-        self.save_config(interaction.guild_id, config)
-        await interaction.response.send_message(f"✅ Jail channel set to {channel.mention}.", ephemeral=True)
+        self.save_config(ctx.guild.id, config)
+        await ctx.send(f"✅ Jail channel set to {channel.mention}.")
 
-    @zone_group.command(name="add", description="Add a timezone role configuration.")
-    @app_commands.describe(offset="Hours offset from UTC (e.g. -5 for EST)")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def add_zone(self, interaction: discord.Interaction, role: discord.Role, offset: int):
-        config = self.get_config(interaction.guild_id) or {"guild_id": interaction.guild_id}
+    @lockout_group.group(name="zone", invoke_without_command=True)
+    @commands.has_permissions(administrator=True)
+    async def zone_group(self, ctx):
+        await ctx.send("Commands: `add`, `remove`, `list`")
+
+    @zone_group.command(name="add")
+    @commands.has_permissions(administrator=True)
+    async def zone_add(self, ctx, role: discord.Role, offset: int):
+        """Add a timezone. ?lockout zone add @Role -5"""
+        config = self.get_config(ctx.guild.id) or {"guild_id": ctx.guild.id}
         zones = config.get('time_zones', [])
         
         # Remove existing if role already used
@@ -562,38 +578,41 @@ class Lockout(commands.Cog):
         zones.append({'role_id': role.id, 'offset': offset})
         
         config['time_zones'] = zones
-        self.save_config(interaction.guild_id, config)
-        await interaction.response.send_message(f"✅ Added timezone: {role.mention} = UTC{offset:+d}", ephemeral=True)
+        self.save_config(ctx.guild.id, config)
+        await ctx.send(f"✅ Added timezone: {role.mention} = UTC{offset:+d}")
 
-    @zone_group.command(name="remove", description="Remove a timezone role.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def remove_zone(self, interaction: discord.Interaction, role: discord.Role):
-        config = self.get_config(interaction.guild_id)
+    @zone_group.command(name="remove")
+    @commands.has_permissions(administrator=True)
+    async def zone_remove(self, ctx, role: discord.Role):
+        """Remove a timezone."""
+        config = self.get_config(ctx.guild.id)
         if not config or 'time_zones' not in config:
-            return await interaction.response.send_message("No zones configured.", ephemeral=True)
+            return await ctx.send("No zones configured.")
             
         initial_len = len(config['time_zones'])
         config['time_zones'] = [z for z in config['time_zones'] if z['role_id'] != role.id]
         
         if len(config['time_zones']) < initial_len:
-            self.save_config(interaction.guild_id, config)
-            await interaction.response.send_message(f"✅ Removed timezone role {role.mention}.", ephemeral=True)
+            self.save_config(ctx.guild.id, config)
+            await ctx.send(f"✅ Removed timezone role {role.mention}.")
         else:
-            await interaction.response.send_message("That role is not a configured timezone.", ephemeral=True)
+            await ctx.send("That role is not a configured timezone.")
 
-    @zone_group.command(name="list", description="List configured timezone roles.")
-    async def list_zones(self, interaction: discord.Interaction):
-        config = self.get_config(interaction.guild_id)
+    @zone_group.command(name="list")
+    @commands.has_permissions(administrator=True)
+    async def zone_list(self, ctx):
+        """List active timezone roles."""
+        config = self.get_config(ctx.guild.id)
         if not config or not config.get('time_zones'):
-            return await interaction.response.send_message("No zones configured.", ephemeral=True)
+            return await ctx.send("No zones configured.")
             
         text = "**🌍 Timezone Roles:**\n"
         for z in config['time_zones']:
-            role = interaction.guild.get_role(z['role_id'])
+            role = ctx.guild.get_role(z['role_id'])
             name = role.mention if role else f"ID:{z['role_id']}"
             text += f"• {name}: UTC{z['offset']:+d}\n"
             
-        await interaction.response.send_message(text, ephemeral=True)
+        await ctx.send(text)
 
 async def setup(bot):
     await bot.add_cog(Lockout(bot))
