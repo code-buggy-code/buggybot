@@ -100,9 +100,6 @@ class Music(commands.Cog):
                         creds.refresh(Request())
                         global_config['youtube_token_json'] = creds.to_json()
                         # Save Global settings
-                        # We save it as a list with one item if we want to stick to list convention, 
-                        # or just overwrite "global_music_settings" key with the dict. 
-                        # DatabaseHandler supports generic data, so we'll save the dict directly.
                         self.bot.db.save_collection("global_music_settings", global_config)
                     except: 
                         return False
@@ -175,8 +172,10 @@ class Music(commands.Cog):
         if errors:
             return "Setup Errors:\n" + "\n".join([f"- {e}" for e in errors])
 
-        match = re.search(r'(https?://[^\s]+)', url)
-        clean_url = match.group(0) if match else url
+        # Logic: Link is already regex-verified by on_message, so we can trust it somewhat.
+        # But we still strip potential query params just in case.
+        clean_url = url.split("?")[0]
+        
         loop = asyncio.get_running_loop()
 
         try:
@@ -316,22 +315,37 @@ class Music(commands.Cog):
         # Check if in music channel
         if config['music_channel_id'] != 0 and message.channel.id == config['music_channel_id']:
             
-            # 1. Spotify Link
-            if "spotify.com" in message.content.lower():
-                result = await self.process_spotify_link(message.content, message.guild.id)
+            content = message.content
+
+            # Regex Definitions
+            # Spotify: https://open.spotify.com/track/ID
+            spotify_match = re.search(r'(https?://open\.spotify\.com/(?:track|album|playlist|artist)/[a-zA-Z0-9]+)', content)
+            
+            # YouTube Music: https://music.youtube.com/watch?v=ID
+            yt_music_match = re.search(r'https?://music\.youtube\.com/watch\?v=([a-zA-Z0-9_-]+)', content)
+            
+            # YouTube Standard: https://www.youtube.com/watch?v=ID
+            yt_standard_match = re.search(r'https?://(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]+)', content)
+            
+            # YouTube Short: https://youtu.be/ID
+            yt_short_match = re.search(r'https?://youtu\.be/([a-zA-Z0-9_-]+)', content)
+
+            # 1. Handle Spotify
+            if spotify_match:
+                result = await self.process_spotify_link(spotify_match.group(1), message.guild.id)
                 if result is True:
                     await message.add_reaction("🎵")
                 else:
                     await message.channel.send(f"⚠️ **Error:** Spotify link failed.\n`{result}`", delete_after=10)
 
-            # 2. YouTube Link (Direct Insert)
-            elif self.youtube and ("v=" in message.content or "youtu.be/" in message.content):
+            # 2. Handle YouTube (Music, Standard, Short)
+            elif self.youtube and (yt_music_match or yt_standard_match or yt_short_match):
+                # Extract Video ID based on which one matched
                 v_id = None
-                if "v=" in message.content: 
-                    v_id = message.content.split("v=")[1].split("&")[0]
-                elif "youtu.be/" in message.content: 
-                    v_id = message.content.split("youtu.be/")[1].split("?")[0]
-                
+                if yt_music_match: v_id = yt_music_match.group(1)
+                elif yt_standard_match: v_id = yt_standard_match.group(1)
+                elif yt_short_match: v_id = yt_short_match.group(1)
+
                 if v_id:
                     try:
                         self.youtube.playlistItems().insert(
