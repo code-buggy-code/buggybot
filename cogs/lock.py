@@ -23,11 +23,12 @@ import asyncio
 # - check_lockout_loop(self)
 # - on_voice_state_update(self, member, before, after)
 # - on_message(self, message)
-# - myschedule(self, interaction, start, end, repeat) [Slash - Public]
-# - myview(self, interaction) [Slash - Public]
-# - myclear(self, interaction) [Slash - Public]
+# - setschedule(self, interaction, start, end, repeat) [Slash - Public]
+# - view_schedule(self, interaction) [Slash - Public]
+# - clear_schedule(self, interaction) [Slash - Public]
 # - timeout(self, ctx, member, minutes, cancel) [Prefix]
 # - adminclear(self, ctx, member) [Prefix]
+# - setlock(self, ctx, channel) [Prefix]
 # - lockout (Group) [Prefix]
 #   - config (Group)
 #     - target_role(self, ctx, role)
@@ -399,15 +400,21 @@ class Lockout(commands.Cog):
 
     # --- SLASH COMMANDS (USER) ---
     
-    @app_commands.command(name="myschedule", description="Set your personal lockout schedule (HH:MM format).", extras={'public': True})
+    @app_commands.command(name="setschedule", description="Set your personal lockout schedule (HH:MM format).", extras={'public': True})
     @app_commands.describe(start="Start time (e.g. 23:00)", end="End time (e.g. 07:00)", repeat="How often to repeat")
     @app_commands.choices(repeat=[
         app_commands.Choice(name="Daily (Every Day)", value="daily"),
         app_commands.Choice(name="Weekdays (Mon-Fri)", value="weekdays"),
         app_commands.Choice(name="Weekends (Sat-Sun)", value="weekends")
     ])
-    async def myschedule(self, interaction: discord.Interaction, start: str, end: str, repeat: app_commands.Choice[str] = None):
+    async def setschedule(self, interaction: discord.Interaction, start: str, end: str, repeat: app_commands.Choice[str] = None):
         """Set your personal lockout schedule (HH:MM format)."""
+        # Channel Restriction Check
+        config = self.get_config(interaction.guild_id)
+        if config and config.get('command_channel_id'):
+            if interaction.channel_id != config['command_channel_id']:
+                return await interaction.response.send_message(f"Please use <#{config['command_channel_id']}> for lock commands!", ephemeral=True)
+
         try:
             datetime.datetime.strptime(start, "%H:%M")
             datetime.datetime.strptime(end, "%H:%M")
@@ -425,9 +432,17 @@ class Lockout(commands.Cog):
         self.save_user_schedule(interaction.guild_id, interaction.user.id, data)
         await interaction.response.send_message(f"✅ Schedule set! Lockout from **{start}** to **{end}** ({repeat_val.capitalize()}).", ephemeral=True)
 
-    @app_commands.command(name="myview", description="View your current lockout schedule.", extras={'public': True})
-    async def myview(self, interaction: discord.Interaction):
+    view_group = app_commands.Group(name="view", description="View your settings")
+
+    @view_group.command(name="schedule", description="View your current lockout schedule.", extras={'public': True})
+    async def view_schedule(self, interaction: discord.Interaction):
         """View your current lockout schedule."""
+        # Channel Restriction Check
+        config = self.get_config(interaction.guild_id)
+        if config and config.get('command_channel_id'):
+            if interaction.channel_id != config['command_channel_id']:
+                return await interaction.response.send_message(f"Please use <#{config['command_channel_id']}> for lock commands!", ephemeral=True)
+
         data = self.get_user_schedule(interaction.guild_id, interaction.user.id)
         if not data:
             return await interaction.response.send_message("You don't have a schedule set.", ephemeral=True)
@@ -435,15 +450,22 @@ class Lockout(commands.Cog):
         repeat_val = data.get('repeat', 'daily').capitalize()
         await interaction.response.send_message(f"📅 **Your Schedule:** {data['start']} - {data['end']} ({repeat_val})", ephemeral=True)
 
-    @app_commands.command(name="myclear", description="Delete your lockout schedule.", extras={'public': True})
-    async def myclear(self, interaction: discord.Interaction):
+    clear_group = app_commands.Group(name="clear", description="Clear your settings")
+
+    @clear_group.command(name="schedule", description="Delete your lockout schedule.", extras={'public': True})
+    async def clear_schedule(self, interaction: discord.Interaction):
         """Delete your lockout schedule."""
+        # Channel Restriction Check
+        config = self.get_config(interaction.guild_id)
+        if config and config.get('command_channel_id'):
+            if interaction.channel_id != config['command_channel_id']:
+                return await interaction.response.send_message(f"Please use <#{config['command_channel_id']}> for lock commands!", ephemeral=True)
+
         data = self.get_user_schedule(interaction.guild_id, interaction.user.id)
         if not data:
             return await interaction.response.send_message("You don't have a schedule set.", ephemeral=True)
         
         # Check if currently locked (prevents escape)
-        config = self.get_config(interaction.guild_id)
         user_tz_offset = 0
         found_tz = False
         
@@ -473,6 +495,20 @@ class Lockout(commands.Cog):
         await interaction.response.send_message("✅ Schedule cleared.", ephemeral=True)
 
     # --- PREFIX COMMANDS (ADMIN) ---
+
+    @commands.command(name="setlock")
+    @commands.has_permissions(administrator=True)
+    async def setlock(self, ctx, channel: discord.TextChannel = None):
+        """Set a channel for lock commands to be used. ?setlock #channel"""
+        config = self.get_config(ctx.guild.id) or {"guild_id": ctx.guild.id}
+        
+        if channel is None:
+             await ctx.send("Usage: ?setlock <#channel> (or 'none' to disable)")
+             return
+
+        config['command_channel_id'] = channel.id
+        self.save_config(ctx.guild.id, config)
+        await ctx.send(f"✅ Lock commands restricted to {channel.mention}.")
 
     @commands.command(name="timeout")
     @commands.has_permissions(administrator=True)
