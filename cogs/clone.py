@@ -25,9 +25,8 @@ class Clone(commands.Cog):
 
     def get_clone_mapping(self):
         """Returns the list of clones."""
-        # New structure: List of dicts {source_id, dest_ids, guild_id}
         data = self.bot.db.get_collection("clone_mappings")
-        if isinstance(data, dict): return [] # Should be list now
+        if not isinstance(data, list): return []
         return data
 
     def save_clone_mapping(self, mapping):
@@ -38,14 +37,10 @@ class Clone(commands.Cog):
         """Migrates old Dict structure to new List structure with guild_id."""
         data = self.bot.db.get_collection("clone_mappings")
         
-        # If it's a dict, it's the old format: {source_id: [dest_ids]}
         if isinstance(data, dict) and data:
             print("🔄 Migrating clone_mappings to new format...")
             new_list = []
             for src, dests in data.items():
-                # We can't know the guild ID easily without an object, 
-                # but we can try to find it via the bot cache or just store 0 for now and fix on load.
-                # Ideally, we find a channel object.
                 channel = self.bot.get_channel(int(src))
                 gid = channel.guild.id if channel else 0
                 
@@ -67,7 +62,6 @@ class Clone(commands.Cog):
 
         mappings = self.get_clone_mapping()
         
-        # Find entry for this source
         entry = next((m for m in mappings if m['source_id'] == message.channel.id), None)
         
         if entry:
@@ -77,14 +71,12 @@ class Clone(commands.Cog):
                 dest_channel = self.bot.get_channel(dest_id)
                 if dest_channel:
                     try:
-                        # Prepare content
                         content = message.content
                         files = []
                         if message.attachments:
                             for attachment in message.attachments:
                                 files.append(await attachment.to_file())
                         
-                        # Send as a webhook-like message (using Embed for cleaner look)
                         embed = discord.Embed(description=content, color=message.author.color, timestamp=message.created_at)
                         embed.set_author(name=message.author.display_name, icon_url=message.author.display_avatar.url)
                         
@@ -109,22 +101,19 @@ class Clone(commands.Cog):
 
         mappings = self.get_clone_mapping()
         
-        # Find or Create Entry
         entry = next((m for m in mappings if m['source_id'] == source.id), None)
         
         if not entry:
             entry = {"source_id": source.id, "dest_ids": [], "guild_id": interaction.guild.id}
             mappings.append(entry)
         
-        # Update logic
         if destination.id in entry['dest_ids']:
              return await interaction.response.send_message("⚠️ This clone link already exists.", ephemeral=True)
 
-        # Since we modified 'entry' (reference), we just need to ensure the list is saved
         entry['dest_ids'].append(destination.id)
         
-        # Re-save the whole list (DatabaseHandler handles replacement)
-        self.bot.db.update_doc("clone_mappings", "source_id", source.id, entry)
+        # Fixed logic: Save the entire modified collection list
+        self.save_clone_mapping(mappings)
         
         await interaction.response.send_message(f"✅ Messages from {source.mention} will now be cloned to {destination.mention}.", ephemeral=True)
 
@@ -135,19 +124,18 @@ class Clone(commands.Cog):
         mappings = self.get_clone_mapping()
         found = False
 
-        # Search all sources for this destination
+        new_mappings = []
         for entry in mappings:
             if destination.id in entry['dest_ids']:
                 entry['dest_ids'].remove(destination.id)
                 found = True
-                
-                # If empty, we could remove the entry, but keeping it empty is fine too
-                if not entry['dest_ids']:
-                    self.bot.db.delete_doc("clone_mappings", "source_id", entry['source_id'])
-                else:
-                    self.bot.db.update_doc("clone_mappings", "source_id", entry['source_id'], entry)
+            
+            # Only keep entries that still have destinations
+            if entry['dest_ids']:
+                new_mappings.append(entry)
 
         if found:
+            self.save_clone_mapping(new_mappings)
             await interaction.response.send_message(f"✅ Stopped cloning messages to {destination.mention}.", ephemeral=True)
         else:
             await interaction.response.send_message(f"⚠️ {destination.mention} is not receiving any cloned messages.", ephemeral=True)
@@ -156,7 +144,6 @@ class Clone(commands.Cog):
     async def list_clones(self, interaction: discord.Interaction):
         mappings = self.get_clone_mapping()
         
-        # Filter by Guild ID
         guild_mappings = [m for m in mappings if m.get('guild_id') == interaction.guild.id]
         
         if not guild_mappings:
