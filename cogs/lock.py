@@ -24,8 +24,8 @@ import asyncio
 # - on_voice_state_update(self, member, before, after)
 # - on_message(self, message)
 # - setschedule(self, interaction, start, end, repeat) [Slash - Public]
-# - view_schedule(self, interaction) [Slash - Public]
-# - clear_schedule(self, interaction) [Slash - Public]
+# - viewschedule(self, interaction) [Slash - Public]
+# - clearschedule(self, interaction) [Slash - Public]
 # - timeout(self, ctx, member, minutes, cancel) [Prefix]
 # - adminclear(self, ctx, member) [Prefix]
 # - lockoutchannel(self, ctx, channel) [Prefix]
@@ -361,10 +361,8 @@ class Lockout(commands.Cog):
         self.save_user_schedule(interaction.guild_id, interaction.user.id, {"start": start, "end": end, "repeat": repeat_val, "locked_by_bot": False})
         await interaction.response.send_message(f"✅ Schedule set! Lockout from **{start}** to **{end}** ({repeat_val.capitalize()}).", ephemeral=True)
 
-    view_group = app_commands.Group(name="view", description="View your settings")
-
-    @view_group.command(name="schedule", description="View your current lockout schedule.", extras={'public': True})
-    async def view_schedule(self, interaction: discord.Interaction):
+    @app_commands.command(name="viewschedule", description="View your current lockout schedule.", extras={'public': True})
+    async def viewschedule(self, interaction: discord.Interaction):
         """View your current lockout schedule."""
         config = self.get_config(interaction.guild_id)
         if config and config.get('command_channel_id') and interaction.channel_id != config['command_channel_id']:
@@ -374,10 +372,8 @@ class Lockout(commands.Cog):
         if not data: return await interaction.response.send_message("You don't have a schedule set.", ephemeral=True)
         await interaction.response.send_message(f"📅 **Your Schedule:** {data['start']} - {data['end']} ({data.get('repeat', 'daily').capitalize()})", ephemeral=True)
 
-    clear_group = app_commands.Group(name="clear", description="Clear your settings")
-
-    @clear_group.command(name="schedule", description="Delete your lockout schedule.", extras={'public': True})
-    async def clear_schedule(self, interaction: discord.Interaction):
+    @app_commands.command(name="clearschedule", description="Delete your lockout schedule.", extras={'public': True})
+    async def clearschedule(self, interaction: discord.Interaction):
         """Delete your lockout schedule."""
         config = self.get_config(interaction.guild_id)
         if config and config.get('command_channel_id') and interaction.channel_id != config['command_channel_id']:
