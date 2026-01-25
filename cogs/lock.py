@@ -105,23 +105,35 @@ class Lockout(commands.Cog):
             return current_time >= start_time or current_time <= end_time
 
     def create_progress_bar(self, total, remaining):
+        """Creates a visual bar that matches the tasks.py style."""
+        if total <= 0: return ""
+        
+        # Grid Size: 16 Columns x 2 Rows = 32 Squares total (Matching tasks.py)
         cols = 16
         rows = 2
         total_blocks = cols * rows
+        
+        # Calculate percent completion
         elapsed = max(0, total - remaining)
-        percent = elapsed / total if total > 0 else 1.0
+        percent = elapsed / total
+        
         green_blocks = int(percent * total_blocks)
         visual_state = [1] * green_blocks + [0] * (total_blocks - green_blocks)
-        if len(visual_state) > total_blocks: visual_state = visual_state[:total_blocks]
+        
+        if len(visual_state) > total_blocks: 
+            visual_state = visual_state[:total_blocks]
 
         SYM_DONE = "🟩" 
         SYM_TODO = "⬜"
+        
         row0 = "-# "
         row1 = "-# "
+        
         for i in range(total_blocks):
             sym = SYM_DONE if visual_state[i] == 1 else SYM_TODO
             if i % 2 == 0: row0 += sym
             else: row1 += sym
+            
         return f"{row0}\n{row1}"
 
     async def update_jail_sticky(self, guild):
@@ -132,15 +144,10 @@ class Lockout(commands.Cog):
         if not channel: return
 
         jails = self.bot.db.get_collection("lockout_jail")
+        # Buggy's requested change: Show all active timeouts even if they haven't joined yet
         guild_jails = [j for j in jails if j['guild_id'] == guild.id and j.get('remaining_seconds', 0) > 0]
 
-        active_inmates = []
-        for j in guild_jails:
-            member = guild.get_member(j['user_id'])
-            if member and member.voice and member.voice.channel and member.voice.channel.id == channel.id:
-                active_inmates.append(j)
-
-        if not active_inmates:
+        if not guild_jails:
             if config.get('jail_sticky_id'):
                 try:
                     msg = await channel.fetch_message(config['jail_sticky_id'])
@@ -151,21 +158,28 @@ class Lockout(commands.Cog):
             return
 
         content = "**🔒 Active Timeouts**\n"
-        for inmate in active_inmates:
+        for inmate in guild_jails:
             uid = inmate['user_id']
             remaining = int(inmate['remaining_seconds'])
             total = inmate.get('total_seconds', remaining)
             member = guild.get_member(uid)
             name = member.display_name if member else f"ID: {uid}"
+            
+            # Check if currently counting (in the timeout VC)
+            in_vc = member and member.voice and member.voice.channel and member.voice.channel.id == config['jail_channel_id']
+            status = " (Counting...)" if in_vc else " (Paused)"
+            
             bar = self.create_progress_bar(total, remaining)
             mins_left = int(remaining // 60)
-            content += f"\n**{name}** ({mins_left}m remaining)\n{bar}\n"
+            
+            content += f"\n**{name}**{status} — {mins_left}m remaining\n{bar}\n"
 
         existing_id = config.get('jail_sticky_id')
         msg = None
         if existing_id:
             try:
                 msg = await channel.fetch_message(existing_id)
+                # If someone talked, move sticky down
                 if channel.last_message_id != msg.id:
                     await msg.delete()
                     msg = None
@@ -198,11 +212,15 @@ class Lockout(commands.Cog):
             
             if member.voice and member.voice.channel and member.voice.channel.id == config['jail_channel_id']:
                 if jail_rec.get('last_check'):
+                    # Calculate actual elapsed time since last check
                     diff = now_ts - jail_rec['last_check']
                     jail_rec['remaining_seconds'] = max(0, jail_rec['remaining_seconds'] - diff)
                     guilds_to_update.add(guild)
+                
                 jail_rec['last_check'] = now_ts
+                
                 if jail_rec['remaining_seconds'] <= 0:
+                    # Release Inmate
                     target_role = guild.get_role(config.get('target_role_id'))
                     if target_role:
                         try:
@@ -214,9 +232,13 @@ class Lockout(commands.Cog):
                         except: pass
                     self.delete_jail_data(guild.id, member.id)
                     continue 
-            else: jail_rec['last_check'] = None
+            else: 
+                # Not in VC, don't count down
+                jail_rec['last_check'] = None
+            
             jail_updates.append(jail_rec)
         
+        # Save updates to DB
         if jail_updates:
             current_jails = self.bot.db.get_collection("lockout_jail")
             for update in jail_updates:
@@ -228,6 +250,7 @@ class Lockout(commands.Cog):
             
         for g in guilds_to_update: await self.update_jail_sticky(g)
 
+        # Handle Schedules
         all_configs = self.bot.db.get_collection("lockout_configs")
         current_utc = datetime.datetime.now(timezone.utc)
         if not isinstance(all_configs, list): return
@@ -386,9 +409,9 @@ class Lockout(commands.Cog):
     @commands.command(name="timeout")
     @commands.has_permissions(administrator=True)
     async def timeout(self, ctx, member: discord.Member = None, minutes: int = None, cancel: bool = False):
-        """Jail a user or release them. Usage: ?timeout @User <minutes> OR ?timeout @User 0 True (to release)"""
+        """Put a user in timeout or release them. Usage: ?timeout @User <minutes> OR ?timeout @User 0 True (to release)"""
         if member is None:
-            return await ctx.send("❌ Who are we jailing, buggy? Usage: `?timeout @User <minutes>`")
+            return await ctx.send("❌ Who are we putting in timeout, buggy? Usage: `?timeout @User <minutes>`")
 
         config = self.get_config(ctx.guild.id)
         if cancel:
@@ -416,7 +439,7 @@ class Lockout(commands.Cog):
             data['last_check'] = datetime.datetime.now().timestamp()
             
         self.save_jail_data(ctx.guild.id, member.id, data)
-        await ctx.send(f"🔒 {member.mention} jailed for {minutes}m. Go to <#{config['jail_channel_id']}> to count down.")
+        await ctx.send(f"🔒 {member.mention} put in timeout for {minutes}m. Go to <#{config['jail_channel_id']}> to count down.")
         await self.update_jail_sticky(ctx.guild)
 
     @commands.command(name="adminclear")
@@ -448,13 +471,13 @@ class Lockout(commands.Cog):
     @lockout_group.group(name="config", invoke_without_command=True)
     @commands.has_permissions(administrator=True)
     async def config_group(self, ctx):
-        """Configure system settings like the jail VC and target role."""
+        """Configure system settings like the timeout VC and target role."""
         await ctx.send("Commands: `target_role`, `jail_channel`")
 
     @config_group.command(name="target_role")
     @commands.has_permissions(administrator=True)
     async def config_target_role(self, ctx, role: discord.Role = None):
-        """Set the role that is REMOVED during lockout/jail. Usage: ?lockout config target_role @Role"""
+        """Set the role that is REMOVED during lockout/timeout. Usage: ?lockout config target_role @Role"""
         if role is None: return await ctx.send("❌ Specify a role: `?lockout config target_role @Role`")
         config = self.get_config(ctx.guild.id) or {"guild_id": ctx.guild.id}
         config['target_role_id'] = role.id
@@ -464,12 +487,12 @@ class Lockout(commands.Cog):
     @config_group.command(name="jail_channel")
     @commands.has_permissions(administrator=True)
     async def config_jail_channel(self, ctx, channel: discord.VoiceChannel = None):
-        """Set the VC where jail timers count down. Usage: ?lockout config jail_channel #VC"""
+        """Set the VC where timeout timers count down. Usage: ?lockout config jail_channel #VC"""
         if channel is None: return await ctx.send("❌ Specify a voice channel: `?lockout config jail_channel #Channel`")
         config = self.get_config(ctx.guild.id) or {"guild_id": ctx.guild.id}
         config['jail_channel_id'] = channel.id
         self.save_config(ctx.guild.id, config)
-        await ctx.send(f"✅ Jail channel set to {channel.mention}.")
+        await ctx.send(f"✅ Timeout channel set to {channel.mention}.")
 
     @lockout_group.group(name="zone", invoke_without_command=True)
     @commands.has_permissions(administrator=True)
