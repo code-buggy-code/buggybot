@@ -20,7 +20,7 @@ import asyncio
 #   - ticket_add(ctx, role, name, prompt)
 #   - ticket_remove(ctx, role)
 #   - ticket_list(ctx)
-#   - ticket_close(ctx, accept)
+#   - ticket_close(ctx, mode)
 #   - ticket_category(ctx, role, category)
 #   - ticket_admin(ctx, role, admin)
 #   - ticket_gate(ctx, role, message_id, emoji)
@@ -308,8 +308,12 @@ class Tickets(commands.Cog):
         await ctx.send(text)
 
     @ticket_cmd.command(name="close")
-    async def ticket_close(self, ctx, accept: bool = False):
-        """Close the current ticket. Usage: ?ticket close [True/False]"""
+    async def ticket_close(self, ctx, mode: str = None):
+        """Close the current ticket. Usage: ?ticket close [accept]"""
+        accept = False
+        if mode and mode.lower() == "accept":
+            accept = True
+
         ticket_data = self.get_active_ticket(ctx.channel.id)
         if not ticket_data:
             return await ctx.send("❌ This command can only be used in an active ticket channel.")
