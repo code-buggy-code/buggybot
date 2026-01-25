@@ -7,8 +7,8 @@ import datetime
 # class Anon(commands.Cog)
 # - __init__(bot)
 # - anon(interaction, message, name) [Slash - Public]
-# - anonset(ctx) [Prefix]
-# - anonunset(ctx) [Prefix]
+# - anonset(interaction) [Slash]
+# - anonunset(interaction) [Slash]
 # - setup(bot)
 
 class Anon(commands.Cog):
@@ -35,16 +35,16 @@ class Anon(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         
         # Send the actual message
-        if name:
-            await interaction.channel.send(f"**{name}**: {message}")
-        else:
-            await interaction.channel.send(message)
-        
-        # Delete the hidden loading state so the command looks invisible
-        await interaction.delete_original_response()
-
-        # --- LOGGING LOGIC ---
         try:
+            if name:
+                await interaction.channel.send(f"**{name}**: {message}")
+            else:
+                await interaction.channel.send(message)
+            
+            # Delete the hidden loading state so the command looks invisible
+            await interaction.delete_original_response()
+
+            # --- LOGGING LOGIC ---
             log_settings = self.bot.db.get_collection("log_settings")
             if not isinstance(log_settings, list): log_settings = []
             
@@ -69,42 +69,44 @@ class Anon(commands.Cog):
                     await log_channel.send(embed=embed)
         except Exception as e:
             print(f"Failed to log anon message: {e}")
+            # If original response wasn't deleted or if sending failed, we might need to follow up, 
+            # but usually silence is preferred for Anon if it fails mid-flight to avoid exposing user.
 
-    @commands.command(name="anonset")
-    @commands.has_permissions(administrator=True)
-    async def anonset(self, ctx):
+    @app_commands.command(name="anonset", description="Allow /anon messages in this channel.")
+    @app_commands.default_permissions(administrator=True)
+    async def anonset(self, interaction: discord.Interaction):
         """Allow /anon messages in this channel."""
         settings = self.bot.db.get_collection("anon_settings")
         if not isinstance(settings, list): settings = []
         
-        guild_data = next((d for d in settings if d.get('guild_id') == ctx.guild.id), None)
+        guild_data = next((d for d in settings if d.get('guild_id') == interaction.guild_id), None)
         
         if not guild_data:
-            guild_data = {"guild_id": ctx.guild.id, "channels": []}
+            guild_data = {"guild_id": interaction.guild_id, "channels": []}
             settings.append(guild_data)
             
-        if ctx.channel.id not in guild_data['channels']:
-            guild_data['channels'].append(ctx.channel.id)
-            self.bot.db.update_doc("anon_settings", "guild_id", ctx.guild.id, guild_data)
-            await ctx.send(f"✅ `/anon` is now allowed in {ctx.channel.mention}.")
+        if interaction.channel_id not in guild_data['channels']:
+            guild_data['channels'].append(interaction.channel_id)
+            self.bot.db.update_doc("anon_settings", "guild_id", interaction.guild_id, guild_data)
+            await interaction.response.send_message(f"✅ `/anon` is now allowed in <#{interaction.channel_id}>.", ephemeral=True)
         else:
-            await ctx.send(f"⚠️ This channel is already set for anon messages.")
+            await interaction.response.send_message(f"⚠️ This channel is already set for anon messages.", ephemeral=True)
 
-    @commands.command(name="anonunset")
-    @commands.has_permissions(administrator=True)
-    async def anonunset(self, ctx):
+    @app_commands.command(name="anonunset", description="Disallow /anon messages in this channel.")
+    @app_commands.default_permissions(administrator=True)
+    async def anonunset(self, interaction: discord.Interaction):
         """Disallow /anon messages in this channel."""
         settings = self.bot.db.get_collection("anon_settings")
         if not isinstance(settings, list): settings = []
         
-        guild_data = next((d for d in settings if d.get('guild_id') == ctx.guild.id), None)
+        guild_data = next((d for d in settings if d.get('guild_id') == interaction.guild_id), None)
         
-        if guild_data and ctx.channel.id in guild_data['channels']:
-            guild_data['channels'].remove(ctx.channel.id)
-            self.bot.db.update_doc("anon_settings", "guild_id", ctx.guild.id, guild_data)
-            await ctx.send(f"✅ `/anon` is now disabled in {ctx.channel.mention}.")
+        if guild_data and interaction.channel_id in guild_data['channels']:
+            guild_data['channels'].remove(interaction.channel_id)
+            self.bot.db.update_doc("anon_settings", "guild_id", interaction.guild_id, guild_data)
+            await interaction.response.send_message(f"✅ `/anon` is now disabled in <#{interaction.channel_id}>.", ephemeral=True)
         else:
-            await ctx.send(f"⚠️ This channel does not allow anon messages.")
+            await interaction.response.send_message(f"⚠️ This channel does not allow anon messages.", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(Anon(bot))
