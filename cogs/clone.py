@@ -19,11 +19,10 @@ import re
 # - handle_return_reply(message)
 # - on_raw_reaction_add(payload)
 # - on_message_delete(message)
-# - clone (Group) [Prefix]
-#   - clone_add(ctx, receive_channel, source_id, min_reactions, attachments_only, return_replies)
-#   - clone_remove(ctx, receive_channel, source_id)
-#   - clone_list(ctx)
-#   - clone_edit (Not strictly necessary if Add overwrites/fails gracefully, but good to have manual edit via re-adding or we can simplify to Add/Remove/List for prefix)
+# - clone (Group) [Slash]
+#   - add(interaction, receive_channel, source_id, min_reactions, attachments_only, return_replies)
+#   - remove(interaction, receive_channel, source_id)
+#   - list(interaction)
 # setup(bot)
 
 class Clone(commands.Cog):
@@ -329,37 +328,39 @@ class Clone(commands.Cog):
                         await clone.delete()
                     except: pass
 
-    # --- PREFIX COMMANDS ---
+    # --- SLASH COMMANDS ---
 
-    @commands.group(name="clone", invoke_without_command=True)
-    @commands.has_permissions(administrator=True)
-    async def clone(self, ctx):
-        """Manage message cloning setups."""
-        await ctx.send("Available commands: `add`, `remove`, `list`")
+    clone = app_commands.Group(name="clone", description="Manage message cloning setups", default_permissions=discord.Permissions(administrator=True))
 
-    @clone.command(name="add")
-    @commands.has_permissions(administrator=True)
-    async def clone_add(self, ctx, receive_channel: discord.TextChannel, source_id: str, 
+    @clone.command(name="add", description="Add a clone setup.")
+    @app_commands.describe(
+        receive_channel="Where to send cloned messages", 
+        source_id="ID of Source Channel or Category",
+        min_reactions="Reactions needed to clone (0=Instant)",
+        attachments_only="Only clone messages with files?",
+        return_replies="Allow replies from receiver back to source?"
+    )
+    async def clone_add(self, interaction: discord.Interaction, receive_channel: discord.TextChannel, source_id: str, 
                         min_reactions: int = 0, attachments_only: bool = False, return_replies: bool = False):
-        """Add a clone setup. Usage: ?clone add <#receive> <source_ID> [min_reacts] [attach_only] [replies]"""
+        """Add a clone setup."""
         try:
             s_id = int(source_id)
         except:
-            return await ctx.send("❌ Source ID must be a valid number.")
+            return await interaction.response.send_message("❌ Source ID must be a valid number.", ephemeral=True)
 
         setups = self.get_clone_setups()
         
         # Check duplicates (Receiver + Source combo)
         for s in setups:
             if s['receive_id'] == receive_channel.id and s['source_id'] == s_id:
-                return await ctx.send("❌ A setup for this Receiver and Source already exists. Remove it first.")
+                return await interaction.response.send_message("❌ A setup for this Receiver and Source already exists. Remove it first.", ephemeral=True)
 
         # Create new setup object
         new_setup = {
             "receive_id": receive_channel.id,
-            "guild_id": ctx.guild.id, 
+            "guild_id": interaction.guild_id, 
             "source_id": s_id,
-            "ignore_channels": [], # Prefix command simplified (can extend if needed)
+            "ignore_channels": [],
             "attachments_only": attachments_only,
             "return_replies": return_replies,
             "min_reactions": min_reactions
@@ -374,14 +375,14 @@ class Clone(commands.Cog):
         if min_reactions > 0: flags.append(f"{min_reactions}+ Reacts")
         flag_str = f" ({', '.join(flags)})" if flags else ""
         
-        await ctx.send(f"✅ Setup added! Cloning from `{s_id}` to {receive_channel.mention}{flag_str}.")
+        await interaction.response.send_message(f"✅ Setup added! Cloning from `{s_id}` to {receive_channel.mention}{flag_str}.", ephemeral=True)
 
-    @clone.command(name="remove")
-    @commands.has_permissions(administrator=True)
-    async def clone_remove(self, ctx, receive_channel: discord.TextChannel, source_id: str):
+    @clone.command(name="remove", description="Remove a clone setup.")
+    @app_commands.describe(receive_channel="The receiving channel", source_id="The source ID to remove")
+    async def clone_remove(self, interaction: discord.Interaction, receive_channel: discord.TextChannel, source_id: str):
         """Remove a clone setup."""
         try: s_id = int(source_id)
-        except: return await ctx.send("❌ ID invalid.")
+        except: return await interaction.response.send_message("❌ ID invalid.", ephemeral=True)
 
         setups = self.get_clone_setups()
         initial_len = len(setups)
@@ -391,31 +392,30 @@ class Clone(commands.Cog):
         
         if len(setups) < initial_len:
             self.save_clone_setups(setups)
-            await ctx.send(f"✅ Removed setup for {receive_channel.mention}.")
+            await interaction.response.send_message(f"✅ Removed setup for {receive_channel.mention}.", ephemeral=True)
         else:
-            await ctx.send(f"❌ No matching setup found.")
+            await interaction.response.send_message(f"❌ No matching setup found.", ephemeral=True)
 
-    @clone.command(name="list")
-    @commands.has_permissions(administrator=True)
-    async def clone_list(self, ctx):
+    @clone.command(name="list", description="List all clone setups for this server.")
+    async def clone_list(self, interaction: discord.Interaction):
         """List all clone setups for this server."""
         setups = self.get_clone_setups()
         if not setups:
-            return await ctx.send("📝 No clone setups active.")
+            return await interaction.response.send_message("📝 No clone setups active.", ephemeral=True)
 
         # 1. Map current guild channels for fast local lookup
-        current_guild_map = {c.id: c.name for c in ctx.guild.channels}
+        current_guild_map = {c.id: c.name for c in interaction.guild.channels}
 
         # 2. Filter setups
         filtered_setups = []
         for s in setups:
-            if s.get('guild_id') == ctx.guild.id:
+            if s.get('guild_id') == interaction.guild_id:
                 filtered_setups.append(s)
             elif s['receive_id'] in current_guild_map:
                 filtered_setups.append(s)
 
         if not filtered_setups:
-            return await ctx.send("📝 No clone setups found for this server.")
+            return await interaction.response.send_message("📝 No clone setups found for this server.", ephemeral=True)
 
         # 3. Group by Receiver
         grouped = {}
@@ -450,7 +450,7 @@ class Clone(commands.Cog):
                 flag_text = f" ({', '.join(flags)})" if flags else ""
                 text += f" - Source: **{s_name}**{flag_text}\n"
 
-        await ctx.send(text[:2000])
+        await interaction.response.send_message(text[:2000], ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(Clone(bot))
