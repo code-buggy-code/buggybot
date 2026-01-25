@@ -26,23 +26,21 @@ from typing import Literal, Optional, Union
 # - on_voice_state_update(member, before, after)
 # - voice_time_checker()
 # - point_saver()
-# - lead (Prefix Group)
-#   - lead_add(ctx, name)
-#   - lead_edit(ctx, group_num, name)
-#   - lead_track(ctx, group_num, target)
-#   - lead_untrack(ctx, group_num, target)
-#   - lead_points(ctx, activity, amount)
-#   - lead_delete(ctx, group_num)
-#   - lead_clear(ctx, group_num)
-#   - lead_list(ctx)
-# - award(ctx, member, amount) [Prefix]
-# - remove(ctx, member, amount) [Prefix]
-# - show_leaderboard(ctx, group_num) [Prefix - CHANGED]
-# - points(interaction, user) [Slash]
-# - check_points(ctx, member) [Prefix]
+# - lead (Group) [Slash - Admin]
+#   - create(interaction, name)
+#   - edit(interaction, group_num, name)
+#   - delete(interaction, group_num)
+#   - list(interaction)
+#   - track(interaction, group_num, target)
+#   - untrack(interaction, group_num, target)
+#   - config(interaction, activity, amount)
+#   - reset(interaction, group_num)
+#   - award(interaction, member, amount)
+#   - deduct(interaction, member, amount)
+# - leaderboard(interaction, group_num) [Slash - Public]
+# - points(interaction, user) [Slash - Public]
 # setup(bot)
 
-# --- LEAD COG ---
 class Lead(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -340,18 +338,14 @@ class Lead(commands.Cog):
                         group_data["last_lb_msg"] = None
                         await self.save_config(guild_id, config)
 
-    # --- PREFIX COMMANDS (ADMIN) ---
+    # --- ADMIN SLASH COMMANDS ---
 
-    @commands.group(name="lead", invoke_without_command=True)
-    @commands.has_permissions(administrator=True)
-    async def lead(self, ctx):
-        """Manage leaderboard groups."""
-        await ctx.send("Available commands: `add`, `edit`, `track`, `untrack`, `points`, `delete`, `clear`, `list`")
+    lead = app_commands.Group(name="lead", description="Manage leaderboard settings", default_permissions=discord.Permissions(administrator=True))
 
-    @lead.command(name="add")
-    @commands.has_permissions(administrator=True)
-    async def lead_add(self, ctx, *, name: str):
-        config = await self.get_config(ctx.guild.id)
+    @lead.command(name="create", description="Create a new leaderboard group.")
+    @app_commands.describe(name="Name of the new group")
+    async def lead_create(self, interaction: discord.Interaction, name: str):
+        config = await self.get_config(interaction.guild_id)
         
         existing_ids = [int(k) for k in config["groups"].keys()]
         next_id = str(max(existing_ids) + 1 if existing_ids else 1)
@@ -361,144 +355,45 @@ class Lead(commands.Cog):
             "tracked_ids": [],
             "last_lb_msg": None
         }
-        await self.save_config(ctx.guild.id, config)
-        await ctx.send(f"✅ Created group **{name}** (ID: {next_id})")
+        await self.save_config(interaction.guild_id, config)
+        await interaction.response.send_message(f"✅ Created group **{name}** (ID: {next_id})", ephemeral=True)
 
-    @lead.command(name="edit")
-    @commands.has_permissions(administrator=True)
-    async def lead_edit(self, ctx, group_num: int, *, name: str):
-        config = await self.get_config(ctx.guild.id)
+    @lead.command(name="edit", description="Rename a leaderboard group.")
+    @app_commands.describe(group_num="The Group ID", name="New Name")
+    async def lead_edit(self, interaction: discord.Interaction, group_num: int, name: str):
+        config = await self.get_config(interaction.guild_id)
         group_key = str(group_num)
         
         if group_key not in config["groups"]:
-            await ctx.send(f"❌ Group ID {group_num} not found.")
-            return
+            return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
             
         old_name = config["groups"][group_key]["name"]
         config["groups"][group_key]["name"] = name
-        await self.save_config(ctx.guild.id, config)
+        await self.save_config(interaction.guild_id, config)
         
-        await ctx.send(f"✅ Renamed Group {group_num} from **{old_name}** to **{name}**.")
+        await interaction.response.send_message(f"✅ Renamed Group {group_num} from **{old_name}** to **{name}**.", ephemeral=True)
 
-    @lead.command(name="track")
-    @commands.has_permissions(administrator=True)
-    async def lead_track(self, ctx, group_num: int, target: discord.abc.GuildChannel):
-        config = await self.get_config(ctx.guild.id)
+    @lead.command(name="delete", description="Delete a leaderboard group.")
+    @app_commands.describe(group_num="The Group ID to delete")
+    async def lead_delete(self, interaction: discord.Interaction, group_num: int):
+        config = await self.get_config(interaction.guild_id)
         group_key = str(group_num)
 
         if group_key not in config["groups"]:
-            await ctx.send(f"❌ Group ID {group_num} not found.")
-            return
-        
-        if target.id in config["groups"][group_key]["tracked_ids"]:
-            await ctx.send(f"⚠️ **{target.name}** is already tracked by this group.")
-            return
-
-        config["groups"][group_key]["tracked_ids"].append(target.id)
-        await self.save_config(ctx.guild.id, config)
-        await ctx.send(f"✅ Group {group_num} is now tracking **{target.name}**.")
-
-    @lead.command(name="untrack")
-    @commands.has_permissions(administrator=True)
-    async def lead_untrack(self, ctx, group_num: int, target: discord.abc.GuildChannel):
-        config = await self.get_config(ctx.guild.id)
-        group_key = str(group_num)
-
-        if group_key not in config["groups"]:
-            await ctx.send(f"❌ Group ID {group_num} not found.")
-            return
-        
-        if target.id not in config["groups"][group_key]["tracked_ids"]:
-            await ctx.send(f"⚠️ **{target.name}** was not being tracked.")
-            return
-
-        config["groups"][group_key]["tracked_ids"].remove(target.id)
-        await self.save_config(ctx.guild.id, config)
-        await ctx.send(f"✅ Stopped tracking **{target.name}** for Group {group_num}.")
-
-    @lead.command(name="points")
-    @commands.has_permissions(administrator=True)
-    async def lead_points(self, ctx, activity: str = None, amount: int = None):
-        config = await self.get_config(ctx.guild.id)
-        p_vals = config.get("point_values", self.DEFAULT_POINT_VALUES)
-        
-        # Valid Keys Mapping
-        key_map = {
-            "msg": "message", "message": "message",
-            "file": "attachment", "attach": "attachment", "attachment": "attachment",
-            "react": "reaction_add", "give": "reaction_add", "reaction_add": "reaction_add",
-            "get": "reaction_receive", "receive": "reaction_receive", "reaction_receive": "reaction_receive",
-            "vc": "voice_minute", "voice": "voice_minute", "voice_minute": "voice_minute"
-        }
-
-        if activity is None:
-            # Show list
-            embed = discord.Embed(title="⚙️ Leaderboard Point Values", color=discord.Color.blue())
-            embed.add_field(name="✉️ Message (message)", value=f"{p_vals.get('message', 1)} pts", inline=True)
-            embed.add_field(name="📎 Attachment (attachment)", value=f"{p_vals.get('attachment', 2)} pts", inline=True)
-            embed.add_field(name="😀 Give React (give)", value=f"{p_vals.get('reaction_add', 1)} pts", inline=True)
-            embed.add_field(name="⭐ Get React (receive)", value=f"{p_vals.get('reaction_receive', 2)} pts", inline=True)
-            embed.add_field(name="🎙️ VC 1min (voice)", value=f"{p_vals.get('voice_minute', 1)} pts", inline=True)
-            embed.set_footer(text="Usage: ?lead points <type> <amount>")
-            await ctx.send(embed=embed)
-            return
-
-        # Setting a value
-        activity_key = key_map.get(activity.lower())
-        if not activity_key:
-            await ctx.send("❌ Invalid activity type. Use: message, attachment, give, receive, voice.")
-            return
-        
-        if amount is None:
-            await ctx.send(f"❌ Please specify an amount for **{activity}**.")
-            return
-
-        p_vals[activity_key] = amount
-        config['point_values'] = p_vals
-        await self.save_config(ctx.guild.id, config)
-        await ctx.send(f"✅ Set **{activity_key}** to **{amount}** points.")
-
-    @lead.command(name="delete")
-    @commands.has_permissions(administrator=True)
-    async def lead_delete(self, ctx, group_num: int):
-        config = await self.get_config(ctx.guild.id)
-        group_key = str(group_num)
-
-        if group_key not in config["groups"]:
-            await ctx.send(f"❌ Group ID {group_num} not found.")
-            return
+            return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
 
         name = config["groups"][group_key]["name"]
         del config["groups"][group_key]
-        await self.save_config(ctx.guild.id, config)
-        await ctx.send(f"🗑️ Deleted group **{name}** (ID: {group_num}).")
+        await self.save_config(interaction.guild_id, config)
+        await interaction.response.send_message(f"🗑️ Deleted group **{name}** (ID: {group_num}).", ephemeral=True)
 
-    @lead.command(name="clear")
-    @commands.has_permissions(administrator=True)
-    async def lead_clear(self, ctx, group_num: int):
-        group_key = str(group_num)
-        config = await self.get_config(ctx.guild.id)
-        if group_key not in config["groups"]:
-            await ctx.send(f"❌ Group ID {group_num} not found.")
-            return
-            
-        count = await self.clear_points_by_group(ctx.guild.id, group_key)
-        
-        gid = str(ctx.guild.id)
-        if gid in self.point_cache and group_key in self.point_cache[gid]:
-            del self.point_cache[gid][group_key]
-            
-        await ctx.send(f"Values reset! Cleared points for {count} users in Group {group_num}.")
-
-    @lead.command(name="list")
-    @commands.has_permissions(administrator=True)
-    async def lead_list(self, ctx):
-        config = await self.get_config(ctx.guild.id)
+    @lead.command(name="list", description="List all leaderboard groups.")
+    async def lead_list(self, interaction: discord.Interaction):
+        config = await self.get_config(interaction.guild_id)
         groups = config.get("groups", {})
 
         if not groups:
-            await ctx.send("📝 No leaderboard groups set up.")
-            return
+            return await interaction.response.send_message("📝 No leaderboard groups set up.", ephemeral=True)
 
         text = "**📊 Leaderboard Groups**\n"
         for group_key, data in groups.items():
@@ -507,7 +402,7 @@ class Lead(commands.Cog):
             
             tracked_names = []
             for tid in tracked:
-                obj = ctx.guild.get_channel(int(tid))
+                obj = interaction.guild.get_channel(int(tid))
                 if obj:
                     tracked_names.append(obj.mention)
                 else:
@@ -516,76 +411,154 @@ class Lead(commands.Cog):
             track_str = ", ".join(tracked_names) if tracked_names else "None"
             text += f"**[{group_key}] {name}**\nTracking: {track_str}\n\n"
         
-        await ctx.send(text)
+        await interaction.response.send_message(text, ephemeral=True)
 
-    # --- PREFIX POINTS MANAGEMENT ---
-
-    @commands.command(name="award")
-    @commands.has_permissions(administrator=True)
-    async def award(self, ctx, member: discord.Member, amount: int):
-        config = await self.get_config(ctx.guild.id)
-        tracked = self.get_tracked_groups(ctx.channel, config)
-        
-        if not tracked:
-            await ctx.send("❌ This channel is not tracked by any leaderboard groups.")
-            return
-            
-        for group_key in tracked:
-            await self.update_user_points(ctx.guild.id, group_key, member.id, amount)
-            
-        group_names = [config["groups"][k]["name"] for k in tracked]
-        await ctx.send(f"✅ Awarded **{amount}** points to {member.mention} in groups: {', '.join(group_names)}.")
-
-    @commands.command(name="remove")
-    @commands.has_permissions(administrator=True)
-    async def remove_points(self, ctx, member: discord.Member, amount: int):
-        config = await self.get_config(ctx.guild.id)
-        tracked = self.get_tracked_groups(ctx.channel, config)
-        
-        if not tracked:
-            await ctx.send("❌ This channel is not tracked by any leaderboard groups.")
-            return
-            
-        # Removing points is just adding negative points
-        neg_amount = -abs(amount)
-        
-        for group_key in tracked:
-            await self.update_user_points(ctx.guild.id, group_key, member.id, neg_amount)
-            
-        group_names = [config["groups"][k]["name"] for k in tracked]
-        await ctx.send(f"✅ Removed **{amount}** points from {member.mention} in groups: {', '.join(group_names)}.")
-
-    # --- PUBLIC COMMANDS (Admin Protected where requested) ---
-
-    @commands.command(name="leaderboard")
-    @commands.has_permissions(administrator=True)
-    async def show_leaderboard(self, ctx, group_num: int):
-        config = await self.get_config(ctx.guild.id)
+    @lead.command(name="track", description="Add a channel/category to a group.")
+    @app_commands.describe(group_num="The Group ID", target="The channel or category to track")
+    async def lead_track(self, interaction: discord.Interaction, group_num: int, target: Union[discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel]):
+        config = await self.get_config(interaction.guild_id)
         group_key = str(group_num)
 
         if group_key not in config["groups"]:
-            await ctx.send(f"❌ Group ID {group_num} not found.")
-            return
+            return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
+        
+        if target.id in config["groups"][group_key]["tracked_ids"]:
+            return await interaction.response.send_message(f"⚠️ **{target.name}** is already tracked by this group.", ephemeral=True)
 
-        embed = await self.create_leaderboard_embed(ctx.guild, group_key, config["groups"][group_key])
-        msg = await ctx.send(embed=embed)
+        config["groups"][group_key]["tracked_ids"].append(target.id)
+        await self.save_config(interaction.guild_id, config)
+        await interaction.response.send_message(f"✅ Group {group_num} is now tracking **{target.name}**.", ephemeral=True)
 
-        config["groups"][group_key]["last_lb_msg"] = {
-            "channel_id": ctx.channel.id,
-            "message_id": msg.id
-        }
-        await self.save_config(ctx.guild.id, config)
+    @lead.command(name="untrack", description="Stop tracking a channel/category.")
+    @app_commands.describe(group_num="The Group ID", target="The channel or category to remove")
+    async def lead_untrack(self, interaction: discord.Interaction, group_num: int, target: Union[discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel]):
+        config = await self.get_config(interaction.guild_id)
+        group_key = str(group_num)
 
-    @app_commands.command(name="points", description="Check points for yourself or another user", extras={'public': True})
-    @app_commands.describe(user="The user to check points for (leave empty for yourself)")
+        if group_key not in config["groups"]:
+            return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
+        
+        if target.id not in config["groups"][group_key]["tracked_ids"]:
+            return await interaction.response.send_message(f"⚠️ **{target.name}** was not being tracked.", ephemeral=True)
+
+        config["groups"][group_key]["tracked_ids"].remove(target.id)
+        await self.save_config(interaction.guild_id, config)
+        await interaction.response.send_message(f"✅ Stopped tracking **{target.name}** for Group {group_num}.", ephemeral=True)
+
+    @lead.command(name="config", description="Configure point values.")
+    @app_commands.describe(activity="The activity type", amount="Points amount")
+    @app_commands.choices(activity=[
+        app_commands.Choice(name="Message", value="message"),
+        app_commands.Choice(name="Attachment", value="attachment"),
+        app_commands.Choice(name="Give Reaction", value="reaction_add"),
+        app_commands.Choice(name="Receive Reaction", value="reaction_receive"),
+        app_commands.Choice(name="Voice (1 min)", value="voice_minute")
+    ])
+    async def lead_config(self, interaction: discord.Interaction, activity: app_commands.Choice[str], amount: int):
+        config = await self.get_config(interaction.guild_id)
+        p_vals = config.get("point_values", self.DEFAULT_POINT_VALUES)
+        
+        p_vals[activity.value] = amount
+        config['point_values'] = p_vals
+        await self.save_config(interaction.guild_id, config)
+        await interaction.response.send_message(f"✅ Set **{activity.name}** to **{amount}** points.", ephemeral=True)
+
+    @lead.command(name="reset", description="Clear all points for a group.")
+    @app_commands.describe(group_num="The Group ID")
+    async def lead_reset(self, interaction: discord.Interaction, group_num: int):
+        group_key = str(group_num)
+        config = await self.get_config(interaction.guild_id)
+        if group_key not in config["groups"]:
+            return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
+            
+        count = await self.clear_points_by_group(interaction.guild_id, group_key)
+        
+        gid = str(interaction.guild_id)
+        if gid in self.point_cache and group_key in self.point_cache[gid]:
+            del self.point_cache[gid][group_key]
+            
+        await interaction.response.send_message(f"Values reset! Cleared points for {count} users in Group {group_num}.", ephemeral=True)
+
+    @lead.command(name="award", description="Manually give points to a user.")
+    @app_commands.describe(member="The user", amount="Amount of points")
+    async def lead_award(self, interaction: discord.Interaction, member: discord.Member, amount: int):
+        config = await self.get_config(interaction.guild_id)
+        # Apply to all groups that track THIS channel. 
+        # If run in non-tracked channel, warn user?
+        # Standard behavior: Admin usually runs this in the context they want to award.
+        
+        tracked = self.get_tracked_groups(interaction.channel, config)
+        
+        if not tracked:
+            return await interaction.response.send_message("⚠️ This channel is not tracked by any leaderboard groups. Please run this command in a tracked channel.", ephemeral=True)
+            
+        for group_key in tracked:
+            await self.update_user_points(interaction.guild_id, group_key, member.id, amount)
+            
+        group_names = [config["groups"][k]["name"] for k in tracked]
+        await interaction.response.send_message(f"✅ Awarded **{amount}** points to {member.mention} in groups: {', '.join(group_names)}.", ephemeral=True)
+
+    @lead.command(name="deduct", description="Manually remove points from a user.")
+    @app_commands.describe(member="The user", amount="Amount to remove")
+    async def lead_deduct(self, interaction: discord.Interaction, member: discord.Member, amount: int):
+        config = await self.get_config(interaction.guild_id)
+        tracked = self.get_tracked_groups(interaction.channel, config)
+        
+        if not tracked:
+            return await interaction.response.send_message("⚠️ This channel is not tracked by any leaderboard groups.", ephemeral=True)
+            
+        neg_amount = -abs(amount)
+        for group_key in tracked:
+            await self.update_user_points(interaction.guild_id, group_key, member.id, neg_amount)
+            
+        group_names = [config["groups"][k]["name"] for k in tracked]
+        await interaction.response.send_message(f"✅ Removed **{amount}** points from {member.mention} in groups: {', '.join(group_names)}.", ephemeral=True)
+
+    # --- PUBLIC COMMANDS ---
+
+    @app_commands.command(name="leaderboard", description="Show the leaderboard.", extras={'public': True})
+    @app_commands.describe(group_num="The Group ID (Default: 1)")
+    async def show_leaderboard(self, interaction: discord.Interaction, group_num: int = 1):
+        """Show the leaderboard."""
+        config = await self.get_config(interaction.guild_id)
+        group_key = str(group_num)
+
+        if group_key not in config["groups"]:
+             # Try to find default
+            if "1" in config["groups"]: group_key = "1"
+            else: return await interaction.response.send_message(f"❌ Leaderboard group not found.", ephemeral=True)
+
+        embed = await self.create_leaderboard_embed(interaction.guild, group_key, config["groups"][group_key])
+        
+        # If admin runs it, update the "pinned" message tracking
+        if interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message(embed=embed)
+            msg = await interaction.original_response()
+            config["groups"][group_key]["last_lb_msg"] = {
+                "channel_id": interaction.channel_id,
+                "message_id": msg.id
+            }
+            await self.save_config(interaction.guild_id, config)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="points", description="Check points for yourself or another user.", extras={'public': True})
+    @app_commands.describe(user="The user to check (leave empty for yourself)")
     async def points(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
+        """Check points for yourself or another user."""
         target = user or interaction.user
         config = await self.get_config(interaction.guild_id)
         
         tracked_keys = self.get_tracked_groups(interaction.channel, config)
         
         if not tracked_keys:
-            return await interaction.response.send_message("⚠️ This channel isn't tracked by any groups, so I can't show context-specific points here.", ephemeral=True)
+            # Fallback: Show ALL points if channel not tracked? 
+            # Or just warn? Old behavior warned.
+            # Let's show all for better UX if not in tracked channel.
+            tracked_keys = list(config["groups"].keys())
+
+        if not tracked_keys:
+             return await interaction.response.send_message("⚠️ No leaderboards set up yet.", ephemeral=True)
 
         embed = discord.Embed(title=f"🌟 Points for {target.display_name}", color=discord.Color.purple())
         found_any = False
@@ -594,6 +567,7 @@ class Lead(commands.Cog):
             data = await self.get_user_points(interaction.guild_id, target.id)
             pts = data.get(group_key, 0)
             
+            # Add cached points
             gid = str(interaction.guild_id)
             if gid in self.point_cache and group_key in self.point_cache[gid]:
                 pts += self.point_cache[gid][group_key].get(str(target.id), 0)
@@ -603,45 +577,9 @@ class Lead(commands.Cog):
             found_any = True
             
         if not found_any:
-            embed.description = "No points in these groups yet."
+            embed.description = "No points found."
             
-        await interaction.response.send_message(embed=embed)
-        await asyncio.sleep(30)
-        try:
-            await interaction.delete_original_response()
-        except:
-            pass
-
-    @commands.command(name="points")
-    async def check_points(self, ctx, member: discord.Member = None):
-        target = member or ctx.author
-        config = await self.get_config(ctx.guild.id)
-        
-        tracked_keys = self.get_tracked_groups(ctx.channel, config)
-        
-        if not tracked_keys:
-            await ctx.send(f"⚠️ This channel isn't tracked by any groups, so I can't show context-specific points here.")
-            return
-
-        embed = discord.Embed(title=f"🌟 Points for {target.display_name}", color=discord.Color.purple())
-        found_any = False
-        
-        for group_key in tracked_keys:
-            data = await self.get_user_points(ctx.guild.id, target.id)
-            pts = data.get(group_key, 0)
-            
-            gid = str(ctx.guild.id)
-            if gid in self.point_cache and group_key in self.point_cache[gid]:
-                pts += self.point_cache[gid][group_key].get(str(target.id), 0)
-                
-            group_name = config["groups"][group_key]["name"]
-            embed.add_field(name=group_name, value=f"{pts} pts", inline=False)
-            found_any = True
-            
-        if not found_any:
-            embed.description = "No points in these groups yet."
-            
-        await ctx.send(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(Lead(bot))
