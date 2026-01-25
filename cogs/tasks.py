@@ -1,394 +1,542 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
-import json
-import os
+import datetime
+from datetime import timedelta, timezone
 import asyncio
-from typing import Literal
 
-# List of functions/classes in this file:
-# class TaskView(discord.ui.View):
-#   - __init__(self, cog, user_id, total, state=None, message_id=None)
-#   - get_emoji_bar(self)
-#   - update_message(self, interaction, finished=False, congratulation=None)
-#   - update_db(self)
-#   - get_next_index(self)
-#   - check_completion(self, interaction)
-#   - finish_logic(self, interaction)
-#   - done_button(self, interaction, button)
-#   - skip_button(self, interaction, button)
-#   - undo_button(self, interaction, button)
-#   - finish_button(self, interaction, button)
-# class Tasks(commands.Cog, name="tasks"):
-#   - __init__(self, bot)
-#   - cog_load(self)
-#   - restore_views(self)
-#   - get_task_channel_id(self, guild_id)
-#   - taskchannel(self, ctx) [Prefix - Changed]
-#   - tasks(self, interaction, mode: Literal["Set", "Change"], number: int)
-#   - progress(self, interaction)
-#   - setup(bot)
+# Function/Class List:
+# class Lockout(commands.Cog)
+# - __init__(self, bot)
+# - cog_unload(self)
+# - get_config(self, guild_id)
+# - save_config(self, guild_id, data)
+# - get_user_schedule(self, guild_id, user_id)
+# - save_user_schedule(self, guild_id, user_id, data)
+# - delete_user_schedule(self, guild_id, user_id)
+# - get_jail_data(self, guild_id, user_id)
+# - save_jail_data(self, guild_id, user_id, data)
+# - delete_jail_data(self, guild_id, user_id)
+# - is_time_in_range(self, start_str, end_str, current_dt)
+# - create_progress_bar(self, total, remaining)
+# - update_jail_sticky(self, guild)
+# - check_lockout_loop(self)
+# - on_voice_state_update(self, member, before, after)
+# - on_message(self, message)
+# - setschedule(self, interaction, start, end, repeat) [Slash - Public]
+# - view_schedule(self, interaction) [Slash - Public]
+# - clear_schedule(self, interaction) [Slash - Public]
+# - timeout(self, ctx, member, minutes, cancel) [Prefix]
+# - adminclear(self, ctx, member) [Prefix]
+# - lockoutchannel(self, ctx, channel) [Prefix]
+# - lockout (Group) [Prefix]
+#   - config (Group)
+#     - target_role(self, ctx, role)
+#     - jail_channel(self, ctx, channel)
+#   - zone (Group)
+#     - add(self, ctx, role, offset)
+#     - remove(self, ctx, role)
+#     - list(self, ctx)
+# - setup(bot)
 
-# UPDATED: No separate JSONStore. Using bot.db (main.py)
-# Collections: "tasks_active", "tasks_config"
+class Lockout(commands.Cog):
+    """Cog for managing user schedules, timezones, and the jail/timeout system."""
+    def __init__(self, bot):
+        self.bot = bot
+        self.check_lockout_loop.start()
 
-class TaskView(discord.ui.View):
-    def __init__(self, cog, user_id, total, state=None, message_id=None):
-        super().__init__(timeout=None) # Persistent
-        self.cog = cog
-        self.user_id = user_id
-        self.total = total
-        # State Codes: 0 = White (Todo), 1 = Green (Done), 2 = Blue (Skipped)
-        self.state = state if state else [0] * total
-        self.message_id = message_id
-        self.history = [] # Stack for Undo
+    def cog_unload(self):
+        self.check_lockout_loop.cancel()
 
-    def get_emoji_bar(self):
-        if self.total == 0: return ""
+    # --- DB HELPERS ---
+    def get_config(self, guild_id):
+        configs = self.bot.db.get_collection("lockout_configs")
+        if isinstance(configs, list):
+            return next((c for c in configs if c.get('guild_id') == guild_id), None)
+        return None
+
+    def save_config(self, guild_id, data):
+        data['guild_id'] = guild_id
+        self.bot.db.update_doc("lockout_configs", "guild_id", guild_id, data)
+
+    def get_user_schedule(self, guild_id, user_id):
+        schedules = self.bot.db.get_collection("lockout_schedules")
+        return next((s for s in schedules if s['guild_id'] == guild_id and s['user_id'] == user_id), None)
+
+    def save_user_schedule(self, guild_id, user_id, data):
+        data['guild_id'] = guild_id
+        data['user_id'] = user_id
+        schedules = self.bot.db.get_collection("lockout_schedules")
+        schedules = [s for s in schedules if not (s['guild_id'] == guild_id and s['user_id'] == user_id)]
+        schedules.append(data)
+        self.bot.db.save_collection("lockout_schedules", schedules)
+
+    def delete_user_schedule(self, guild_id, user_id):
+        schedules = self.bot.db.get_collection("lockout_schedules")
+        schedules = [s for s in schedules if not (s['guild_id'] == guild_id and s['user_id'] == user_id)]
+        self.bot.db.save_collection("lockout_schedules", schedules)
+
+    def get_jail_data(self, guild_id, user_id):
+        jails = self.bot.db.get_collection("lockout_jail")
+        return next((j for j in jails if j['guild_id'] == guild_id and j['user_id'] == user_id), None)
+
+    def save_jail_data(self, guild_id, user_id, data):
+        data['guild_id'] = guild_id
+        data['user_id'] = user_id
+        jails = self.bot.db.get_collection("lockout_jail")
+        jails = [j for j in jails if not (j['guild_id'] == guild_id and j['user_id'] == user_id)]
+        jails.append(data)
+        self.bot.db.save_collection("lockout_jail", jails)
+
+    def delete_jail_data(self, guild_id, user_id):
+        jails = self.bot.db.get_collection("lockout_jail")
+        jails = [j for j in jails if not (j['guild_id'] == guild_id and j['user_id'] == user_id)]
+        self.bot.db.save_collection("lockout_jail", jails)
+
+    # --- LOGIC ---
+    def is_time_in_range(self, start_str, end_str, current_dt):
+        current_time = current_dt.time()
+        start_time = datetime.datetime.strptime(start_str, "%H:%M").time()
+        end_time = datetime.datetime.strptime(end_str, "%H:%M").time()
         
-        # Grid Size: 16 Columns x 2 Rows = 32 Squares total
+        if start_time < end_time:
+            return start_time <= current_time <= end_time
+        else: 
+            return current_time >= start_time or current_time <= end_time
+
+    def create_progress_bar(self, total, remaining):
+        """Creates a visual bar that matches the tasks.py style."""
+        if total <= 0: return ""
+        
+        # Grid Size: 16 Columns x 2 Rows = 32 Squares total (Matching tasks.py)
         cols = 16
         rows = 2
-        total_visual_blocks = cols * rows
+        total_blocks = cols * rows
         
-        visual_state = []
+        # Calculate percent completion
+        elapsed = max(0, total - remaining)
+        percent = elapsed / total
         
-        # Create a visual representation by repeating task states proportionally
-        current_visual_count = 0
-        for i in range(self.total):
-            # Calculate how many visual blocks this task should take up
-            target_visual_count = int((i + 1) * total_visual_blocks / self.total)
-            blocks_for_this_task = target_visual_count - current_visual_count
-            
-            visual_state.extend([self.state[i]] * blocks_for_this_task)
-            current_visual_count += blocks_for_this_task
-            
-        # Safety check to ensure exactly 32 blocks
-        if len(visual_state) < total_visual_blocks:
-            visual_state.extend([0] * (total_visual_blocks - len(visual_state)))
-        elif len(visual_state) > total_visual_blocks:
-            visual_state = visual_state[:total_visual_blocks]
+        green_blocks = int(percent * total_blocks)
+        visual_state = [1] * green_blocks + [0] * (total_blocks - green_blocks)
+        
+        if len(visual_state) > total_blocks: 
+            visual_state = visual_state[:total_blocks]
 
-        # Symbols - Using standard large square emojis
-        SYM_DONE = "🟩" # Green Square
-        SYM_SKIP = "🟦" # Blue Square
-        SYM_TODO = "⬜" # White Large Square
-
-        # Construct the 2 rows string
+        SYM_DONE = "🟩" 
+        SYM_TODO = "⬜"
+        
         row0 = "-# "
         row1 = "-# "
         
-        for i in range(total_visual_blocks):
-            val = visual_state[i]
-            if val == 1: sym = SYM_DONE
-            elif val == 2: sym = SYM_SKIP
-            else: sym = SYM_TODO
+        for i in range(total_blocks):
+            sym = SYM_DONE if visual_state[i] == 1 else SYM_TODO
+            if i % 2 == 0: row0 += sym
+            else: row1 += sym
             
-            if i % 2 == 0:
-                row0 += sym
-            else:
-                row1 += sym
-                
         return f"{row0}\n{row1}"
 
-    async def update_message(self, interaction, finished=False, congratulation=None):
-        completed_tasks = self.state.count(1) + self.state.count(2)
-        content = f"<@{self.user_id}>'s tasks: {completed_tasks}/{self.total}\n{self.get_emoji_bar()}"
-        
-        view = self
-        if finished:
-            if congratulation:
-                content += f"\n🎉 **{congratulation}**"
-            view = None # Remove buttons
+    async def update_jail_sticky(self, guild):
+        config = self.get_config(guild.id)
+        if not config or not config.get('jail_channel_id'): return
 
-        if interaction:
-            # If the interaction has been responded to (deferred), we follow up/edit
-            if interaction.response.is_done():
-                 await interaction.edit_original_response(content=content, view=view)
-            else:
-                 await interaction.response.edit_message(content=content, view=view)
-        
-        # DB Update
-        if finished:
-            # Use main DB method
-            self.cog.bot.db.delete_doc("tasks_active", "message_id", self.message_id)
-        else:
-            await self.update_db()
+        channel = guild.get_channel(config['jail_channel_id'])
+        if not channel: return
 
-    async def update_db(self):
-        if self.message_id:
-            # Update 'state' in 'tasks_active' collection where message_id matches
-            self.cog.bot.db.update_doc("tasks_active", "message_id", self.message_id, {"state": self.state})
+        jails = self.bot.db.get_collection("lockout_jail")
+        guild_jails = [j for j in jails if j['guild_id'] == guild.id and j.get('remaining_seconds', 0) > 0]
 
-    def get_next_index(self):
-        try:
-            return self.state.index(0)
-        except ValueError:
-            return -1
+        active_inmates = []
+        for j in guild_jails:
+            member = guild.get_member(j['user_id'])
+            if member and member.voice and member.voice.channel and member.voice.channel.id == config['jail_channel_id']:
+                active_inmates.append(j)
 
-    async def check_completion(self, interaction):
-        if 0 not in self.state:
-            await self.finish_logic(interaction)
-        else:
-            await self.update_message(interaction)
-
-    async def finish_logic(self, interaction):
-        # 1. Convert remaining '0' (Todo) to '2' (Skipped)
-        self.state = [2 if x == 0 else x for x in self.state]
-        
-        # 2. Calculate score (Only '1's count towards the percentage)
-        greens = [x for x in self.state if x == 1]
-        percent_complete = int((len(greens) / self.total) * 100) if self.total > 0 else 0
-        
-        # Fetch celebration messages from config
-        # Config structure: {guild_id: {task_channel_id, celebratory_messages}}
-        guild_id = str(interaction.guild_id)
-        config_data = self.cog.bot.db.get_collection("tasks_config")
-        guild_config = config_data.get(guild_id, {})
-        celebratory_messages = guild_config.get("celebratory_messages", {
-            "1": "Good start! Keep it up!",           # 0-24
-            "2": "You're making progress!",           # 25-49
-            "3": "Almost there, doing great!",        # 50-74
-            "4": "AMAZING! You finished the list!"    # 75-100
-        })
-
-        msg_key = "1"
-        if 25 <= percent_complete < 50: msg_key = "2"
-        elif 50 <= percent_complete < 75: msg_key = "3"
-        elif 75 <= percent_complete: msg_key = "4"
-        
-        celebration = celebratory_messages.get(msg_key, "Good job!")
-        
-        await self.update_message(interaction, finished=True, congratulation=celebration)
-
-    # --- BUTTONS ---
-    
-    @discord.ui.button(label="Done", style=discord.ButtonStyle.success, custom_id="bb_done")
-    async def done_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("This isn't your list, buggy!", ephemeral=True)
-        
-        idx = self.get_next_index()
-        if idx == -1:
-            return await self.finish_logic(interaction)
-
-        self.history.append((idx, 0))
-        self.state[idx] = 1 # Green (Done)
-        await self.check_completion(interaction)
-
-    @discord.ui.button(label="Skip", style=discord.ButtonStyle.primary, custom_id="bb_skip")
-    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("This isn't your list, buggy!", ephemeral=True)
-
-        idx = self.get_next_index()
-        if idx == -1:
-            return await self.finish_logic(interaction)
-
-        self.history.append((idx, 0))
-        self.state[idx] = 2 # Blue (Skipped)
-        await self.check_completion(interaction)
-
-    @discord.ui.button(label="Undo", style=discord.ButtonStyle.secondary, custom_id="bb_undo")
-    async def undo_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("This isn't your list, buggy!", ephemeral=True)
-        
-        if not self.history:
-            return await interaction.response.send_message("Nothing to undo!", ephemeral=True)
-
-        last_idx, last_val = self.history.pop()
-        self.state[last_idx] = last_val
-        await self.update_message(interaction)
-
-    @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary, custom_id="bb_finish")
-    async def finish_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("This isn't your list, buggy!", ephemeral=True)
-
-        await self.finish_logic(interaction)
-
-
-class Tasks(commands.Cog, name="tasks"):
-    """ """ 
-    # Empty docstring for no description in help
-
-    def __init__(self, bot):
-        self.bot = bot
-
-    async def cog_load(self):
-        # Restore views logic
-        asyncio.create_task(self.restore_views())
-
-    async def restore_views(self):
-        # We need to wait until the bot is ready to add views
-        await self.bot.wait_until_ready()
-        
-        # Load all active tasks from main DB
-        active_tasks = self.bot.db.get_collection("tasks_active")
-        
-        count = 0
-        for doc in active_tasks:
-            try:
-                view = TaskView(
-                    cog=self,
-                    user_id=doc['user_id'], 
-                    total=doc['total'], 
-                    state=doc['state'], 
-                    message_id=doc['message_id']
-                )
-                self.bot.add_view(view)
-                count += 1
-            except Exception as e:
-                print(f"Failed to restore task view: {e}")
-        print(f"Restored {count} active task trackers in Tasks Cog.")
-
-    def get_task_channel_id(self, guild_id):
-        configs = self.bot.db.get_collection("tasks_config")
-        return configs.get(str(guild_id), {}).get("task_channel_id")
-
-    # CHANGED: Converted to prefix command
-    @commands.command(name="taskchannel")
-    @commands.is_owner()
-    async def taskchannel(self, ctx):
-        """Sets the current channel as the only channel for task commands (Owner Only)."""
-        guild_id = str(ctx.guild.id)
-        configs = self.bot.db.get_collection("tasks_config")
-        if isinstance(configs, list): configs = {} # safety
-        
-        if guild_id not in configs: configs[guild_id] = {}
-        configs[guild_id]["task_channel_id"] = ctx.channel.id
-        
-        self.bot.db.save_collection("tasks_config", configs)
-        await ctx.send(f"✅ Task commands are now restricted to this channel: {ctx.channel.mention}")
-
-    @app_commands.command(name="tasks", description="Sets up or changes your task count.", extras={'public': True})
-    @app_commands.describe(mode="Set new list (resets progress) or Change total (keeps progress)", number="Number of tasks")
-    async def tasks(self, interaction: discord.Interaction, mode: Literal["Set", "Change"], number: int):
-        # Restriction Check
-        channel_limit = self.get_task_channel_id(interaction.guild_id)
-        if channel_limit and interaction.channel_id != channel_limit:
-            await interaction.response.send_message(f"Please use <#{channel_limit}> for task commands!", ephemeral=True)
-            return
-
-        if number > 100:
-             await interaction.response.send_message(f"That's too many tasks! Try 100 or less, buggy.", ephemeral=True)
-             return
-        if number < 1:
-             await interaction.response.send_message("You need at least 1 task!", ephemeral=True)
-             return
-
-        # Find existing tasks for this user in this server
-        active_tasks = self.bot.db.get_collection("tasks_active")
-        existing_doc = next((doc for doc in active_tasks if doc['user_id'] == interaction.user.id and doc.get('guild_id') == interaction.guild_id), None)
-
-        # LINK GENERATION LOGIC
-        # Try to find the command ID for 'progress'
-        progress_mention = "`/progress`"
-        if hasattr(self.bot, 'cmd_cache') and interaction.guild_id in self.bot.cmd_cache:
-            cmd_id = self.bot.cmd_cache[interaction.guild_id].get('progress')
-            if cmd_id:
-                progress_mention = f"</progress:{cmd_id}>"
-
-        # --- LOGIC FOR 'SET' ---
-        if mode == "Set":
-            if existing_doc:
-                # Cleanup old message
+        if not active_inmates:
+            if config.get('jail_sticky_id'):
                 try:
-                    chan = self.bot.get_channel(existing_doc.get('channel_id'))
-                    if chan:
-                        msg = await chan.fetch_message(existing_doc.get('message_id'))
-                        await msg.edit(view=None)
+                    msg = await channel.fetch_message(config['jail_sticky_id'])
+                    await msg.delete()
                 except: pass
-                
-                # Remove from DB
-                self.bot.db.delete_doc("tasks_active", "message_id", existing_doc['message_id'])
-
-            # UPDATED RESPONSE
-            await interaction.response.send_message(f"I've set your tasks to {number}! Run {progress_mention} to see your bar.", ephemeral=True)
-            
-            # Create new entry
-            new_doc = {
-                 "user_id": interaction.user.id,
-                 "guild_id": interaction.guild.id, 
-                 "total": number,
-                 "state": [0] * number,
-                 "message_id": None, 
-                 "channel_id": interaction.channel_id
-            }
-            # Append directly to collection list via update_doc helper logic or manual append
-            # To be safe, we fetch fresh collection list
-            current_active = self.bot.db.get_collection("tasks_active")
-            current_active.append(new_doc)
-            self.bot.db.save_collection("tasks_active", current_active)
-
-        # --- LOGIC FOR 'CHANGE' ---
-        elif mode == "Change":
-            if not existing_doc:
-                await interaction.response.send_message("You don't have an active task list to change! Use 'Set' mode first.", ephemeral=True)
-                return
-            
-            old_total = existing_doc['total']
-            state = existing_doc['state']
-            
-            # Resize state list
-            if number > old_total:
-                # Add more 'Todo' (0) to the end
-                state.extend([0] * (number - old_total))
-            elif number < old_total:
-                # Truncate list
-                state = state[:number]
-            
-            # Update DB
-            self.bot.db.update_doc("tasks_active", "message_id", existing_doc['message_id'], {"total": number, "state": state})
-            
-            # UPDATED RESPONSE
-            await interaction.response.send_message(f"I've changed your total tasks to {number}! Your progress has been saved. Run {progress_mention} to refresh the bar.", ephemeral=True)
-
-
-    @app_commands.command(name="progress", description="Shows your progress bar and buttons.", extras={'public': True})
-    async def progress(self, interaction: discord.Interaction):
-        # Restriction Check
-        channel_limit = self.get_task_channel_id(interaction.guild_id)
-        if channel_limit and interaction.channel_id != channel_limit:
-            await interaction.response.send_message(f"Please use <#{channel_limit}> for task commands!", ephemeral=True)
+                config['jail_sticky_id'] = None
+                self.save_config(guild.id, config)
             return
 
-        active_tasks = self.bot.db.get_collection("tasks_active")
-        doc = next((d for d in active_tasks if d['user_id'] == interaction.user.id and d.get('guild_id') == interaction.guild_id), None)
-        
-        if not doc:
-            await interaction.response.send_message("You haven't set up any tasks yet! Use `/tasks [set] [number]` first.", ephemeral=True)
-            return
+        content = "**🔒 Active Timeouts**\n"
+        for inmate in active_inmates:
+            uid = inmate['user_id']
+            remaining = int(inmate['remaining_seconds'])
+            total = inmate.get('total_seconds', remaining)
+            member = guild.get_member(uid)
+            name = member.display_name if member else f"ID: {uid}"
+            
+            bar = self.create_progress_bar(total, remaining)
+            mins_left = int(remaining // 60)
+            
+            content += f"\n**{name}** ({mins_left}m remaining)\n{bar}\n"
 
-        # If there was an old message for this same task list, remove its buttons
-        if doc.get('message_id'):
+        existing_id = config.get('jail_sticky_id')
+        msg = None
+        if existing_id:
             try:
-                chan = self.bot.get_channel(doc.get('channel_id'))
-                if chan:
-                    old_msg = await chan.fetch_message(doc['message_id'])
-                    await old_msg.edit(view=None)
-            except:
-                pass
+                msg = await channel.fetch_message(existing_id)
+                # If someone talked, move sticky down
+                if channel.last_message_id != msg.id:
+                    await msg.delete()
+                    msg = None
+                else:
+                    if msg.content != content: await msg.edit(content=content)
+            except (discord.NotFound, discord.Forbidden): msg = None
 
-        # Create new View
-        view = TaskView(
-            cog=self,
-            user_id=interaction.user.id,
-            total=doc['total'],
-            state=doc['state']
-        )
+        if not msg:
+            try:
+                msg = await channel.send(content)
+                config['jail_sticky_id'] = msg.id
+                self.save_config(guild.id, config)
+            except: pass
 
-        content = f"<@{interaction.user.id}>'s tasks: {doc['state'].count(1) + doc['state'].count(2)}/{doc['total']}\n{view.get_emoji_bar()}"
+    @tasks.loop(minutes=1)
+    async def check_lockout_loop(self):
+        jails = self.bot.db.get_collection("lockout_jail")
+        active_jails = [j for j in jails if j.get('remaining_seconds', 0) > 0]
+        jail_updates = []
+        guilds_to_update = set()
+        now_ts = datetime.datetime.now().timestamp()
         
-        await interaction.response.send_message(content, view=view)
+        for jail_rec in active_jails:
+            guild = self.bot.get_guild(jail_rec['guild_id'])
+            if not guild: continue
+            member = guild.get_member(jail_rec['user_id'])
+            if not member: continue
+            config = self.get_config(guild.id)
+            if not config or not config.get('jail_channel_id'): continue
+            
+            if member.voice and member.voice.channel and member.voice.channel.id == config['jail_channel_id']:
+                if jail_rec.get('last_check'):
+                    # Calculate actual elapsed time since last check
+                    diff = now_ts - jail_rec['last_check']
+                    jail_rec['remaining_seconds'] = max(0, jail_rec['remaining_seconds'] - diff)
+                    guilds_to_update.add(guild)
+                
+                jail_rec['last_check'] = now_ts
+                
+                if jail_rec['remaining_seconds'] <= 0:
+                    # Release Inmate
+                    target_role = guild.get_role(config.get('target_role_id'))
+                    if target_role:
+                        try:
+                            await member.add_roles(target_role)
+                            try: 
+                                chan = guild.get_channel(config['jail_channel_id'])
+                                await chan.send(f"🔓 {member.mention} has completed their timeout!")
+                            except: pass
+                        except: pass
+                    self.delete_jail_data(guild.id, member.id)
+                    continue 
+            else: 
+                # Not in VC, don't count down
+                jail_rec['last_check'] = None
+            
+            jail_updates.append(jail_rec)
         
-        # Update DB with new message ID
-        msg = await interaction.original_response()
-        view.message_id = msg.id
-        
-        self.bot.db.update_doc("tasks_active", "message_id", doc['message_id'], # Use old message_id to find doc
-                               {"message_id": msg.id, "channel_id": interaction.channel_id}) # Update to new
+        # Save updates to DB
+        if jail_updates:
+            current_jails = self.bot.db.get_collection("lockout_jail")
+            for update in jail_updates:
+                for i, j in enumerate(current_jails):
+                    if j['guild_id'] == update['guild_id'] and j['user_id'] == update['user_id']:
+                        current_jails[i] = update
+                        break
+            self.bot.db.save_collection("lockout_jail", current_jails)
+            
+        for g in guilds_to_update: await self.update_jail_sticky(g)
 
-async def setup(bot):
-    await bot.add_cog(Tasks(bot))
+        # Handle Schedules
+        all_configs = self.bot.db.get_collection("lockout_configs")
+        current_utc = datetime.datetime.now(timezone.utc)
+        if not isinstance(all_configs, list): return
+
+        for config in all_configs:
+            guild_id = config.get('guild_id')
+            if not guild_id: continue
+            guild = self.bot.get_guild(guild_id)
+            if not guild: continue
+            target_role = guild.get_role(config.get('target_role_id'))
+            if not target_role: continue
+            time_zones = config.get('time_zones', [])
+            if not time_zones: continue
+
+            for zone in time_zones:
+                tz_role = guild.get_role(zone['role_id'])
+                if not tz_role: continue
+                offset = zone['offset']
+                local_time = current_utc + timedelta(hours=offset)
+
+                for member in tz_role.members:
+                    if self.get_jail_data(guild.id, member.id): continue
+                    schedule = self.get_user_schedule(guild.id, member.id)
+                    if not schedule or 'start' not in schedule: continue
+                    
+                    repeat_mode = schedule.get('repeat', 'daily')
+                    current_weekday = local_time.weekday()
+                    is_active_day = True
+                    if repeat_mode == 'weekdays' and current_weekday >= 5: is_active_day = False
+                    elif repeat_mode == 'weekends' and current_weekday < 5: is_active_day = False
+
+                    should_be_locked = self.is_time_in_range(schedule['start'], schedule['end'], local_time)
+                    if not is_active_day: should_be_locked = False
+
+                    has_role = target_role in member.roles
+                    was_locked_by_bot = schedule.get('locked_by_bot', False)
+
+                    if should_be_locked and has_role:
+                        try:
+                            await member.remove_roles(target_role)
+                            schedule['locked_by_bot'] = True
+                            self.save_user_schedule(guild.id, member.id, schedule)
+                        except: pass
+                    elif not should_be_locked and not has_role and was_locked_by_bot:
+                        try:
+                            await member.add_roles(target_role)
+                            schedule['locked_by_bot'] = False
+                            self.save_user_schedule(guild.id, member.id, schedule)
+                        except: pass
+
+    @check_lockout_loop.before_loop
+    async def before_check(self): await self.bot.wait_until_ready()
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member, before, after):
+        if member.bot: return
+        jail_data = self.get_jail_data(member.guild.id, member.id)
+        if not jail_data: return
+        config = self.get_config(member.guild.id)
+        if not config or not config.get('jail_channel_id'): return
+        
+        jail_vc_id = config['jail_channel_id']
+        now_ts = datetime.datetime.now().timestamp()
+        should_update_sticky = False
+
+        if after.channel and after.channel.id == jail_vc_id:
+            jail_data['last_check'] = now_ts
+            self.save_jail_data(member.guild.id, member.id, jail_data)
+            should_update_sticky = True
+        elif before.channel and before.channel.id == jail_vc_id:
+            if jail_data.get('last_check'):
+                diff = now_ts - jail_data['last_check']
+                jail_data['remaining_seconds'] = max(0, jail_data['remaining_seconds'] - diff)
+                jail_data['last_check'] = None
+                self.save_jail_data(member.guild.id, member.id, jail_data)
+                should_update_sticky = True
+        if should_update_sticky: await self.update_jail_sticky(member.guild)
+
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        if message.author.bot or not message.guild: return
+        config = self.get_config(message.guild.id)
+        if config and config.get('jail_channel_id') == message.channel.id:
+            await self.update_jail_sticky(message.guild)
+
+    # --- SLASH COMMANDS (USER) ---
+    
+    @app_commands.command(name="setschedule", description="Set your personal lockout schedule (HH:MM format).", extras={'public': True})
+    @app_commands.describe(start="Start time (e.g. 23:00)", end="End time (e.g. 07:00)", repeat="How often to repeat")
+    @app_commands.choices(repeat=[
+        app_commands.Choice(name="Daily (Every Day)", value="daily"),
+        app_commands.Choice(name="Weekdays (Mon-Fri)", value="weekdays"),
+        app_commands.Choice(name="Weekends (Sat-Sun)", value="weekends")
+    ])
+    async def setschedule(self, interaction: discord.Interaction, start: str, end: str, repeat: app_commands.Choice[str] = None):
+        """Set your personal lockout schedule (HH:MM format)."""
+        config = self.get_config(interaction.guild_id)
+        if config and config.get('command_channel_id') and interaction.channel_id != config['command_channel_id']:
+            return await interaction.response.send_message(f"Please use <#{config['command_channel_id']}> for lock commands!", ephemeral=True)
+
+        try:
+            datetime.datetime.strptime(start, "%H:%M")
+            datetime.datetime.strptime(end, "%H:%M")
+        except ValueError:
+            return await interaction.response.send_message("❌ Invalid time format. Please use HH:MM (24-hour).", ephemeral=True)
+        
+        repeat_val = repeat.value if repeat else "daily"
+        self.save_user_schedule(interaction.guild_id, interaction.user.id, {"start": start, "end": end, "repeat": repeat_val, "locked_by_bot": False})
+        await interaction.response.send_message(f"✅ Schedule set! Lockout from **{start}** to **{end}** ({repeat_val.capitalize()}).", ephemeral=True)
+
+    view_group = app_commands.Group(name="view", description="View your settings")
+
+    @view_group.command(name="schedule", description="View your current lockout schedule.", extras={'public': True})
+    async def view_schedule(self, interaction: discord.Interaction):
+        """View your current lockout schedule."""
+        config = self.get_config(interaction.guild_id)
+        if config and config.get('command_channel_id') and interaction.channel_id != config['command_channel_id']:
+            return await interaction.response.send_message(f"Please use <#{config['command_channel_id']}> for lock commands!", ephemeral=True)
+
+        data = self.get_user_schedule(interaction.guild_id, interaction.user.id)
+        if not data: return await interaction.response.send_message("You don't have a schedule set.", ephemeral=True)
+        await interaction.response.send_message(f"📅 **Your Schedule:** {data['start']} - {data['end']} ({data.get('repeat', 'daily').capitalize()})", ephemeral=True)
+
+    clear_group = app_commands.Group(name="clear", description="Clear your settings")
+
+    @clear_group.command(name="schedule", description="Delete your lockout schedule.", extras={'public': True})
+    async def clear_schedule(self, interaction: discord.Interaction):
+        """Delete your lockout schedule."""
+        config = self.get_config(interaction.guild_id)
+        if config and config.get('command_channel_id') and interaction.channel_id != config['command_channel_id']:
+            return await interaction.response.send_message(f"Please use <#{config['command_channel_id']}> for lock commands!", ephemeral=True)
+
+        data = self.get_user_schedule(interaction.guild_id, interaction.user.id)
+        if not data: return await interaction.response.send_message("You don't have a schedule set.", ephemeral=True)
+        
+        user_tz_offset, found_tz = 0, False
+        if config and config.get('time_zones'):
+            for zone in config['time_zones']:
+                role = interaction.guild.get_role(zone['role_id'])
+                if role and role in interaction.user.roles:
+                    user_tz_offset, found_tz = zone['offset'], True
+                    break
+        
+        if found_tz:
+            local_time = datetime.datetime.now(timezone.utc) + timedelta(hours=user_tz_offset)
+            repeat_mode = data.get('repeat', 'daily')
+            is_active_day = not ((repeat_mode == 'weekdays' and local_time.weekday() >= 5) or (repeat_mode == 'weekends' and local_time.weekday() < 5))
+            if is_active_day and self.is_time_in_range(data['start'], data['end'], local_time):
+                 return await interaction.response.send_message("❌ You cannot clear your schedule while it is active, buggy!", ephemeral=True)
+
+        self.delete_user_schedule(interaction.guild_id, interaction.user.id)
+        await interaction.response.send_message("✅ Schedule cleared.", ephemeral=True)
+
+    # --- PREFIX COMMANDS (ADMIN) ---
+
+    @commands.command(name="timeout")
+    @commands.has_permissions(administrator=True)
+    async def timeout(self, ctx, member: discord.Member = None, minutes: int = None, cancel: bool = False):
+        """Jail a user or release them. Usage: ?timeout @User <minutes> OR ?timeout @User 0 True (to release)"""
+        if member is None:
+            return await ctx.send("❌ Who are we jailing, buggy? Usage: `?timeout @User <minutes>`")
+
+        config = self.get_config(ctx.guild.id)
+        if cancel:
+            if not self.get_jail_data(ctx.guild.id, member.id): return await ctx.send(f"⚠️ {member.mention} is not in timeout.")
+            target_role = ctx.guild.get_role(config.get('target_role_id')) if config else None
+            if target_role:
+                try: await member.add_roles(target_role)
+                except: pass
+            self.delete_jail_data(ctx.guild.id, member.id)
+            await self.update_jail_sticky(ctx.guild)
+            return await ctx.send(f"✅ Released {member.mention} from timeout.")
+
+        if minutes is None or minutes <= 0: return await ctx.send("❌ How many minutes, buggy? Must be a positive number.")
+        if not config or not config.get('jail_channel_id') or not config.get('target_role_id'):
+            return await ctx.send("❌ Please finish configuration first with `?lockout config`!")
+
+        target_role = ctx.guild.get_role(config['target_role_id'])
+        if target_role:
+            try: await member.remove_roles(target_role)
+            except: pass
+
+        total_secs = minutes * 60
+        data = {"total_seconds": total_secs, "remaining_seconds": total_secs, "last_check": None}
+        if member.voice and member.voice.channel and member.voice.channel.id == config['jail_channel_id']:
+            data['last_check'] = datetime.datetime.now().timestamp()
+            
+        self.save_jail_data(ctx.guild.id, member.id, data)
+        await ctx.send(f"🔒 {member.mention} jailed for {minutes}m. Go to <#{config['jail_channel_id']}> to count down.")
+        await self.update_jail_sticky(ctx.guild)
+
+    @commands.command(name="adminclear")
+    @commands.has_permissions(administrator=True)
+    async def adminclear(self, ctx, member: discord.Member = None):
+        """Force clear a user's schedule. Usage: ?adminclear @User"""
+        if member is None: return await ctx.send("❌ Specify a member: `?adminclear @User`")
+        self.delete_user_schedule(ctx.guild.id, member.id)
+        await ctx.send(f"✅ Cleared schedule for {member.display_name}.")
+
+    @commands.command(name="lockoutchannel")
+    @commands.has_permissions(administrator=True)
+    async def lockoutchannel(self, ctx, channel: discord.TextChannel = None):
+        """Restrict user lock commands to a specific channel. Usage: ?lockoutchannel #channel"""
+        if channel is None: return await ctx.send("❌ Specify a channel: `?lockoutchannel #channel`")
+        config = self.get_config(ctx.guild.id) or {"guild_id": ctx.guild.id}
+        config['command_channel_id'] = channel.id
+        self.save_config(ctx.guild.id, config)
+        await ctx.send(f"✅ User lock commands restricted to {channel.mention}.")
+
+    # --- PREFIX CONFIG GROUPS ---
+
+    @commands.group(name="lockout", invoke_without_command=True)
+    @commands.has_permissions(administrator=True)
+    async def lockout_group(self, ctx):
+        """Main lockout management group."""
+        await ctx.send("Commands: `config`, `zone`")
+
+    @lockout_group.group(name="config", invoke_without_command=True)
+    @commands.has_permissions(administrator=True)
+    async def config_group(self, ctx):
+        """Configure system settings like the jail VC and target role."""
+        await ctx.send("Commands: `target_role`, `jail_channel`")
+
+    @config_group.command(name="target_role")
+    @commands.has_permissions(administrator=True)
+    async def config_target_role(self, ctx, role: discord.Role = None):
+        """Set the role that is REMOVED during lockout/jail. Usage: ?lockout config target_role @Role"""
+        if role is None: return await ctx.send("❌ Specify a role: `?lockout config target_role @Role`")
+        config = self.get_config(ctx.guild.id) or {"guild_id": ctx.guild.id}
+        config['target_role_id'] = role.id
+        self.save_config(ctx.guild.id, config)
+        await ctx.send(f"✅ Target role set to {role.mention}.")
+
+    @config_group.command(name="jail_channel")
+    @commands.has_permissions(administrator=True)
+    async def config_jail_channel(self, ctx, channel: discord.VoiceChannel = None):
+        """Set the VC where jail timers count down. Usage: ?lockout config jail_channel #VC"""
+        if channel is None: return await ctx.send("❌ Specify a voice channel: `?lockout config jail_channel #Channel`")
+        config = self.get_config(ctx.guild.id) or {"guild_id": ctx.guild.id}
+        config['jail_channel_id'] = channel.id
+        self.save_config(ctx.guild.id, config)
+        await ctx.send(f"✅ Jail channel set to {channel.mention}.")
+
+    @lockout_group.group(name="zone", invoke_without_command=True)
+    @commands.has_permissions(administrator=True)
+    async def zone_group(self, ctx):
+        """Manage server-wide timezone role mappings."""
+        await ctx.send("Commands: `add`, `remove`, `list`")
+
+    @zone_group.command(name="add")
+    @commands.has_permissions(administrator=True)
+    async def zone_add(self, ctx, role: discord.Role = None, offset: int = None):
+        """Map a role to a UTC offset. Usage: ?lockout zone add @EST -5"""
+        if role is None or offset is None: return await ctx.send("❌ Usage: `?lockout zone add @Role <offset>` (e.g. -5)")
+        config = self.get_config(ctx.guild.id) or {"guild_id": ctx.guild.id}
+        zones = [z for z in config.get('time_zones', []) if z['role_id'] != role.id]
+        zones.append({'role_id': role.id, 'offset': offset})
+        config['time_zones'] = zones
+        self.save_config(ctx.guild.id, config)
+        await ctx.send(f"✅ Mapped {role.mention} to UTC{offset:+d}.")
+
+    @zone_group.command(name="remove")
+    @commands.has_permissions(administrator=True)
+    async def zone_remove(self, ctx, role: discord.Role = None):
+        """Remove a timezone role mapping. Usage: ?lockout zone remove @Role"""
+        if role is None: return await ctx.send("❌ Specify a role: `?lockout zone remove @Role`")
+        config = self.get_config(ctx.guild.id)
+        if not config or 'time_zones' not in config: return await ctx.send("No zones found.")
+        initial = len(config['time_zones'])
+        config['time_zones'] = [z for z in config['time_zones'] if z['role_id'] != role.id]
+        if len(config['time_zones']) < initial:
+            self.save_config(ctx.guild.id, config)
+            await ctx.send(f"✅ Removed mapping for {role.mention}.")
+        else: await ctx.send("That role is not mapped.")
+
+    @zone_group.command(name="list")
+    @commands.has_permissions(administrator=True)
+    async def zone_list(self, ctx):
+        """List all active timezone role mappings."""
+        config = self.get_config(ctx.guild.id)
+        if not config or not config.get('time_zones'): return await ctx.send("No zones found.")
+        text = "**🌍 Timezone Mappings:**\n"
+        for z in config['time_zones']:
+            r = ctx.guild.get_role(z['role_id'])
+            text += f"• {r.mention if r else f'ID:{z[role_id]}'}: UTC{z['offset']:+d}\n"
+        await ctx.send(text)
+
+async def setup(bot): await bot.add_cog(Lockout(bot))
