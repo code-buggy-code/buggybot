@@ -24,9 +24,11 @@ from typing import Literal
 #   - cog_load(self)
 #   - restore_views(self)
 #   - get_task_channel_id(self, guild_id)
-#   - taskchannel(self, ctx) [Prefix - Changed]
-#   - tasks(self, interaction, mode: Literal["Set", "Change"], number: int)
-#   - progress(self, interaction)
+#   - task (Group) [Slash]
+#     - add(interaction, number)
+#     - edit(interaction, number)
+#     - progress(interaction)
+#     - channel(interaction, channel)
 #   - setup(bot)
 
 # UPDATED: No separate JSONStore. Using bot.db (main.py)
@@ -247,119 +249,115 @@ class Tasks(commands.Cog, name="tasks"):
         configs = self.bot.db.get_collection("tasks_config")
         return configs.get(str(guild_id), {}).get("task_channel_id")
 
-    # CHANGED: Converted to prefix command
-    @commands.command(name="taskchannel")
-    @commands.is_owner()
-    async def taskchannel(self, ctx):
-        """Sets the current channel as the only channel for task commands (Owner Only)."""
-        guild_id = str(ctx.guild.id)
+    # --- SLASH COMMANDS ---
+
+    task = app_commands.Group(name="task", description="Manage your task lists", extras={'public': True})
+
+    @task.command(name="channel", description="Admin: Set the task commands channel.")
+    @app_commands.describe(channel="The channel for task commands")
+    @app_commands.default_permissions(administrator=True)
+    async def task_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        """Sets the current channel as the only channel for task commands (Admin Only)."""
+        guild_id = str(interaction.guild_id)
         configs = self.bot.db.get_collection("tasks_config")
         if isinstance(configs, list): configs = {} # safety
         
         if guild_id not in configs: configs[guild_id] = {}
-        configs[guild_id]["task_channel_id"] = ctx.channel.id
+        configs[guild_id]["task_channel_id"] = channel.id
         
         self.bot.db.save_collection("tasks_config", configs)
-        await ctx.send(f"✅ Task commands are now restricted to this channel: {ctx.channel.mention}")
+        await interaction.response.send_message(f"✅ Task commands are now restricted to {channel.mention}", ephemeral=True)
 
-    @app_commands.command(name="tasks", description="Sets up or changes your task count.", extras={'public': True})
-    @app_commands.describe(mode="Set new list (resets progress) or Change total (keeps progress)", number="Number of tasks")
-    async def tasks(self, interaction: discord.Interaction, mode: Literal["Set", "Change"], number: int):
+    @task.command(name="add", description="Set a new task list.")
+    @app_commands.describe(number="Number of tasks")
+    async def task_add(self, interaction: discord.Interaction, number: int):
+        """Set a new task list."""
         # Restriction Check
         channel_limit = self.get_task_channel_id(interaction.guild_id)
         if channel_limit and interaction.channel_id != channel_limit:
-            await interaction.response.send_message(f"Please use <#{channel_limit}> for task commands!", ephemeral=True)
-            return
+            return await interaction.response.send_message(f"Please use <#{channel_limit}> for task commands!", ephemeral=True)
 
         if number > 100:
-             await interaction.response.send_message(f"That's too many tasks! Try 100 or less, buggy.", ephemeral=True)
-             return
+             return await interaction.response.send_message(f"That's too many tasks! Try 100 or less, buggy.", ephemeral=True)
         if number < 1:
-             await interaction.response.send_message("You need at least 1 task!", ephemeral=True)
-             return
+             return await interaction.response.send_message("You need at least 1 task!", ephemeral=True)
 
         # Find existing tasks for this user in this server
         active_tasks = self.bot.db.get_collection("tasks_active")
         existing_doc = next((doc for doc in active_tasks if doc['user_id'] == interaction.user.id and doc.get('guild_id') == interaction.guild_id), None)
 
-        # LINK GENERATION LOGIC
-        # Try to find the command ID for 'progress'
-        progress_mention = "`/progress`"
-        if hasattr(self.bot, 'cmd_cache') and interaction.guild_id in self.bot.cmd_cache:
-            cmd_id = self.bot.cmd_cache[interaction.guild_id].get('progress')
-            if cmd_id:
-                progress_mention = f"</progress:{cmd_id}>"
-
-        # --- LOGIC FOR 'SET' ---
-        if mode == "Set":
-            if existing_doc:
-                # Cleanup old message
-                try:
-                    chan = self.bot.get_channel(existing_doc.get('channel_id'))
-                    if chan:
-                        msg = await chan.fetch_message(existing_doc.get('message_id'))
-                        await msg.edit(view=None)
-                except: pass
-                
-                # Remove from DB
-                self.bot.db.delete_doc("tasks_active", "message_id", existing_doc['message_id'])
-
-            # UPDATED RESPONSE
-            await interaction.response.send_message(f"I've set your tasks to {number}! Run {progress_mention} to see your bar.", ephemeral=True)
+        if existing_doc:
+            # Cleanup old message
+            try:
+                chan = self.bot.get_channel(existing_doc.get('channel_id'))
+                if chan:
+                    msg = await chan.fetch_message(existing_doc.get('message_id'))
+                    await msg.edit(view=None)
+            except: pass
             
-            # Create new entry
-            new_doc = {
-                 "user_id": interaction.user.id,
-                 "guild_id": interaction.guild.id, 
-                 "total": number,
-                 "state": [0] * number,
-                 "message_id": None, 
-                 "channel_id": interaction.channel_id
-            }
-            # Append directly to collection list via update_doc helper logic or manual append
-            # To be safe, we fetch fresh collection list
-            current_active = self.bot.db.get_collection("tasks_active")
-            current_active.append(new_doc)
-            self.bot.db.save_collection("tasks_active", current_active)
+            # Remove from DB
+            self.bot.db.delete_doc("tasks_active", "message_id", existing_doc['message_id'])
 
-        # --- LOGIC FOR 'CHANGE' ---
-        elif mode == "Change":
-            if not existing_doc:
-                await interaction.response.send_message("You don't have an active task list to change! Use 'Set' mode first.", ephemeral=True)
-                return
-            
-            old_total = existing_doc['total']
-            state = existing_doc['state']
-            
-            # Resize state list
-            if number > old_total:
-                # Add more 'Todo' (0) to the end
-                state.extend([0] * (number - old_total))
-            elif number < old_total:
-                # Truncate list
-                state = state[:number]
-            
-            # Update DB
-            self.bot.db.update_doc("tasks_active", "message_id", existing_doc['message_id'], {"total": number, "state": state})
-            
-            # UPDATED RESPONSE
-            await interaction.response.send_message(f"I've changed your total tasks to {number}! Your progress has been saved. Run {progress_mention} to refresh the bar.", ephemeral=True)
+        await interaction.response.send_message(f"I've set your tasks to {number}! Run `/task progress` to see your bar.", ephemeral=True)
+        
+        # Create new entry
+        new_doc = {
+             "user_id": interaction.user.id,
+             "guild_id": interaction.guild.id, 
+             "total": number,
+             "state": [0] * number,
+             "message_id": None, 
+             "channel_id": interaction.channel_id
+        }
+        current_active = self.bot.db.get_collection("tasks_active")
+        current_active.append(new_doc)
+        self.bot.db.save_collection("tasks_active", current_active)
 
-
-    @app_commands.command(name="progress", description="Shows your progress bar and buttons.", extras={'public': True})
-    async def progress(self, interaction: discord.Interaction):
+    @task.command(name="edit", description="Change your total tasks count (keeps progress).")
+    @app_commands.describe(number="New total number of tasks")
+    async def task_edit(self, interaction: discord.Interaction, number: int):
+        """Change your total tasks count (keeps progress)."""
         # Restriction Check
         channel_limit = self.get_task_channel_id(interaction.guild_id)
         if channel_limit and interaction.channel_id != channel_limit:
-            await interaction.response.send_message(f"Please use <#{channel_limit}> for task commands!", ephemeral=True)
-            return
+            return await interaction.response.send_message(f"Please use <#{channel_limit}> for task commands!", ephemeral=True)
+
+        if number > 100:
+             return await interaction.response.send_message(f"That's too many tasks! Try 100 or less, buggy.", ephemeral=True)
+        if number < 1:
+             return await interaction.response.send_message("You need at least 1 task!", ephemeral=True)
+
+        active_tasks = self.bot.db.get_collection("tasks_active")
+        existing_doc = next((doc for doc in active_tasks if doc['user_id'] == interaction.user.id and doc.get('guild_id') == interaction.guild_id), None)
+
+        if not existing_doc:
+            return await interaction.response.send_message("You don't have an active task list to change! Use `/task add` first.", ephemeral=True)
+        
+        old_total = existing_doc['total']
+        state = existing_doc['state']
+        
+        # Resize state list
+        if number > old_total:
+            state.extend([0] * (number - old_total))
+        elif number < old_total:
+            state = state[:number]
+        
+        self.bot.db.update_doc("tasks_active", "message_id", existing_doc['message_id'], {"total": number, "state": state})
+        await interaction.response.send_message(f"I've changed your total tasks to {number}! Your progress has been saved. Run `/task progress` to refresh the bar.", ephemeral=True)
+
+    @task.command(name="progress", description="Shows your progress bar and buttons.")
+    async def task_progress(self, interaction: discord.Interaction):
+        """Shows your progress bar and buttons."""
+        # Restriction Check
+        channel_limit = self.get_task_channel_id(interaction.guild_id)
+        if channel_limit and interaction.channel_id != channel_limit:
+            return await interaction.response.send_message(f"Please use <#{channel_limit}> for task commands!", ephemeral=True)
 
         active_tasks = self.bot.db.get_collection("tasks_active")
         doc = next((d for d in active_tasks if d['user_id'] == interaction.user.id and d.get('guild_id') == interaction.guild_id), None)
         
         if not doc:
-            await interaction.response.send_message("You haven't set up any tasks yet! Use `/tasks [set] [number]` first.", ephemeral=True)
-            return
+            return await interaction.response.send_message("You haven't set up any tasks yet! Use `/task add [number]` first.", ephemeral=True)
 
         # If there was an old message for this same task list, remove its buttons
         if doc.get('message_id'):
