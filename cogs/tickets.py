@@ -11,21 +11,12 @@ import asyncio
 # - find_ticket_by_user_and_role(user_id, role_id)
 # - save_active_ticket(data)
 # - delete_active_ticket(channel_id)
-# - add(interaction, role, ticket_name, prompt, category, admin, message_id, emoji, access, demessage_id) [Slash]
-# - edit(interaction, role, ticket_name, prompt, category, admin, message_id, emoji, access, demessage_id) [Slash]
-# - remove(interaction, role) [Slash]
-# - list_setups(interaction) [Slash]
-# - close(interaction, accept) [Slash]
-# - ticket_cmd(ctx) [Prefix Group]
-#   - ticket_add(ctx, role, name, prompt)
-#   - ticket_remove(ctx, role)
-#   - ticket_list(ctx)
-#   - ticket_close(ctx, mode)
-#   - ticket_category(ctx, role, category)
-#   - ticket_admin(ctx, role, admin)
-#   - ticket_gate(ctx, role, message_id, emoji)
-#   - ticket_access(ctx, role, access)
-#   - ticket_demessage(ctx, role, message_id)
+# - ticket (Group) [Slash]
+#   - setup(interaction, role, ticket_name, prompt, category, admin, message_id, emoji, access, demessage_id)
+#   - edit(interaction, role, ticket_name, prompt, category, admin, message_id, emoji, access, demessage_id)
+#   - remove(interaction, role)
+#   - list(interaction)
+#   - close(interaction, accept)
 # - on_member_update(before, after)
 # - create_ticket(member, setup)
 # - on_raw_reaction_add(payload)
@@ -77,9 +68,9 @@ class Tickets(commands.Cog):
 
     # --- SLASH COMMANDS ---
     
-    ticket_group = app_commands.Group(name="ticket", description="Manage the ticket system")
+    ticket = app_commands.Group(name="ticket", description="Manage the ticket system", default_permissions=discord.Permissions(administrator=True))
 
-    @ticket_group.command(name="add", description="Create a new ticket setup linked to a role.")
+    @ticket.command(name="setup", description="Create a new ticket setup linked to a role.")
     @app_commands.describe(
         role="The role that triggers the ticket creation",
         ticket_name="Name of the channel (use {user})",
@@ -91,7 +82,7 @@ class Tickets(commands.Cog):
         access="Optional: Role to give when ticket is accepted",
         demessage_id="Optional: Message ID to remove access role on ANY reaction"
     )
-    async def add(self, interaction: discord.Interaction, 
+    async def ticket_setup(self, interaction: discord.Interaction, 
                   role: discord.Role, 
                   ticket_name: str, 
                   prompt: str,
@@ -126,7 +117,7 @@ class Tickets(commands.Cog):
         self.bot.db.update_doc("ticket_setups", "role_id", role.id, new_setup)
         await interaction.response.send_message(f"✅ Ticket setup added! Assigning {role.mention} will now trigger a ticket.", ephemeral=True)
 
-    @ticket_group.command(name="edit", description="Edit an existing ticket setup.")
+    @ticket.command(name="edit", description="Edit an existing ticket setup.")
     @app_commands.describe(
         role="The role to edit setup for",
         ticket_name="Name of the channel (use {user})",
@@ -138,7 +129,7 @@ class Tickets(commands.Cog):
         access="Role to give on accept",
         demessage_id="Message ID for removal"
     )
-    async def edit(self, interaction: discord.Interaction, 
+    async def ticket_edit(self, interaction: discord.Interaction, 
                    role: discord.Role, 
                    ticket_name: str = None, 
                    prompt: str = None, 
@@ -175,8 +166,8 @@ class Tickets(commands.Cog):
         self.bot.db.update_doc("ticket_setups", "role_id", role.id, setup)
         await interaction.response.send_message(f"✅ Updated ticket setup for {role.mention}.", ephemeral=True)
 
-    @ticket_group.command(name="remove", description="Remove a ticket setup.")
-    async def remove(self, interaction: discord.Interaction, role: discord.Role):
+    @ticket.command(name="remove", description="Remove a ticket setup.")
+    async def ticket_remove(self, interaction: discord.Interaction, role: discord.Role):
         setup = self.get_setup(role.id)
         if not setup:
             return await interaction.response.send_message(f"❌ Error: No setup found for {role.mention}.", ephemeral=True)
@@ -184,8 +175,8 @@ class Tickets(commands.Cog):
         self.bot.db.delete_doc("ticket_setups", "role_id", role.id)
         await interaction.response.send_message(f"✅ Removed ticket setup for {role.mention}.", ephemeral=True)
 
-    @ticket_group.command(name="list", description="List all ticket setups.")
-    async def list_setups(self, interaction: discord.Interaction):
+    @ticket.command(name="list", description="List all ticket setups.")
+    async def ticket_list(self, interaction: discord.Interaction):
         setups = self.bot.db.get_collection("ticket_setups")
         
         # Filter for current guild
@@ -206,9 +197,9 @@ class Tickets(commands.Cog):
         
         await interaction.response.send_message(text, ephemeral=True)
 
-    @ticket_group.command(name="close", description="Close the ticket. Optional: Set accept to True to grant access role.")
+    @ticket.command(name="close", description="Close the ticket. Optional: Set accept to True to grant access role.")
     @app_commands.describe(accept="If True, grant the access role (Accept). If False/Empty, just delete (Deny).")
-    async def close(self, interaction: discord.Interaction, accept: bool = False):
+    async def ticket_close(self, interaction: discord.Interaction, accept: bool = False):
         # 1. Check if we are in a ticket
         ticket_data = self.get_active_ticket(interaction.channel.id)
         if not ticket_data:
@@ -243,164 +234,6 @@ class Tickets(commands.Cog):
         await self.delete_active_ticket(interaction.channel.id)
         await asyncio.sleep(2)
         await interaction.channel.delete()
-
-    # --- PREFIX COMMANDS ---
-    @commands.group(name="ticket", invoke_without_command=True)
-    @commands.has_permissions(administrator=True)
-    async def ticket_cmd(self, ctx):
-        """Manage ticket settings."""
-        await ctx.send("Commands: `add`, `remove`, `list`, `close`, `category`, `admin`, `gate`, `access`, `demessage`")
-
-    @ticket_cmd.command(name="add")
-    @commands.has_permissions(administrator=True)
-    async def ticket_add(self, ctx, role: discord.Role, name: str, *, prompt: str):
-        """Create a new ticket setup. Usage: ?ticket add @Role "name-{user}" "Message..." """
-        existing = self.get_setup(role.id)
-        if existing:
-            return await ctx.send(f"❌ Error: A setup for {role.mention} already exists.")
-
-        new_setup = {
-            "guild_id": ctx.guild.id,
-            "role_id": role.id,
-            "ticket_name": name,
-            "prompt": prompt,
-            "category_id": None,
-            "admin_role_id": None,
-            "gate_message_id": None,
-            "gate_emoji": None,
-            "access_role_id": None,
-            "demessage_id": None
-        }
-
-        self.bot.db.update_doc("ticket_setups", "role_id", role.id, new_setup)
-        await ctx.send(f"✅ Ticket setup added for {role.mention}.")
-
-    @ticket_cmd.command(name="remove")
-    @commands.has_permissions(administrator=True)
-    async def ticket_remove(self, ctx, role: discord.Role):
-        """Remove a ticket setup."""
-        setup = self.get_setup(role.id)
-        if not setup:
-            return await ctx.send(f"❌ Error: No setup found for {role.mention}.")
-        
-        self.bot.db.delete_doc("ticket_setups", "role_id", role.id)
-        await ctx.send(f"✅ Removed ticket setup for {role.mention}.")
-
-    @ticket_cmd.command(name="list")
-    @commands.has_permissions(administrator=True)
-    async def ticket_list(self, ctx):
-        """List all ticket setups."""
-        setups = self.bot.db.get_collection("ticket_setups")
-        current_guild_roles = {r.id for r in ctx.guild.roles}
-        filtered_setups = [s for s in setups if s['role_id'] in current_guild_roles]
-
-        if not filtered_setups:
-            return await ctx.send("📝 No ticket setups found.")
-        
-        text = "**🎫 Ticket Setups:**\n"
-        for s in filtered_setups:
-            role_ping = f"<@&{s['role_id']}>"
-            admin_ping = f"<@&{s['admin_role_id']}>" if s.get('admin_role_id') else "None"
-            cat_ping = f"<#{s.get('category_id')}>" if s.get('category_id') else "None"
-            gate = "Yes" if s.get('gate_message_id') else "No"
-            text += f"• {role_ping} | Admin: {admin_ping} | Cat: {cat_ping} | Gate: {gate}\n"
-        
-        await ctx.send(text)
-
-    @ticket_cmd.command(name="close")
-    async def ticket_close(self, ctx, mode: str = None):
-        """Close the current ticket. Usage: ?ticket close [accept]"""
-        accept = False
-        if mode and mode.lower() == "accept":
-            accept = True
-
-        ticket_data = self.get_active_ticket(ctx.channel.id)
-        if not ticket_data:
-            return await ctx.send("❌ This command can only be used in an active ticket channel.")
-
-        user_id = ticket_data['user_id']
-        setup_role_id = ticket_data['setup_role_id']
-        
-        member = ctx.guild.get_member(user_id)
-        if not member:
-            try: member = await ctx.guild.fetch_member(user_id)
-            except: member = None
-
-        await ctx.send("🔒 Closing ticket...")
-
-        trigger_role = ctx.guild.get_role(setup_role_id)
-        if member and trigger_role:
-            try: await member.remove_roles(trigger_role)
-            except Exception as e: print(f"Failed to remove trigger role: {e}")
-
-        if accept and member:
-            setup = self.get_setup(setup_role_id)
-            if setup and setup.get('access_role_id'):
-                access_role = ctx.guild.get_role(setup['access_role_id'])
-                if access_role:
-                    try: await member.add_roles(access_role)
-                    except Exception as e: print(f"Failed to add access role: {e}")
-
-        await self.delete_active_ticket(ctx.channel.id)
-        await asyncio.sleep(2)
-        await ctx.channel.delete()
-
-    @ticket_cmd.command(name="category")
-    @commands.has_permissions(administrator=True)
-    async def ticket_category(self, ctx, role: discord.Role, category: discord.CategoryChannel):
-        """Set the category for a ticket setup."""
-        setup = self.get_setup(role.id)
-        if not setup: return await ctx.send("❌ Setup not found.")
-        setup['category_id'] = category.id
-        self.bot.db.update_doc("ticket_setups", "role_id", role.id, setup)
-        await ctx.send(f"✅ Category set to {category.name} for {role.mention}.")
-
-    @ticket_cmd.command(name="admin")
-    @commands.has_permissions(administrator=True)
-    async def ticket_admin(self, ctx, role: discord.Role, admin: discord.Role):
-        """Set the admin role for a ticket setup."""
-        setup = self.get_setup(role.id)
-        if not setup: return await ctx.send("❌ Setup not found.")
-        setup['admin_role_id'] = admin.id
-        self.bot.db.update_doc("ticket_setups", "role_id", role.id, setup)
-        await ctx.send(f"✅ Admin role set to {admin.mention} for {role.mention}.")
-
-    @ticket_cmd.command(name="gate")
-    @commands.has_permissions(administrator=True)
-    async def ticket_gate(self, ctx, role: discord.Role, message_id: str, emoji: str):
-        """Set the gate message and emoji for a ticket setup."""
-        setup = self.get_setup(role.id)
-        if not setup: return await ctx.send("❌ Setup not found.")
-        try:
-            setup['gate_message_id'] = int(message_id)
-            setup['gate_emoji'] = emoji
-            self.bot.db.update_doc("ticket_setups", "role_id", role.id, setup)
-            await ctx.send(f"✅ Gate configured for {role.mention}.")
-        except ValueError:
-            await ctx.send("❌ Message ID must be a number.")
-
-    @ticket_cmd.command(name="access")
-    @commands.has_permissions(administrator=True)
-    async def ticket_access(self, ctx, role: discord.Role, access: discord.Role):
-        """Set the access role granted upon ticket acceptance."""
-        setup = self.get_setup(role.id)
-        if not setup: return await ctx.send("❌ Setup not found.")
-        setup['access_role_id'] = access.id
-        self.bot.db.update_doc("ticket_setups", "role_id", role.id, setup)
-        await ctx.send(f"✅ Access role set to {access.mention} for {role.mention}.")
-
-    @ticket_cmd.command(name="demessage")
-    @commands.has_permissions(administrator=True)
-    async def ticket_demessage(self, ctx, role: discord.Role, message_id: str):
-        """Set the demessage ID (removes access role on reaction)."""
-        setup = self.get_setup(role.id)
-        if not setup: return await ctx.send("❌ Setup not found.")
-        try:
-            setup['demessage_id'] = int(message_id)
-            self.bot.db.update_doc("ticket_setups", "role_id", role.id, setup)
-            await ctx.send(f"✅ Demessage configured for {role.mention}.")
-        except ValueError:
-            await ctx.send("❌ Message ID must be a number.")
 
     # --- EVENTS ---
 
