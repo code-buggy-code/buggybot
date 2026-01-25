@@ -48,9 +48,10 @@ import re
 #   - listmessages(interaction)
 #   - list(interaction)
 # - vote(interaction, member) [Slash - Public]
-# - vote_list(interaction) [Slash - Public]
+# - voteset(interaction, channel) [Slash]
 # - voterole(interaction, role) [Slash]
 # - voteremove(interaction, member) [Slash]
+# - vote_list(interaction) [Slash - Buggy Only]
 # - vcping (Group) [Slash]
 #   - ignore (Group)
 #     - add(interaction, channel)
@@ -153,11 +154,13 @@ class Admin(commands.Cog):
                 # Ensure structure
                 if 'active_votes' not in doc: doc['active_votes'] = {} # {target_id_str: [voters_list]}
                 if 'voting_role_id' not in doc: doc['voting_role_id'] = None
+                if 'voting_channel_id' not in doc: doc['voting_channel_id'] = None
                 return doc
         
         return {
             "guild_id": guild_id,
             "voting_role_id": None,
+            "voting_channel_id": None,
             "active_votes": {}
         }
 
@@ -697,12 +700,27 @@ class Admin(commands.Cog):
 
     # --- VOTE KICK COMMANDS ---
     
+    @app_commands.command(name="voteset", description="Set the channel where /vote can be used.")
+    @app_commands.describe(channel="The channel for voting")
+    @app_commands.default_permissions(administrator=True)
+    async def voteset(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        """Set the channel where /vote can be used."""
+        data = self.get_vote_data(interaction.guild.id)
+        data['voting_channel_id'] = channel.id
+        self.save_vote_data(interaction.guild_id, data)
+        await interaction.response.send_message(f"✅ /vote is now restricted to {channel.mention}.", ephemeral=True)
+
     @app_commands.command(name="vote", description="Vote to kick a user", extras={'public': True})
     @app_commands.describe(member="The member to vote kick")
     async def vote(self, interaction: discord.Interaction, member: discord.Member):
         data = self.get_vote_data(interaction.guild.id)
         voting_role_id = data['voting_role_id']
         active_votes = data['active_votes'] # {target_id_str: [list of voters]}
+        voting_channel_id = data.get('voting_channel_id')
+
+        # Channel Check
+        if voting_channel_id and interaction.channel_id != voting_channel_id:
+            return await interaction.response.send_message(f"❌ You can only use /vote in <#{voting_channel_id}>.", ephemeral=True)
 
         if voting_role_id is None:
             return await interaction.response.send_message("❌ The voting role has not been set yet. An admin must use `/voterole` first.", ephemeral=True)
@@ -781,8 +799,12 @@ class Admin(commands.Cog):
         else:
             await interaction.response.send_message(f"⚠️ There are no active votes against {member.display_name}.", ephemeral=True)
 
-    @app_commands.command(name="vote-list", description="List active vote kicks", extras={'public': True})
+    @app_commands.command(name="vote-list", description="List active vote kicks")
     async def vote_list(self, interaction: discord.Interaction):
+        # BUGGY ONLY CHECK
+        if interaction.user.id != BUGGY_ID:
+            return await interaction.response.send_message("❌ You are not authorized to use this command.", ephemeral=True)
+
         data = self.get_vote_data(interaction.guild.id)
         active_votes = data.get('active_votes', {})
 
