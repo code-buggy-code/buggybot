@@ -23,12 +23,15 @@ import re
 # - save_vote_data(guild_id, data)
 # - get_vcping_config(guild_id)
 # - save_vcping_config(guild_id, config)
+# - get_autoban_roles(guild_id)
+# - save_autoban_roles(guild_id, roles)
 # - log_to_channel(guild, embed)
 # - on_message(message)
 # - on_raw_reaction_add(payload)
 # - on_message_delete(message)
 # - on_message_edit(before, after)
 # - on_member_remove(member)
+# - on_member_update(before, after)
 # - handle_sticky(message)
 # - handle_dm_request(message)
 # - stick(ctx, message) [Prefix]
@@ -176,6 +179,23 @@ class Admin(commands.Cog):
         """Saves VC Ping config."""
         self.bot.db.save_collection("vcping_config", config)
 
+    def get_autoban_roles(self, guild_id):
+        """Fetches list of autoban role IDs for a guild."""
+        collection = self.bot.db.get_collection("autoban_configs")
+        # Format: [{"guild_id": 123, "roles": [1, 2, 3]}]
+        doc = next((d for d in collection if d['guild_id'] == guild_id), None)
+        if doc:
+            return doc.get('roles', [])
+        return []
+
+    def save_autoban_roles(self, guild_id, roles):
+        """Saves autoban roles."""
+        collection = self.bot.db.get_collection("autoban_configs")
+        # Remove old
+        collection = [d for d in collection if d['guild_id'] != guild_id]
+        collection.append({"guild_id": guild_id, "roles": roles})
+        self.bot.db.save_collection("autoban_configs", collection)
+
     async def log_to_channel(self, guild, embed):
         """Helper to send logs to the configured channel."""
         settings = self.get_log_settings()
@@ -196,15 +216,23 @@ class Admin(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message):
         """Handles sticky message logic and DM Request logic."""
-        if message.author.bot or not message.guild:
+        if not message.guild:
             return
 
-        # 1. DM Request Logic
-        await self.handle_dm_request(message)
+        # 1. DM Request Logic (Ignore Bots)
+        if not message.author.bot:
+            await self.handle_dm_request(message)
 
-        # 2. Sticky Logic
+        # 2. Sticky Logic (Allowed for Bots, but check loop prevention)
         stickies = self.get_stickies()
-        if any(s['channel_id'] == message.channel.id for s in stickies):
+        sticky_data = next((s for s in stickies if s['channel_id'] == message.channel.id), None)
+        
+        if sticky_data:
+            # Loop Prevention: Ignore the sticky message itself
+            # If the bot sent it, and the content is the sticky content, ignore it.
+            if message.author.id == self.bot.user.id and message.content == sticky_data['content']:
+                return
+
             await self.handle_sticky(message)
 
     @commands.Cog.listener()
@@ -319,6 +347,33 @@ class Admin(commands.Cog):
         embed.add_field(name="Joined At", value=discord.utils.format_dt(member.joined_at, "R") if member.joined_at else "Unknown", inline=True)
 
         await self.log_to_channel(member.guild, embed)
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before, after):
+        """Checks for persistent autoban roles."""
+        autoban_roles = self.get_autoban_roles(after.guild.id)
+        if autoban_roles:
+            banned_role_found = False
+            for role in after.roles:
+                if role.id in autoban_roles:
+                    banned_role_found = True
+                    break
+            
+            if banned_role_found:
+                if after.id == after.guild.owner_id or after == self.bot.user or after.top_role >= after.guild.me.top_role:
+                    return
+
+                try:
+                    await after.ban(reason="Autoban: User acquired a blacklisted role.")
+                    embed = discord.Embed(
+                        title="🔨 Auto-Banned User",
+                        description=f"{after.mention} was banned for having a blacklisted role.",
+                        color=discord.Color.red(),
+                        timestamp=datetime.datetime.now()
+                    )
+                    await self.log_to_channel(after.guild, embed)
+                except discord.Forbidden:
+                    pass
 
     async def handle_sticky(self, message):
         """Resends the sticky message to the bottom."""
@@ -806,28 +861,34 @@ class Admin(commands.Cog):
     @commands.command(name="autoban")
     @commands.has_permissions(administrator=True)
     async def autoban(self, ctx, role: discord.Role):
-        """Auto bans anyone with the specified role."""
-        if not role:
-            return await ctx.send("❌ Please specify a role to autoban.")
+        """Toggles persistent autoban for a role."""
+        roles = self.get_autoban_roles(ctx.guild.id)
         
-        count = 0
-        failed = 0
-        
-        await ctx.send(f"🚨 Starting autoban for role **{role.name}**...")
-        
-        # Iterate over a copy of members to avoid issues during modification
-        for member in role.members:
-            if member == ctx.guild.owner or member == self.bot.user or member.top_role >= ctx.guild.me.top_role:
-                failed += 1
-                continue
+        if role.id in roles:
+            roles.remove(role.id)
+            self.save_autoban_roles(ctx.guild.id, roles)
+            await ctx.send(f"✅ Stopped autobanning for **{role.name}**.")
+        else:
+            roles.append(role.id)
+            self.save_autoban_roles(ctx.guild.id, roles)
+            await ctx.send(f"🚨 **Autoban ENABLED** for **{role.name}**. I will ban anyone who has this role now and in the future.")
             
-            try:
-                await member.ban(reason=f"Autoban command by {ctx.author} (Role: {role.name})")
-                count += 1
-            except:
-                failed += 1
-        
-        await ctx.send(f"✅ Autoban complete. Banned **{count}** users. Failed to ban **{failed}** users (likely permission issues).")
+            # Run the immediate purge
+            count = 0
+            failed = 0
+            msg = await ctx.send(f"⏳ Scanning for existing members with {role.mention}...")
+            
+            for member in role.members:
+                if member == ctx.guild.owner or member == self.bot.user or member.top_role >= ctx.guild.me.top_role:
+                    failed += 1
+                    continue
+                try:
+                    await member.ban(reason=f"Autoban command by {ctx.author} (Role: {role.name})")
+                    count += 1
+                except:
+                    failed += 1
+            
+            await msg.edit(content=f"✅ Initial scan complete. Banned **{count}** users. Failed to ban **{failed}**.")
 
     @tasks.loop(seconds=60)
     async def check_vcs(self):
