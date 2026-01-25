@@ -1,456 +1,585 @@
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
+import json
+import os
+import time
+from datetime import datetime, timezone
 import asyncio
-import re
+from typing import Literal, Optional, Union
 
 # Function/Class List:
-# class Clone(commands.Cog)
+# class Lead(commands.Cog)
 # - __init__(bot)
-# - get_clone_setups()
-# - save_clone_setups(setups)
-# - get_history()
-# - save_history(history)
-# - get_webhook(channel)
-# - resolve_mentions(content, guild)
+# - cog_unload()
+# - get_config(guild_id)
+# - save_config(guild_id, config)
+# - update_user_points(guild_id, group_key, user_id, points)
+# - get_group_points(guild_id, group_key)
+# - get_user_points(guild_id, user_id)
+# - clear_points_by_group(guild_id, group_key)
+# - get_tracked_groups(channel, config)
+# - add_points_to_cache(user_id, guild_id, group_key, points)
+# - create_leaderboard_embed(guild, group_key, group_data)
 # - on_message(message)
-# - handle_cloning(message)
-# - execute_clone(message, setup)
-# - handle_return_reply(message)
-# - on_raw_reaction_add(payload)
-# - on_message_delete(message)
-# - clone (Group) [Slash]
-#   - add(interaction, receive_channel, source_id, min_reactions, attachments_only, return_replies)
-#   - remove(interaction, receive_channel, source_id)
+# - on_reaction_add(reaction, user)
+# - on_voice_state_update(member, before, after)
+# - voice_time_checker()
+# - point_saver()
+# - lead (Group) [Slash - Admin]
+#   - create(interaction, name)
+#   - edit(interaction, group_num, name)
+#   - delete(interaction, group_num)
 #   - list(interaction)
+#   - track(interaction, group_num, target)
+#   - untrack(interaction, group_num, target)
+#   - config(interaction, activity, amount)
+#   - reset(interaction, group_num)
+#   - award(interaction, member, amount)
+#   - deduct(interaction, member, amount)
+# - leaderboard(interaction, group_num) [Slash - Public]
+# - points(interaction, user) [Slash - Public]
 # setup(bot)
 
-class Clone(commands.Cog):
+class Lead(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.description = "Channel mirroring and cloning system."
+        
+        # Default Point Values (Fallback)
+        self.DEFAULT_POINT_VALUES = {
+            'message': 1,
+            'attachment': 2,
+            'voice_minute': 1,
+            'reaction_add': 1,
+            'reaction_receive': 2
+        }
+
+        # Caches
+        self.voice_tracker = {} 
+        self.point_cache = {}          
+        self.leaderboard_cache = {}    
+
+        # Start tasks
+        self.voice_time_checker.start()
+        self.point_saver.start()
+
+    def cog_unload(self):
+        self.voice_time_checker.cancel()
+        self.point_saver.cancel()
+
+    # --- DB HELPERS (Centralized) ---
+
+    async def get_config(self, guild_id):
+        guild_id = str(guild_id)
+        configs = self.bot.db.get_collection("leaderboard_configs")
+        if isinstance(configs, list): configs = {}
+
+        if guild_id not in configs:
+             configs[guild_id] = {
+                "groups": {
+                    "1": {"name": "General", "tracked_ids": [], "last_lb_msg": None}
+                },
+                "point_values": self.DEFAULT_POINT_VALUES.copy()
+             }
+             self.bot.db.save_collection("leaderboard_configs", configs)
+        
+        return configs[guild_id]
+
+    async def save_config(self, guild_id, config):
+        guild_id = str(guild_id)
+        configs = self.bot.db.get_collection("leaderboard_configs")
+        if isinstance(configs, list): configs = {}
+        
+        configs[guild_id] = config
+        self.bot.db.save_collection("leaderboard_configs", configs)
+
+    async def update_user_points(self, guild_id, group_key, user_id, points):
+        guild_id = str(guild_id)
+        user_id = str(user_id)
+        
+        collection = self.bot.db.get_collection("leaderboard_points")
+        
+        found = False
+        for doc in collection:
+            if doc.get("guild_id") == guild_id and \
+               doc.get("group_key") == group_key and \
+               doc.get("user_id") == user_id:
+                doc["points"] = int(doc.get("points", 0)) + int(points)
+                found = True
+                break
+        
+        if not found:
+            new_doc = {
+                "guild_id": guild_id,
+                "group_key": group_key,
+                "user_id": user_id,
+                "points": int(points)
+            }
+            collection.append(new_doc)
+            
+        self.bot.db.save_collection("leaderboard_points", collection)
+
+    async def get_group_points(self, guild_id, group_key):
+        guild_id = str(guild_id)
+        collection = self.bot.db.get_collection("leaderboard_points")
+        results = {}
+        for doc in collection:
+            if doc.get("guild_id") == guild_id and doc.get("group_key") == group_key:
+                results[doc["user_id"]] = doc.get("points", 0)
+        return results
+
+    async def get_user_points(self, guild_id, user_id):
+        guild_id = str(guild_id)
+        user_id = str(user_id)
+        collection = self.bot.db.get_collection("leaderboard_points")
+        results = {}
+        for doc in collection:
+            if doc.get("guild_id") == guild_id and doc.get("user_id") == user_id:
+                results[doc["group_key"]] = int(doc.get("points", 0))
+        return results
+
+    async def clear_points_by_group(self, guild_id, group_key):
+        guild_id = str(guild_id)
+        collection = self.bot.db.get_collection("leaderboard_points")
+        initial_count = len(collection)
+        
+        new_collection = [
+            doc for doc in collection 
+            if not (doc.get("guild_id") == guild_id and doc.get("group_key") == group_key)
+        ]
+        
+        self.bot.db.save_collection("leaderboard_points", new_collection)
+        return initial_count - len(new_collection)
 
     # --- HELPERS ---
-    def get_clone_setups(self):
-        """Returns the list of all clone setups from the database."""
-        return self.bot.db.get_collection("clone_setups")
 
-    def save_clone_setups(self, setups):
-        """Saves the list of setups to the database."""
-        self.bot.db.save_collection("clone_setups", setups)
+    def get_tracked_groups(self, channel, config):
+        tracked_groups = []
+        if not config or "groups" not in config:
+            return []
 
-    def get_history(self):
-        """Returns the mapping history (Source MSG -> Clone MSG) from the database."""
-        return self.bot.db.get_collection("clone_history")
-    
-    def save_history(self, history):
-        """Saves the mapping history to the database."""
-        self.bot.db.save_collection("clone_history", history)
-
-    async def get_webhook(self, channel):
-        """Finds or creates a webhook for the bot in the channel."""
-        if not isinstance(channel, discord.TextChannel):
-            return None
-            
-        webhooks = await channel.webhooks()
-        for wh in webhooks:
-            # We reuse our own webhook if found
-            if wh.user == self.bot.user or wh.name == "BuggyClone":
-                return wh
-        return await channel.create_webhook(name="BuggyClone")
-
-    async def resolve_mentions(self, content, guild):
-        """
-        Replaces user mentions with their display name (non-pinging text).
-        If user is not in guild, fetches their name to display.
-        """
-        if not content: return content
-
-        # Regex to find <@123456789> or <@!123456789>
-        mention_pattern = re.compile(r'<@!?(\d+)>')
+        for group_key, group_data in config["groups"].items():
+            tracked_ids = group_data.get("tracked_ids", [])
+            if channel.id in tracked_ids:
+                tracked_groups.append(group_key)
+                continue
+            if hasattr(channel, "category") and channel.category and channel.category.id in tracked_ids:
+                tracked_groups.append(group_key)
         
-        # Helper to find name for a specific match
-        async def get_name(match):
-            user_id = int(match.group(1))
-            member = guild.get_member(user_id)
-            if member:
-                return f"**@{member.display_name}**"
-            else:
-                # Try fetching user if not in cache
-                try:
-                    user = await self.bot.fetch_user(user_id)
-                    return f"**@{user.display_name}**"
-                except:
-                    return "**@UnknownUser**"
+        return tracked_groups
 
-        # We iterate matches and replace them
-        # Note: We replace one by one. For a large message with many pings this is okay.
-        new_content = content
-        matches = list(mention_pattern.finditer(content))
+    def add_points_to_cache(self, user_id, guild_id, group_key, points):
+        user_id = str(user_id)
+        guild_id = str(guild_id)
         
-        # Iterate backwards to replace without affecting indices
-        for m in reversed(matches):
-            replacement = await get_name(m)
-            start, end = m.span()
-            new_content = new_content[:start] + replacement + new_content[end:]
+        if guild_id not in self.point_cache:
+            self.point_cache[guild_id] = {}
+        if group_key not in self.point_cache[guild_id]:
+            self.point_cache[guild_id][group_key] = {}
             
-        return new_content
+        current = self.point_cache[guild_id][group_key].get(user_id, 0)
+        self.point_cache[guild_id][group_key][user_id] = current + int(points) 
 
-    # --- EVENTS ---
+    async def create_leaderboard_embed(self, guild, group_key, group_data):
+        guild_id = str(guild.id)
+        group_name = group_data.get('name', f"Group {group_key}")
+        
+        cache_entry = self.leaderboard_cache.get(guild_id, {}).get(group_key)
+        
+        if not cache_entry:
+            points_data = await self.get_group_points(guild_id, group_key)
+            sorted_users = sorted(points_data.items(), key=lambda x: x[1], reverse=True)
+            top_users = sorted_users[:20]
+        else:
+            top_users = cache_entry['top_users']
+
+        embed = discord.Embed(title=f"🏆 {group_name} Leaderboard", color=discord.Color.gold())
+        
+        desc = ""
+        if not top_users:
+            desc = "No points recorded yet."
+        else:
+            for rank, (uid, points) in enumerate(top_users, 1):
+                user = guild.get_member(int(uid))
+                name = user.display_name if user else "Unknown User"
+                emoji = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"**#{rank}**")
+                desc += f"{emoji} **{name}**: {points} pts\n"
+        
+        embed.description = desc
+        embed.set_footer(text=f"Updates every 5 minutes • Group {group_key}")
+        return embed
+
+    # --- LISTENERS ---
 
     @commands.Cog.listener()
     async def on_message(self, message):
-        if message.author.bot:
+        if message.author.bot or not message.guild:
+            return
+            
+        config = await self.get_config(message.guild.id)
+        tracked_groups = self.get_tracked_groups(message.channel, config)
+        
+        if tracked_groups:
+            p_vals = config.get("point_values", self.DEFAULT_POINT_VALUES)
+            points = p_vals.get('message', 1)
+            extras = (len(message.attachments) + len(message.embeds)) * p_vals.get('attachment', 2)
+            total = points + extras
+            
+            for group_key in tracked_groups:
+                self.add_points_to_cache(message.author.id, message.guild.id, group_key, total)
+
+    @commands.Cog.listener()
+    async def on_reaction_add(self, reaction, user):
+        if user.bot or not reaction.message.guild:
             return
 
-        # 1. Check if this is a Reply in a Receiving Channel (Return Replies)
-        # This allows users in the receiving channel to talk back
-        await self.handle_return_reply(message)
-
-        # 2. Check if this message needs to be CLONED (Source -> Receiver)
-        await self.handle_cloning(message)
-
-    async def handle_cloning(self, message):
-        setups = self.get_clone_setups()
-        if not setups: return
-
-        # We need to find setups where this message's channel (or category) is the source
-        applicable_setups = []
-        for s in setups:
-            is_source = False
+        config = await self.get_config(reaction.message.guild.id)
+        tracked_groups = self.get_tracked_groups(reaction.message.channel, config)
+        
+        if tracked_groups:
+            p_vals = config.get("point_values", self.DEFAULT_POINT_VALUES)
             
-            # Direct Channel Match
-            if s['source_id'] == message.channel.id:
-                is_source = True
+            for group_key in tracked_groups:
+                self.add_points_to_cache(user.id, reaction.message.guild.id, group_key, p_vals.get('reaction_add', 1))
             
-            # Category Match
-            elif message.channel.category and s['source_id'] == message.channel.category.id:
-                is_source = True
-            
-            if is_source:
-                # Check Ignore List (Channels to skip within a category)
-                if message.channel.id in s.get('ignore_channels', []):
-                    continue
-                
-                # Check Attachments Only
-                if s.get('attachments_only', False) and not message.attachments:
-                    continue
-                
-                # Check Reaction Threshold 
-                # If > 0, we skip cloning NOW. It will be handled in on_raw_reaction_add
-                if s.get('min_reactions', 0) > 0:
-                    continue
-
-                applicable_setups.append(s)
-
-        for s in applicable_setups:
-            await self.execute_clone(message, s)
-
-    async def execute_clone(self, message, setup):
-        """Performs the actual webhook cloning."""
-        receiver = self.bot.get_channel(setup['receive_id'])
-        if not receiver: return
-
-        # 1. Prepare Content & Resolve Mentions
-        content = message.content
-        content = await self.resolve_mentions(content, receiver.guild)
-        
-        # 2. Handle Attachments (Convert to Links)
-        attachment_urls = []
-        if message.attachments:
-            attachment_urls = [a.url for a in message.attachments]
-        
-        # Append URLs to content. 
-        # Discord auto-embeds URLs at the bottom if they are clean links.
-        final_content = content
-        if attachment_urls:
-            if final_content:
-                final_content += "\n" + "\n".join(attachment_urls)
-            else:
-                final_content = "\n".join(attachment_urls)
-
-        # 3. Handle Embeds
-        # Filter logic:
-        # We only preserve 'rich' embeds (manually created embeds, e.g. from bots).
-        # We intentionally DROP 'video', 'gifv', 'image', 'link' embeds.
-        # Why? Because these are auto-generated by Discord from URLs. 
-        # Since we are sending the URLs in the 'content' field, Discord will 
-        # automatically re-generate the full, native preview (Large GIF, Video Player, etc.).
-        # If we manually send the captured embed object, Discord often renders it 
-        # as a small thumbnail or static preview instead of the interactive media.
-        clean_embeds = []
-        if message.embeds:
-            clean_embeds = [e for e in message.embeds if e.type == 'rich']
-
-        if not final_content and not clean_embeds:
-            return # Nothing to send
-
-        webhook = await self.get_webhook(receiver)
-        if not webhook: return # Could not create webhook
-        
-        try:
-            # Send via Webhook to impersonate
-            # allowed_mentions=discord.AllowedMentions.none() prevents any lingering pings
-            cloned_msg = await webhook.send(
-                content=final_content,
-                username=message.author.display_name,
-                avatar_url=message.author.display_avatar.url,
-                embeds=clean_embeds,
-                wait=True,
-                allowed_mentions=discord.AllowedMentions.none()
-            )
-            
-            # Save History for deletions and replies
-            history = self.get_history()
-            history.append({
-                "source_msg_id": message.id,
-                "clone_msg_id": cloned_msg.id,
-                "source_channel_id": message.channel.id,
-                "receive_channel_id": receiver.id
-            })
-            self.save_history(history)
-            
-        except Exception as e:
-            print(f"Failed to clone message: {e}")
-
-    async def handle_return_reply(self, message):
-        """Handles replies in the receiving channel sent back to source."""
-        if not message.reference: return
-
-        history = self.get_history()
-        # Find the entry where clone_msg_id == reference.message_id
-        entry = next((h for h in history if h['clone_msg_id'] == message.reference.message_id), None)
-        
-        if not entry: return
-
-        # Found the link! Check if the setup allows replies
-        setups = self.get_clone_setups()
-        
-        # We need to find the setup that links these two channels
-        relevant_setup = None
-        for s in setups:
-            if s['receive_id'] == entry['receive_channel_id']:
-                # Does this setup cover the source channel?
-                source_chan = self.bot.get_channel(entry['source_channel_id'])
-                if not source_chan: continue
-                
-                # Check if this setup matches the source channel ID or its category
-                if s['source_id'] == source_chan.id or (source_chan.category and s['source_id'] == source_chan.category.id):
-                     relevant_setup = s
-                     break
-        
-        if relevant_setup and relevant_setup.get('return_replies', False):
-            source_chan = self.bot.get_channel(entry['source_channel_id'])
-            if source_chan:
-                # Send the reply as the Bot (Webhooks can't reply to specific messages easily)
-                nick = message.author.display_name
-                content = f"**{nick}**: {message.content}"
-                if message.attachments:
-                     content += "\n" + "\n".join([a.url for a in message.attachments])
-
-                try:
-                    # Reply to the original source message if possible
-                    try:
-                        orig_msg = await source_chan.fetch_message(entry['source_msg_id'])
-                        await orig_msg.reply(content, mention_author=False)
-                    except discord.NotFound:
-                        # Original message deleted, just send to channel
-                        await source_chan.send(content)
-                except Exception as e:
-                    print(f"Failed to return reply: {e}")
+            author = reaction.message.author
+            if not author.bot and author.id != user.id:
+                for group_key in tracked_groups:
+                    self.add_points_to_cache(author.id, reaction.message.guild.id, group_key, p_vals.get('reaction_receive', 2))
 
     @commands.Cog.listener()
-    async def on_raw_reaction_add(self, payload):
-        """Handles delayed cloning based on reaction thresholds."""
-        if payload.member and payload.member.bot: return
-
-        # Check if message is in a Source Channel that requires reactions
-        setups = self.get_clone_setups()
-        channel = self.bot.get_channel(payload.channel_id)
-        if not channel: return
-
-        msg_id = payload.message_id
+    async def on_voice_state_update(self, member, before, after):
+        if member.bot: return
         
-        # Check history to ensure we haven't cloned it yet
-        history = self.get_history()
-        if any(h['source_msg_id'] == msg_id for h in history):
-            return # Already cloned
-
-        # Find applicable setup
-        for s in setups:
-            min_reacts = s.get('min_reactions', 0)
-            if min_reacts <= 0: continue
-
-            # Is this the source?
-            is_source = (s['source_id'] == channel.id) or (channel.category and s['source_id'] == channel.category.id)
-            if is_source:
-                if channel.id in s.get('ignore_channels', []): continue
-                if s.get('attachments_only', False):
-                    # We'd need to fetch message to check attachments, which we do below
-                    pass
-
-                # Fetch message to count reactions
-                try:
-                    message = await channel.fetch_message(msg_id)
-                    
-                    # Double check attachments if required
-                    if s.get('attachments_only', False) and not message.attachments:
-                        continue
-
-                    # Count total reactions
-                    total = sum(r.count for r in message.reactions)
-                    
-                    if total >= min_reacts:
-                        await self.execute_clone(message, s)
-                        # We stop after one clone to prevent duplicate messages if multiple setups match
-                        break
-                except:
-                    pass
-
-    @commands.Cog.listener()
-    async def on_message_delete(self, message):
-        """Deletes the cloned message if the source is deleted."""
-        history = self.get_history()
-        # Find entries where this message is the SOURCE
-        entries = [h for h in history if h['source_msg_id'] == message.id]
+        user_id = str(member.id)
         
-        if entries:
-            # Remove from history DB
-            new_history = [h for h in history if h['source_msg_id'] != message.id]
-            self.save_history(new_history)
+        if user_id in self.voice_tracker:
+            if not after.channel or (before.channel and before.channel.id != after.channel.id):
+                del self.voice_tracker[user_id]
+
+        if after.channel:
+            self.voice_tracker[user_id] = {
+                'time': time.time(),
+                'guild_id': member.guild.id,
+                'channel_id': after.channel.id
+            }
+
+    # --- TASKS ---
+
+    @tasks.loop(seconds=60.0)
+    async def voice_time_checker(self):
+        for user_id, data in list(self.voice_tracker.items()):
+            guild_id = data['guild_id']
+            channel_id = data['channel_id']
             
-            # Delete the clones
-            for entry in entries:
-                receiver = self.bot.get_channel(entry['receive_channel_id'])
-                if receiver:
+            guild = self.bot.get_guild(guild_id)
+            if not guild: continue
+            
+            member = guild.get_member(int(user_id))
+            if not member or not member.voice or not member.voice.channel or member.voice.channel.id != channel_id:
+                if user_id in self.voice_tracker: del self.voice_tracker[user_id]
+                continue
+
+            non_bots = [m for m in member.voice.channel.members if not m.bot]
+            if len(non_bots) < 2:
+                continue
+
+            if time.time() - data['time'] >= 60.0:
+                config = await self.get_config(guild_id)
+                p_vals = config.get("point_values", self.DEFAULT_POINT_VALUES)
+                
+                channel = member.voice.channel
+                tracked_groups = self.get_tracked_groups(channel, config)
+                
+                if tracked_groups:
+                    pts = p_vals.get('voice_minute', 1)
+                    for group_key in tracked_groups:
+                        self.add_points_to_cache(user_id, guild_id, group_key, pts)
+                
+                self.voice_tracker[user_id]['time'] = time.time()
+
+    @tasks.loop(seconds=300.0)
+    async def point_saver(self):
+        if self.point_cache:
+            for guild_id, groups in self.point_cache.items():
+                for group_key, users in groups.items():
+                    for user_id, points in users.items():
+                        await self.update_user_points(guild_id, group_key, user_id, points)
+            self.point_cache = {}
+
+        configs = self.bot.db.get_collection("leaderboard_configs")
+        if isinstance(configs, list): configs = {}
+
+        for guild_id in list(configs.keys()):
+            config = configs[guild_id]
+            guild = self.bot.get_guild(int(guild_id))
+            if not guild: continue
+
+            if guild_id not in self.leaderboard_cache:
+                self.leaderboard_cache[guild_id] = {}
+
+            for group_key, group_data in config.get("groups", {}).items():
+                points = await self.get_group_points(guild_id, group_key)
+                sorted_users = sorted(points.items(), key=lambda x: x[1], reverse=True)
+                self.leaderboard_cache[guild_id][group_key] = {
+                    'updated': time.time(),
+                    'top_users': sorted_users[:20]
+                }
+
+                lb_info = group_data.get("last_lb_msg")
+                if lb_info:
                     try:
-                        clone = await receiver.fetch_message(entry['clone_msg_id'])
-                        await clone.delete()
-                    except: pass
+                        chan = guild.get_channel(lb_info['channel_id'])
+                        if chan:
+                            msg = await chan.fetch_message(lb_info['message_id'])
+                            embed = await self.create_leaderboard_embed(guild, group_key, group_data)
+                            await msg.edit(embed=embed)
+                    except (discord.NotFound, discord.Forbidden):
+                        group_data["last_lb_msg"] = None
+                        await self.save_config(guild_id, config)
 
-    # --- SLASH COMMANDS ---
+    # --- ADMIN SLASH COMMANDS ---
 
-    clone = app_commands.Group(name="clone", description="Manage message cloning setups", default_permissions=discord.Permissions(administrator=True))
+    lead = app_commands.Group(name="lead", description="Manage leaderboard settings", default_permissions=discord.Permissions(administrator=True))
 
-    @clone.command(name="add", description="Add a clone setup.")
-    @app_commands.describe(
-        receive_channel="Where to send cloned messages", 
-        source_id="ID of Source Channel or Category",
-        min_reactions="Reactions needed to clone (0=Instant)",
-        attachments_only="Only clone messages with files?",
-        return_replies="Allow replies from receiver back to source?"
-    )
-    async def clone_add(self, interaction: discord.Interaction, receive_channel: discord.TextChannel, source_id: str, 
-                        min_reactions: int = 0, attachments_only: bool = False, return_replies: bool = False):
-        """Add a clone setup."""
-        try:
-            s_id = int(source_id)
-        except:
-            return await interaction.response.send_message("❌ Source ID must be a valid number.", ephemeral=True)
-
-        setups = self.get_clone_setups()
+    @lead.command(name="create", description="Create a new leaderboard group.")
+    @app_commands.describe(name="Name of the new group")
+    async def lead_create(self, interaction: discord.Interaction, name: str):
+        config = await self.get_config(interaction.guild_id)
         
-        # Check duplicates (Receiver + Source combo)
-        for s in setups:
-            if s['receive_id'] == receive_channel.id and s['source_id'] == s_id:
-                return await interaction.response.send_message("❌ A setup for this Receiver and Source already exists. Remove it first.", ephemeral=True)
-
-        # Create new setup object
-        new_setup = {
-            "receive_id": receive_channel.id,
-            "guild_id": interaction.guild_id, 
-            "source_id": s_id,
-            "ignore_channels": [],
-            "attachments_only": attachments_only,
-            "return_replies": return_replies,
-            "min_reactions": min_reactions
+        existing_ids = [int(k) for k in config["groups"].keys()]
+        next_id = str(max(existing_ids) + 1 if existing_ids else 1)
+        
+        config["groups"][next_id] = {
+            "name": name,
+            "tracked_ids": [],
+            "last_lb_msg": None
         }
+        await self.save_config(interaction.guild_id, config)
+        await interaction.response.send_message(f"✅ Created group **{name}** (ID: {next_id})", ephemeral=True)
 
-        setups.append(new_setup)
-        self.save_clone_setups(setups)
+    @lead.command(name="edit", description="Rename a leaderboard group.")
+    @app_commands.describe(group_num="The Group ID", name="New Name")
+    async def lead_edit(self, interaction: discord.Interaction, group_num: int, name: str):
+        config = await self.get_config(interaction.guild_id)
+        group_key = str(group_num)
         
-        flags = []
-        if attachments_only: flags.append("MediaOnly")
-        if return_replies: flags.append("Replies")
-        if min_reactions > 0: flags.append(f"{min_reactions}+ Reacts")
-        flag_str = f" ({', '.join(flags)})" if flags else ""
-        
-        await interaction.response.send_message(f"✅ Setup added! Cloning from `{s_id}` to {receive_channel.mention}{flag_str}.", ephemeral=True)
-
-    @clone.command(name="remove", description="Remove a clone setup.")
-    @app_commands.describe(receive_channel="The receiving channel", source_id="The source ID to remove")
-    async def clone_remove(self, interaction: discord.Interaction, receive_channel: discord.TextChannel, source_id: str):
-        """Remove a clone setup."""
-        try: s_id = int(source_id)
-        except: return await interaction.response.send_message("❌ ID invalid.", ephemeral=True)
-
-        setups = self.get_clone_setups()
-        initial_len = len(setups)
-        
-        # Remove matching setup
-        setups = [s for s in setups if not (s['receive_id'] == receive_channel.id and s['source_id'] == s_id)]
-        
-        if len(setups) < initial_len:
-            self.save_clone_setups(setups)
-            await interaction.response.send_message(f"✅ Removed setup for {receive_channel.mention}.", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"❌ No matching setup found.", ephemeral=True)
-
-    @clone.command(name="list", description="List all clone setups for this server.")
-    async def clone_list(self, interaction: discord.Interaction):
-        """List all clone setups for this server."""
-        setups = self.get_clone_setups()
-        if not setups:
-            return await interaction.response.send_message("📝 No clone setups active.", ephemeral=True)
-
-        # 1. Map current guild channels for fast local lookup
-        current_guild_map = {c.id: c.name for c in interaction.guild.channels}
-
-        # 2. Filter setups
-        filtered_setups = []
-        for s in setups:
-            if s.get('guild_id') == interaction.guild_id:
-                filtered_setups.append(s)
-            elif s['receive_id'] in current_guild_map:
-                filtered_setups.append(s)
-
-        if not filtered_setups:
-            return await interaction.response.send_message("📝 No clone setups found for this server.", ephemeral=True)
-
-        # 3. Group by Receiver
-        grouped = {}
-        for s in filtered_setups:
-            rid = s['receive_id']
-            if rid not in grouped: grouped[rid] = []
-            grouped[rid].append(s)
-
-        text = "**🐏 Clone Setups (This Server):**\n"
-        
-        for rid, source_list in grouped.items():
-            if rid in current_guild_map:
-                r_name = current_guild_map[rid]
-            else:
-                r_channel = self.bot.get_channel(rid)
-                r_name = r_channel.name if r_channel else f"ID:{rid}"
+        if group_key not in config["groups"]:
+            return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
             
-            text += f"\n📂 **Receiver: {r_name}**\n"
-            for s in source_list:
-                sid = s['source_id']
-                if sid in current_guild_map:
-                    s_name = current_guild_map[sid]
-                else:
-                    global_chan = self.bot.get_channel(sid)
-                    s_name = global_chan.name if global_chan else f"ID:{sid}"
-                
-                flags = []
-                if s.get('attachments_only'): flags.append("🖼️ MediaOnly")
-                if s.get('return_replies'): flags.append("↩️ Replies")
-                if s.get('min_reactions', 0) > 0: flags.append(f"⭐ {s['min_reactions']}+ Reacts")
-                
-                flag_text = f" ({', '.join(flags)})" if flags else ""
-                text += f" - Source: **{s_name}**{flag_text}\n"
+        old_name = config["groups"][group_key]["name"]
+        config["groups"][group_key]["name"] = name
+        await self.save_config(interaction.guild_id, config)
+        
+        await interaction.response.send_message(f"✅ Renamed Group {group_num} from **{old_name}** to **{name}**.", ephemeral=True)
 
-        await interaction.response.send_message(text[:2000], ephemeral=True)
+    @lead.command(name="delete", description="Delete a leaderboard group.")
+    @app_commands.describe(group_num="The Group ID to delete")
+    async def lead_delete(self, interaction: discord.Interaction, group_num: int):
+        config = await self.get_config(interaction.guild_id)
+        group_key = str(group_num)
+
+        if group_key not in config["groups"]:
+            return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
+
+        name = config["groups"][group_key]["name"]
+        del config["groups"][group_key]
+        await self.save_config(interaction.guild_id, config)
+        await interaction.response.send_message(f"🗑️ Deleted group **{name}** (ID: {group_num}).", ephemeral=True)
+
+    @lead.command(name="list", description="List all leaderboard groups.")
+    async def lead_list(self, interaction: discord.Interaction):
+        config = await self.get_config(interaction.guild_id)
+        groups = config.get("groups", {})
+
+        if not groups:
+            return await interaction.response.send_message("📝 No leaderboard groups set up.", ephemeral=True)
+
+        text = "**📊 Leaderboard Groups**\n"
+        for group_key, data in groups.items():
+            name = data.get("name", "Unnamed")
+            tracked = data.get("tracked_ids", [])
+            
+            tracked_names = []
+            for tid in tracked:
+                obj = interaction.guild.get_channel(int(tid))
+                if obj:
+                    tracked_names.append(obj.mention)
+                else:
+                    tracked_names.append(f"ID:{tid} (Deleted)")
+            
+            track_str = ", ".join(tracked_names) if tracked_names else "None"
+            text += f"**[{group_key}] {name}**\nTracking: {track_str}\n\n"
+        
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @lead.command(name="track", description="Add a channel/category to a group.")
+    @app_commands.describe(group_num="The Group ID", target="The channel or category to track")
+    async def lead_track(self, interaction: discord.Interaction, group_num: int, target: Union[discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel]):
+        config = await self.get_config(interaction.guild_id)
+        group_key = str(group_num)
+
+        if group_key not in config["groups"]:
+            return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
+        
+        if target.id in config["groups"][group_key]["tracked_ids"]:
+            return await interaction.response.send_message(f"⚠️ **{target.name}** is already tracked by this group.", ephemeral=True)
+
+        config["groups"][group_key]["tracked_ids"].append(target.id)
+        await self.save_config(interaction.guild_id, config)
+        await interaction.response.send_message(f"✅ Group {group_num} is now tracking **{target.name}**.", ephemeral=True)
+
+    @lead.command(name="untrack", description="Stop tracking a channel/category.")
+    @app_commands.describe(group_num="The Group ID", target="The channel or category to remove")
+    async def lead_untrack(self, interaction: discord.Interaction, group_num: int, target: Union[discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel]):
+        config = await self.get_config(interaction.guild_id)
+        group_key = str(group_num)
+
+        if group_key not in config["groups"]:
+            return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
+        
+        if target.id not in config["groups"][group_key]["tracked_ids"]:
+            return await interaction.response.send_message(f"⚠️ **{target.name}** was not being tracked.", ephemeral=True)
+
+        config["groups"][group_key]["tracked_ids"].remove(target.id)
+        await self.save_config(interaction.guild_id, config)
+        await interaction.response.send_message(f"✅ Stopped tracking **{target.name}** for Group {group_num}.", ephemeral=True)
+
+    @lead.command(name="config", description="Configure point values.")
+    @app_commands.describe(activity="The activity type", amount="Points amount")
+    @app_commands.choices(activity=[
+        app_commands.Choice(name="Message", value="message"),
+        app_commands.Choice(name="Attachment", value="attachment"),
+        app_commands.Choice(name="Give Reaction", value="reaction_add"),
+        app_commands.Choice(name="Receive Reaction", value="reaction_receive"),
+        app_commands.Choice(name="Voice (1 min)", value="voice_minute")
+    ])
+    async def lead_config(self, interaction: discord.Interaction, activity: app_commands.Choice[str], amount: int):
+        config = await self.get_config(interaction.guild_id)
+        p_vals = config.get("point_values", self.DEFAULT_POINT_VALUES)
+        
+        p_vals[activity.value] = amount
+        config['point_values'] = p_vals
+        await self.save_config(interaction.guild_id, config)
+        await interaction.response.send_message(f"✅ Set **{activity.name}** to **{amount}** points.", ephemeral=True)
+
+    @lead.command(name="reset", description="Clear all points for a group.")
+    @app_commands.describe(group_num="The Group ID")
+    async def lead_reset(self, interaction: discord.Interaction, group_num: int):
+        group_key = str(group_num)
+        config = await self.get_config(interaction.guild_id)
+        if group_key not in config["groups"]:
+            return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
+            
+        count = await self.clear_points_by_group(interaction.guild_id, group_key)
+        
+        gid = str(interaction.guild_id)
+        if gid in self.point_cache and group_key in self.point_cache[gid]:
+            del self.point_cache[gid][group_key]
+            
+        await interaction.response.send_message(f"Values reset! Cleared points for {count} users in Group {group_num}.", ephemeral=True)
+
+    @lead.command(name="award", description="Manually give points to a user.")
+    @app_commands.describe(member="The user", amount="Amount of points")
+    async def lead_award(self, interaction: discord.Interaction, member: discord.Member, amount: int):
+        config = await self.get_config(interaction.guild_id)
+        # Apply to all groups that track THIS channel. 
+        # If run in non-tracked channel, warn user?
+        # Standard behavior: Admin usually runs this in the context they want to award.
+        
+        tracked = self.get_tracked_groups(interaction.channel, config)
+        
+        if not tracked:
+            return await interaction.response.send_message("⚠️ This channel is not tracked by any leaderboard groups. Please run this command in a tracked channel.", ephemeral=True)
+            
+        for group_key in tracked:
+            await self.update_user_points(interaction.guild_id, group_key, member.id, amount)
+            
+        group_names = [config["groups"][k]["name"] for k in tracked]
+        await interaction.response.send_message(f"✅ Awarded **{amount}** points to {member.mention} in groups: {', '.join(group_names)}.", ephemeral=True)
+
+    @lead.command(name="deduct", description="Manually remove points from a user.")
+    @app_commands.describe(member="The user", amount="Amount to remove")
+    async def lead_deduct(self, interaction: discord.Interaction, member: discord.Member, amount: int):
+        config = await self.get_config(interaction.guild_id)
+        tracked = self.get_tracked_groups(interaction.channel, config)
+        
+        if not tracked:
+            return await interaction.response.send_message("⚠️ This channel is not tracked by any leaderboard groups.", ephemeral=True)
+            
+        neg_amount = -abs(amount)
+        for group_key in tracked:
+            await self.update_user_points(interaction.guild_id, group_key, member.id, neg_amount)
+            
+        group_names = [config["groups"][k]["name"] for k in tracked]
+        await interaction.response.send_message(f"✅ Removed **{amount}** points from {member.mention} in groups: {', '.join(group_names)}.", ephemeral=True)
+
+    # --- PUBLIC COMMANDS ---
+
+    @app_commands.command(name="leaderboard", description="Show the leaderboard.", extras={'public': True})
+    @app_commands.describe(group_num="The Group ID (Default: 1)")
+    async def show_leaderboard(self, interaction: discord.Interaction, group_num: int = 1):
+        """Show the leaderboard."""
+        config = await self.get_config(interaction.guild_id)
+        group_key = str(group_num)
+
+        if group_key not in config["groups"]:
+             # Try to find default
+            if "1" in config["groups"]: group_key = "1"
+            else: return await interaction.response.send_message(f"❌ Leaderboard group not found.", ephemeral=True)
+
+        embed = await self.create_leaderboard_embed(interaction.guild, group_key, config["groups"][group_key])
+        
+        # If admin runs it, update the "pinned" message tracking
+        if interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message(embed=embed)
+            msg = await interaction.original_response()
+            config["groups"][group_key]["last_lb_msg"] = {
+                "channel_id": interaction.channel_id,
+                "message_id": msg.id
+            }
+            await self.save_config(interaction.guild_id, config)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="points", description="Check points for yourself or another user.", extras={'public': True})
+    @app_commands.describe(user="The user to check (leave empty for yourself)")
+    async def points(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
+        """Check points for yourself or another user."""
+        target = user or interaction.user
+        config = await self.get_config(interaction.guild_id)
+        
+        tracked_keys = self.get_tracked_groups(interaction.channel, config)
+        
+        if not tracked_keys:
+            # Fallback: Show ALL points if channel not tracked? 
+            # Or just warn? Old behavior warned.
+            # Let's show all for better UX if not in tracked channel.
+            tracked_keys = list(config["groups"].keys())
+
+        if not tracked_keys:
+             return await interaction.response.send_message("⚠️ No leaderboards set up yet.", ephemeral=True)
+
+        embed = discord.Embed(title=f"🌟 Points for {target.display_name}", color=discord.Color.purple())
+        found_any = False
+        
+        for group_key in tracked_keys:
+            data = await self.get_user_points(interaction.guild_id, target.id)
+            pts = data.get(group_key, 0)
+            
+            # Add cached points
+            gid = str(interaction.guild_id)
+            if gid in self.point_cache and group_key in self.point_cache[gid]:
+                pts += self.point_cache[gid][group_key].get(str(target.id), 0)
+                
+            group_name = config["groups"][group_key]["name"]
+            embed.add_field(name=group_name, value=f"{pts} pts", inline=False)
+            found_any = True
+            
+        if not found_any:
+            embed.description = "No points found."
+            
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def setup(bot):
-    await bot.add_cog(Clone(bot))
+    await bot.add_cog(Lead(bot))
