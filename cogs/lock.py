@@ -194,7 +194,7 @@ class Lockout(commands.Cog):
                 self.save_config(guild.id, config)
             except: pass
 
-    @tasks.loop(minutes=1)
+    @tasks.loop(seconds=15)
     async def check_lockout_loop(self):
         jails = self.bot.db.get_collection("lockout_jail")
         active_jails = [j for j in jails if j.get('remaining_seconds', 0) > 0]
