@@ -54,6 +54,7 @@ import re
 #     - ignore_remove(ctx, channel)
 #     - ignore_list(ctx)
 #   - vcping_set(ctx, role, people, minutes)
+# - autoban(ctx, role) [Prefix]
 # - check_vcs()
 # - before_check_vcs()
 # - on_voice_state_update(member, before, after)
@@ -800,6 +801,33 @@ class Admin(commands.Cog):
         config[guild_id].update({'role': role.id, 'people': people, 'minutes': minutes})
         self.save_vcping_config(config)
         await ctx.send(f"✅ Settings updated: Ping {role.mention} when {people} people are in a VC for {minutes} minutes.")
+
+    # --- AUTOBAN ---
+    @commands.command(name="autoban")
+    @commands.has_permissions(administrator=True)
+    async def autoban(self, ctx, role: discord.Role):
+        """Auto bans anyone with the specified role."""
+        if not role:
+            return await ctx.send("❌ Please specify a role to autoban.")
+        
+        count = 0
+        failed = 0
+        
+        await ctx.send(f"🚨 Starting autoban for role **{role.name}**...")
+        
+        # Iterate over a copy of members to avoid issues during modification
+        for member in role.members:
+            if member == ctx.guild.owner or member == self.bot.user or member.top_role >= ctx.guild.me.top_role:
+                failed += 1
+                continue
+            
+            try:
+                await member.ban(reason=f"Autoban command by {ctx.author} (Role: {role.name})")
+                count += 1
+            except:
+                failed += 1
+        
+        await ctx.send(f"✅ Autoban complete. Banned **{count}** users. Failed to ban **{failed}** users (likely permission issues).")
 
     @tasks.loop(seconds=60)
     async def check_vcs(self):
