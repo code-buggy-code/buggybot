@@ -15,12 +15,14 @@ from typing import Literal, Optional, Union
 # - purge_scheduler()
 # - perform_scheduled_purge()
 # - check_should_keep(message, keep_media, keep_links)
+# - is_media_message(message)
 # - get_schedules()
 # - save_schedules(schedules)
 # - get_pin_settings()
 # - save_pin_settings(settings)
 # - on_message(message)
 # - purge(interaction, time, user, category, entire_server) [Slash]
+# - replypurge(interaction, filter, target_message) [Slash]
 # - purge_till_here(interaction, message) [Context Menu]
 # - schedulepurge(interaction, action, keep_media, keep_links) [Slash]
 # - pinpurge(interaction, enabled) [Slash]
@@ -118,18 +120,20 @@ class Purge(commands.Cog):
         """Handles manual 'reply purge' logic and 'User pinned a message' deletion."""
         if message.author.bot: return
         
-        # 1. Manual "Reply Purge" Logic
+        # 1. Manual "Reply Purge" Logic (Text Trigger)
         # Usage: Reply to a message -> Type "/replypurge [attachments/text]"
         msg_content = message.content.lower().strip()
-        if msg_content.startswith("/replypurge"):
+        if msg_content.startswith("/replypurge") or msg_content.startswith("!replypurge"):
             # Permission check
             if not message.channel.permissions_for(message.author).manage_messages:
                 return
 
             # Must be a reply
             if not message.reference:
-                await message.delete()
-                return await message.channel.send("❌ You must **reply** to a message to use this command.", delete_after=5)
+                # If they just typed the command without replying, we ignore it here
+                # so they can use the actual slash command if they want.
+                # But if they meant to reply, we can give a hint.
+                return 
 
             try:
                 # Fetch the message that was replied to
@@ -137,14 +141,13 @@ class Purge(commands.Cog):
                 await message.delete() # Delete the command trigger immediately
 
                 # Determine Mode
-                # modes: 'all' (default), 'attachments', 'text'
                 mode = "all"
                 if "attachment" in msg_content or "media" in msg_content:
                     mode = "attachments"
                 elif "text" in msg_content:
                     mode = "text"
 
-                # Validation: Check if the replied-to message matches the requested mode
+                # Validation
                 ref_is_media = self.is_media_message(ref_msg)
                 
                 if mode == "attachments" and not ref_is_media:
@@ -153,20 +156,16 @@ class Purge(commands.Cog):
                 if mode == "text" and ref_is_media:
                     return await message.channel.send("❌ **Error:** You selected 'Text Only' but replied to a media message.", delete_after=5)
 
-                # Define the check function for the purge
+                # Define Check
                 def purge_check(m):
-                    if mode == "attachments":
-                        return self.is_media_message(m)
-                    elif mode == "text":
-                        return not self.is_media_message(m)
-                    return True # 'all' mode
+                    if mode == "attachments": return self.is_media_message(m)
+                    elif mode == "text": return not self.is_media_message(m)
+                    return True
 
-                # Execute Purge
-                # 'after' is exclusive (keeps the ref_msg initially), so we purge everything newer
+                # Execute
                 deleted = await message.channel.purge(limit=None, after=ref_msg, check=purge_check)
                 
-                # Handle the reference message itself (Inclusive purge)
-                # We only delete the reference message if it ALSO matches the criteria
+                # Inclusive Delete
                 ref_deleted = False
                 if purge_check(ref_msg):
                     try:
@@ -179,11 +178,8 @@ class Purge(commands.Cog):
                 mode_text = f" ({mode})" if mode != "all" else ""
                 await message.channel.send(f"✅ Purged **{count}** messages{mode_text} down to the reply.", delete_after=5)
 
-            except discord.NotFound:
-                await message.channel.send("❌ Could not find the message you replied to.", delete_after=5)
             except Exception as e:
                 print(f"Reply purge error: {e}")
-                await message.channel.send(f"❌ An error occurred: {e}", delete_after=5)
             return
 
         # 2. Pin Announcement Deletion
@@ -216,7 +212,6 @@ class Purge(commands.Cog):
                     entire_server: bool = False):
         """Purge messages with time and scope options."""
         
-        # 1. Determine Scope
         target_channels = []
         scope_name = "Current Channel"
 
@@ -230,7 +225,6 @@ class Purge(commands.Cog):
             target_channels = [interaction.channel]
             scope_name = "Current Channel"
 
-        # 2. Determine Time Cutoff
         now = datetime.datetime.now(datetime.timezone.utc)
         cutoff = None
         
@@ -238,9 +232,7 @@ class Purge(commands.Cog):
             cutoff = now - timedelta(hours=1)
         elif time.value == "today":
             cutoff = now - timedelta(hours=24)
-        # If 'all', cutoff remains None
 
-        # Confirmation for large purges
         if entire_server or (category and len(target_channels) > 1):
              await interaction.response.send_message(f"⚠️ **WARNING:** You are about to purge **{scope_name}** ({len(target_channels)} channels) for **{time.name}**. This may take a while.", ephemeral=True)
         else:
@@ -248,15 +240,12 @@ class Purge(commands.Cog):
 
         total_deleted = 0
         
-        # 3. Execution Loop
         for channel in target_channels:
             try:
                 def check(m):
                     if user and m.author.id != user.id: return False
                     return True
 
-                # purge() with 'after' deletes newer messages (up to the cutoff date)
-                # If cutoff is None (All Time), we use limit=None
                 deleted = await channel.purge(limit=None, after=cutoff, check=check)
                 total_deleted += len(deleted)
             except Exception as e:
@@ -268,6 +257,75 @@ class Purge(commands.Cog):
             else:
                  await interaction.followup.send(f"✅ **Purge Complete!**\nDeleted **{total_deleted}** messages in **{scope_name}** ({time.name}).", ephemeral=True)
         except: pass
+
+    # --- SLASH COMMAND: REPLYPURGE (New Slash Version) ---
+
+    @app_commands.command(name="replypurge", description="Purge messages until a specific message (using ID/Link).")
+    @app_commands.describe(
+        filter="Keep Media or Text?",
+        target_message="Paste the Message ID or Message Link to purge until."
+    )
+    @app_commands.choices(filter=[
+        app_commands.Choice(name="Attachments Only", value="attachments"),
+        app_commands.Choice(name="Non-Media Only (Text)", value="text")
+    ])
+    @app_commands.default_permissions(administrator=True)
+    async def slash_replypurge(self, interaction: discord.Interaction, 
+                               filter: app_commands.Choice[str], 
+                               target_message: str):
+        """Purge messages until a specific message using ID or Link."""
+        await interaction.response.defer(ephemeral=True)
+
+        # 1. Parse Message ID from input (handle Link or ID)
+        msg_id = None
+        try:
+            if "discord.com/channels" in target_message:
+                # Extract ID from link
+                msg_id = int(target_message.split("/")[-1])
+            else:
+                msg_id = int(target_message)
+        except ValueError:
+            return await interaction.followup.send("❌ Invalid Message ID or Link.", ephemeral=True)
+
+        # 2. Fetch the target message
+        try:
+            ref_msg = await interaction.channel.fetch_message(msg_id)
+        except discord.NotFound:
+            return await interaction.followup.send("❌ Could not find that message in this channel.", ephemeral=True)
+
+        # 3. Validation Logic (Same as text version)
+        ref_is_media = self.is_media_message(ref_msg)
+        mode = filter.value
+
+        if mode == "attachments" and not ref_is_media:
+            return await interaction.followup.send("❌ **Error:** You selected 'Attachments Only' but the target message is text.", ephemeral=True)
+        
+        if mode == "text" and ref_is_media:
+            return await interaction.followup.send("❌ **Error:** You selected 'Text Only' but the target message is media.", ephemeral=True)
+
+        # 4. Define Check
+        def purge_check(m):
+            if mode == "attachments": return self.is_media_message(m)
+            elif mode == "text": return not self.is_media_message(m)
+            return True
+
+        # 5. Execute
+        try:
+            deleted = await interaction.channel.purge(limit=None, after=ref_msg, check=purge_check)
+            
+            # Inclusive Delete
+            ref_deleted = False
+            if purge_check(ref_msg):
+                try:
+                    await ref_msg.delete()
+                    ref_deleted = True
+                except: pass
+            
+            count = len(deleted) + (1 if ref_deleted else 0)
+            await interaction.followup.send(f"✅ Purged **{count}** messages matching **{filter.name}** down to the target.", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Failed to purge: {e}", ephemeral=True)
+
 
     # --- CONTEXT MENU: PURGE TILL HERE ---
 
