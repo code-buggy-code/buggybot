@@ -23,8 +23,8 @@ import secrets
 # - create_dashboard_embed(guild, title)
 # - repost_dashboard(channel, dashboard_data)
 # - on_message(message)
-# - bb(interaction, action, label, key, ping_text, text) [Slash Command]
-# - bbdashboard(interaction) [Slash Command]
+# - bb(interaction, action, label, key, ping_text) [Slash Command]
+# - bbdashboard(interaction, text) [Slash Command]
 # setup(bot)
 
 BUGGY_ID = 1433003746719170560
@@ -46,7 +46,7 @@ class BotherButton(discord.ui.Button):
         embed = discord.Embed(
             title="🔔 Bother Buggy Alert",
             description=f"**User:** {interaction.user.mention} ({interaction.user.id})\n**Channel:** {interaction.channel.mention}\n**Button Clicked:** {self.label}",
-            color=discord.Color.gold(),
+            color=discord.Color(0xff90aa),
             timestamp=datetime.datetime.now()
         )
         embed.add_field(name="Message Content", value=self.ping_text or "No specific text set.")
@@ -135,7 +135,7 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
         embed = discord.Embed(
             title=title,
             description="Click what you want to do with buggy!",
-            color=discord.Color.gold()
+            color=discord.Color(0xff90aa)
         )
         return embed
 
@@ -230,16 +230,14 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
         action="What would you like to do?",
         label="[Add] Text shown on the button",
         key="[Add/Remove] Unique one-word ID for the option",
-        ping_text="[Add] Message sent to buggy",
-        text="[Title] The new title for the dashboard"
+        ping_text="[Add] Message sent to buggy"
     )
     @app_commands.default_permissions(administrator=True)
     async def bb(self, interaction: discord.Interaction, 
-                 action: Literal["Add", "Remove", "List", "Title"], 
+                 action: Literal["Add", "Remove", "List"], 
                  label: str = None, 
                  key: str = None, 
-                 ping_text: str = None,
-                 text: str = None):
+                 ping_text: str = None):
         
         config = self.get_config(interaction.guild_id)
         options = config['options']
@@ -289,23 +287,20 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
                 content += f"• `{o['key']}`: **{o['label']}** (Ping: {o['ping_text']})\n"
             await interaction.response.send_message(content, ephemeral=True)
 
-        # --- ACTION: TITLE ---
-        elif action == "Title":
-            if not text:
-                return await interaction.response.send_message("❌ For 'Title', you must provide the `text`.", ephemeral=True)
-            
-            config['title'] = text
-            self.save_config(interaction.guild_id, config)
-            await interaction.response.send_message(f"✅ Dashboard title set to: **{text}**", ephemeral=True)
-
     @app_commands.command(name="bbdashboard", description="Spawn the Bother Buggy Dashboard in this channel.")
+    @app_commands.describe(text="[Optional] Set a new title for the dashboard before spawning.")
     @app_commands.default_permissions(administrator=True)
-    async def bbdashboard(self, interaction: discord.Interaction):
+    async def bbdashboard(self, interaction: discord.Interaction, text: str = None):
         config = self.get_config(interaction.guild_id)
         
         # Ensure hash is saved/generated
         if 'hash' not in config:
             config['hash'] = secrets.token_hex(16)
+            self.save_config(interaction.guild_id, config)
+
+        # Update title if provided
+        if text:
+            config['title'] = text
             self.save_config(interaction.guild_id, config)
             
         if not config['options']:
