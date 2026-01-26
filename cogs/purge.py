@@ -3,9 +3,8 @@ from discord import app_commands
 from discord.ext import commands, tasks
 import asyncio
 import datetime
-from datetime import timedelta, timezone
 import re
-from typing import Literal, Optional, Union
+from typing import Literal, Optional, Union, List
 
 # Function/Class List:
 # class Purge(commands.Cog)
@@ -13,7 +12,7 @@ from typing import Literal, Optional, Union
 # - cog_unload()
 # - purge_scheduler()
 # - perform_scheduled_purge()
-# - check_should_keep(message, keep_media, keep_links)
+# - check_should_keep(message, keep_media, keep_links, stickies)
 # - is_media_message(message)
 # - get_schedules()
 # - save_schedules(schedules)
@@ -31,8 +30,12 @@ class Purge(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         # Fixed Timezone: UTC-5 (EST)
-        self.est_offset = timezone(timedelta(hours=-5))
+        # Using explicit datetime.timezone and datetime.timedelta
+        self.est_offset = datetime.timezone(datetime.timedelta(hours=-5))
         
+        # Pre-compile regex for performance
+        self.url_pattern = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+')
+
         self.purge_scheduler.start()
         print("\n✅✅ PURGE COG HAS LOADED! ✅✅\n")
 
@@ -57,35 +60,34 @@ class Purge(commands.Cog):
         """Saves the pin settings."""
         self.bot.db.save_collection("purge_pin_settings", settings)
 
-    def check_should_keep(self, message, keep_media, keep_links):
+    def is_media_message(self, message):
+        """Checks if a message counts as 'media' (attachments or image embeds)."""
+        if message.attachments: return True
+        if message.embeds:
+            for e in message.embeds:
+                # Check for direct types
+                if e.type in ('image', 'video', 'gifv'): return True
+                # Check for components in rich embeds
+                if e.image: return True
+                if e.video: return True
+        return False
+
+    def check_should_keep(self, message, keep_media, keep_links, stickies):
         """Determines if a message should be kept based on flags."""
         if message.pinned:
             return True
         
-        # Sticky Protection: Check if this message is the current sticky for the channel
-        stickies = self.bot.db.get_collection("sticky_messages")
-        if any(s.get('last_message_id') == message.id for s in stickies):
+        # Sticky Protection: Check provided sticky list
+        if stickies and any(s.get('last_message_id') == message.id for s in stickies):
             return True
 
-        if keep_media:
-            if message.attachments:
-                return True
-            if message.embeds:
-                for e in message.embeds:
-                    if e.type in ('image', 'video', 'gifv'):
-                        return True
+        if keep_media and self.is_media_message(message):
+            return True
         
         if keep_links:
-            url_pattern = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+')
-            if url_pattern.search(message.content):
+            if self.url_pattern.search(message.content):
                 return True
                 
-        return False
-
-    def is_media_message(self, message):
-        """Checks if a message counts as 'media' (attachments or image embeds)."""
-        if message.attachments: return True
-        if message.embeds and any(e.type in ('image', 'video', 'gifv') for e in message.embeds): return True
         return False
 
     # --- SCHEDULER ---
@@ -93,14 +95,20 @@ class Purge(commands.Cog):
     @tasks.loop(minutes=1)
     async def purge_scheduler(self):
         """Checks every minute if it is 4am EST."""
-        now = datetime.datetime.now(self.est_offset)
-        
-        if now.hour == 4 and now.minute == 0:
-            await self.perform_scheduled_purge()
+        try:
+            now = datetime.datetime.now(self.est_offset)
+            
+            if now.hour == 4 and now.minute == 0:
+                await self.perform_scheduled_purge()
+        except Exception as e:
+            print(f"Error in purge scheduler: {e}")
 
     async def perform_scheduled_purge(self):
         schedules = self.get_schedules()
         if not schedules: return
+
+        # Pre-fetch stickies once to avoid DB lag
+        stickies = self.bot.db.get_collection("sticky_messages")
 
         print(f"[purge] Starting scheduled purge for {len(schedules)} channels.")
 
@@ -112,9 +120,12 @@ class Purge(commands.Cog):
 
             keep_media = sch.get('keep_media', False)
             keep_links = sch.get('keep_links', False)
+            
+            # Filter stickies for this channel
+            channel_stickies = [s for s in stickies if s.get('channel_id') == channel_id]
 
             def check(m):
-                return not self.check_should_keep(m, keep_media, keep_links)
+                return not self.check_should_keep(m, keep_media, keep_links, channel_stickies)
 
             try:
                 await channel.purge(limit=None, check=check)
@@ -219,7 +230,7 @@ class Purge(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     async def purge(self, interaction: discord.Interaction, 
                     time: app_commands.Choice[str],
-                    scope: Optional[Union[discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel]] = None,
+                    scope: Optional[discord.abc.GuildChannel] = None, # Simplified type hint for stability
                     user: Optional[discord.User] = None,
                     entire_server: bool = False):
         """Purge messages from a channel, category, or server."""
@@ -228,18 +239,22 @@ class Purge(commands.Cog):
         target_channels = []
         scope_name = "Current Channel"
 
+        # Resolve scope manually to handle types
         if entire_server:
             # Server Wide
             target_channels = interaction.guild.text_channels
             scope_name = "Entire Server"
-        elif isinstance(scope, discord.CategoryChannel):
-            # Category
-            target_channels = scope.text_channels
-            scope_name = f"Category: {scope.name}"
-        elif isinstance(scope, (discord.TextChannel, discord.VoiceChannel)):
-            # Specific Channel
-            target_channels = [scope]
-            scope_name = f"Channel: {scope.name}"
+        elif scope:
+            if isinstance(scope, discord.CategoryChannel):
+                # Category
+                target_channels = scope.text_channels
+                scope_name = f"Category: {scope.name}"
+            elif isinstance(scope, (discord.TextChannel, discord.VoiceChannel)):
+                # Specific Channel
+                target_channels = [scope]
+                scope_name = f"Channel: {scope.name}"
+            else:
+                 return await interaction.response.send_message("❌ Invalid channel type selected. Please select a Text Channel, Voice Channel, or Category.", ephemeral=True)
         else:
             # Default to Current
             target_channels = [interaction.channel]
@@ -250,9 +265,9 @@ class Purge(commands.Cog):
         cutoff = None
         
         if time.value == "hour":
-            cutoff = now - timedelta(hours=1)
+            cutoff = now - datetime.timedelta(hours=1)
         elif time.value == "today":
-            cutoff = now - timedelta(hours=24)
+            cutoff = now - datetime.timedelta(hours=24)
         # If 'all', cutoff remains None
 
         # Confirmation for large purges
@@ -263,13 +278,20 @@ class Purge(commands.Cog):
 
         total_deleted = 0
         
+        # PRE-FETCH STICKIES (Optimization)
+        stickies = self.bot.db.get_collection("sticky_messages")
+        
         # 3. Execution Loop
         for channel in target_channels:
             try:
+                # Filter stickies for this specific channel
+                channel_stickies = [s for s in stickies if s.get('channel_id') == channel.id]
+
                 def check(m):
                     if user and m.author.id != user.id:
                         return False
-                    return True
+                    # Use helper with pre-fetched stickies
+                    return not self.check_should_keep(m, False, False, channel_stickies)
 
                 # purge() with 'after' deletes newer messages (up to the cutoff date)
                 # If cutoff is None (All Time), we use limit=None
@@ -476,4 +498,8 @@ class Purge(commands.Cog):
         await interaction.response.send_message(f"📌 Pin announcement cleaner is now **{status}** for this server.", ephemeral=True)
 
 async def setup(bot):
-    await bot.add_cog(Purge(bot))
+    try:
+        await bot.add_cog(Purge(bot))
+    except Exception as e:
+        print(f"❌ FATAL ERROR LOADING PURGE COG: {e}")
+        raise e
