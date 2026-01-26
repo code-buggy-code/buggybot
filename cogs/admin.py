@@ -224,9 +224,9 @@ class Admin(commands.Cog):
         sticky_data = next((s for s in stickies if s['channel_id'] == message.channel.id), None)
         
         if sticky_data:
-            # Loop Prevention: Ignore the sticky message itself
-            # If the bot sent it, and the content is the sticky content, ignore it.
-            if message.author.id == self.bot.user.id and message.content == sticky_data['content']:
+            # Loop Prevention: Ignore ALL messages from the bot itself
+            # This prevents the bot's own responses from triggering a sticky repost
+            if message.author.id == self.bot.user.id:
                 return
 
             await self.handle_sticky(message)
