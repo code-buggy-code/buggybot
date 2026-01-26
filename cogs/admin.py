@@ -559,6 +559,14 @@ class Admin(commands.Cog):
         if not current_guild_stickies:
             return await interaction.response.send_message("📝 No sticky messages found for this server.", ephemeral=True)
 
+        # Sort by channel position
+        def get_sort_key(s):
+            channel = interaction.guild.get_channel(s['channel_id'])
+            # If channel exists, return its position. If None (deleted), put at end (infinity).
+            return channel.position if channel else float('inf')
+
+        current_guild_stickies.sort(key=get_sort_key)
+
         text = "**📌 Active Sticky Messages:**\n"
         for s in current_guild_stickies:
             channel = interaction.guild.get_channel(s['channel_id'])
