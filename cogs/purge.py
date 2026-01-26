@@ -97,6 +97,8 @@ class Purge(commands.Cog):
 
         print(f"[purge] Starting scheduled purge for {len(schedules)} channels.")
 
+        admin_cog = self.bot.get_cog("Admin")
+
         for sch in schedules:
             channel_id = sch['channel_id']
             channel = self.bot.get_channel(channel_id)
@@ -111,6 +113,9 @@ class Purge(commands.Cog):
 
             try:
                 await channel.purge(limit=None, check=check)
+                # After purge, ensure sticky messages are revived (if they were deleted or paused)
+                if admin_cog:
+                    await admin_cog.revive_sticky(channel_id)
             except Exception as e:
                 print(f"[purge] Failed to purge channel {channel_id}: {e}")
 
