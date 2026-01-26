@@ -49,12 +49,8 @@ from typing import Literal, Optional
 # - voterole(interaction, role) [Slash]
 # - voteremove(interaction, member) [Slash]
 # - vote_list(interaction) [Slash - Buggy Only]
-# - vcping (Group) [Slash]
-#   - ignore (Group)
-#     - add(interaction, channel)
-#     - remove(interaction, channel)
-#     - list(interaction)
-#   - set(interaction, role, people, minutes)
+# - vcping(interaction, role, people, minutes) [Slash]
+# - vcignore(interaction, action, channel) [Slash]
 # - autoban(interaction, role) [Slash]
 # - check_vcs()
 # - before_check_vcs()
@@ -833,50 +829,52 @@ class Admin(commands.Cog):
         embed = discord.Embed(title="🗳️ Active Vote Kicks", description=description, color=discord.Color.blue())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # --- VC PING (Slash Group) ---
+    # --- VC PING (Slash Command) ---
 
-    vcping = app_commands.Group(name="vcping", description="Manage VC Ping settings", default_permissions=discord.Permissions(administrator=True))
-    vcping_ignore = app_commands.Group(name="ignore", description="Manage ignored VCs", parent=vcping)
-
-    @vcping_ignore.command(name="add", description="Add a VC to the ignore list.")
-    @app_commands.describe(channel="The Voice Channel to ignore")
-    async def vcping_ignore_add(self, interaction: discord.Interaction, channel: discord.VoiceChannel):
+    @app_commands.command(name="vcignore", description="Manage ignored VCs for ping system.")
+    @app_commands.describe(
+        action="Add, Remove, or List",
+        channel="The voice channel (required for Add/Remove)"
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def vcignore(self, interaction: discord.Interaction, 
+                       action: Literal["Add", "Remove", "List"], 
+                       channel: Optional[discord.VoiceChannel] = None):
+        """Manage ignored VCs for ping system."""
         guild_id = str(interaction.guild_id)
         config = self.get_vcping_config()
         if guild_id not in config: config[guild_id] = {'ignored': [], 'role': None, 'people': 2, 'minutes': 5}
         
-        if channel.id not in config[guild_id]['ignored']:
+        # --- ADD ---
+        if action == "Add":
+            if not channel: return await interaction.response.send_message("❌ Error: `channel` is required to Add.", ephemeral=True)
+            if channel.id in config[guild_id]['ignored']:
+                return await interaction.response.send_message(f"⚠️ {channel.mention} is already ignored.", ephemeral=True)
             config[guild_id]['ignored'].append(channel.id)
             self.save_vcping_config(config)
             await interaction.response.send_message(f"✅ Added {channel.mention} to the ignore list.", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"⚠️ {channel.mention} is already ignored.", ephemeral=True)
 
-    @vcping_ignore.command(name="remove", description="Remove a VC from the ignore list.")
-    @app_commands.describe(channel="The Voice Channel to un-ignore")
-    async def vcping_ignore_remove(self, interaction: discord.Interaction, channel: discord.VoiceChannel):
-        guild_id = str(interaction.guild_id)
-        config = self.get_vcping_config()
-        if guild_id in config and channel.id in config[guild_id]['ignored']:
+        # --- REMOVE ---
+        elif action == "Remove":
+            if not channel: return await interaction.response.send_message("❌ Error: `channel` is required to Remove.", ephemeral=True)
+            if channel.id not in config[guild_id]['ignored']:
+                return await interaction.response.send_message(f"⚠️ {channel.mention} is not in the ignore list.", ephemeral=True)
             config[guild_id]['ignored'].remove(channel.id)
             self.save_vcping_config(config)
             await interaction.response.send_message(f"✅ Removed {channel.mention} from the ignore list.", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"⚠️ {channel.mention} is not in the ignore list.", ephemeral=True)
 
-    @vcping_ignore.command(name="list", description="List ignored VCs.")
-    async def vcping_ignore_list(self, interaction: discord.Interaction):
-        guild_id = str(interaction.guild_id)
-        config = self.get_vcping_config()
-        if guild_id in config and config[guild_id]['ignored']:
+        # --- LIST ---
+        elif action == "List":
+            if not config[guild_id]['ignored']:
+                return await interaction.response.send_message("No VCs are currently ignored.", ephemeral=True)
             channels = [f"<#{cid}>" for cid in config[guild_id]['ignored']]
             await interaction.response.send_message(f"Ignored VCs: {', '.join(channels)}", ephemeral=True)
-        else:
-            await interaction.response.send_message("No VCs are currently ignored.", ephemeral=True)
 
-    @vcping.command(name="set", description="Configure VC Ping settings.")
+    @app_commands.command(name="vcping", description="Configure VC Ping settings.")
     @app_commands.describe(role="The role to ping", people="Minimum people required", minutes="Minutes active before ping")
+    @app_commands.default_permissions(administrator=True)
     async def vcping_set(self, interaction: discord.Interaction, role: discord.Role, people: int, minutes: int):
+        """Configure VC Ping settings."""
         guild_id = str(interaction.guild_id)
         config = self.get_vcping_config()
         if guild_id not in config: config[guild_id] = {'ignored': []}
