@@ -230,7 +230,7 @@ class Purge(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     async def purge(self, interaction: discord.Interaction, 
                     time: app_commands.Choice[str],
-                    scope: Optional[discord.abc.GuildChannel] = None, # Simplified type hint for stability
+                    scope: Optional[Union[discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel]] = None,
                     user: Optional[discord.User] = None,
                     entire_server: bool = False):
         """Purge messages from a channel, category, or server."""
