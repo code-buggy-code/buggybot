@@ -3,9 +3,8 @@ from discord import app_commands
 from discord.ext import commands, tasks
 import asyncio
 import datetime
-from datetime import timedelta
+from datetime import timedelta, timezone
 import re
-from zoneinfo import ZoneInfo
 from typing import Literal, Optional, Union
 
 # Function/Class List:
@@ -31,8 +30,10 @@ from typing import Literal, Optional, Union
 class Purge(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.timezone = ZoneInfo("America/New_York")
+        # Fixed Timezone: UTC-5 (EST) without using zoneinfo library to prevent crashes
+        self.est_offset = timezone(timedelta(hours=-5))
         self.purge_scheduler.start()
+        print("✅ Purge Cog Loaded!")
 
     def cog_unload(self):
         self.purge_scheduler.cancel()
@@ -86,7 +87,8 @@ class Purge(commands.Cog):
     @tasks.loop(minutes=1)
     async def purge_scheduler(self):
         """Checks every minute if it is 4am EST."""
-        now = datetime.datetime.now(self.timezone)
+        # Use simple offset instead of zoneinfo
+        now = datetime.datetime.now(self.est_offset)
         if now.hour == 4 and now.minute == 0:
             await self.perform_scheduled_purge()
 
@@ -130,9 +132,7 @@ class Purge(commands.Cog):
 
             # Must be a reply
             if not message.reference:
-                # If they just typed the command without replying, we ignore it here
-                # so they can use the actual slash command if they want.
-                # But if they meant to reply, we can give a hint.
+                # If they just typed the command without replying, we ignore it here.
                 return 
 
             try:
