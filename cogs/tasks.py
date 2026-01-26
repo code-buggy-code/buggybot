@@ -248,7 +248,7 @@ class Tasks(commands.Cog, name="tasks"):
 
     # --- SLASH COMMANDS ---
 
-    @app_commands.command(name="tasks", description="Manage your task lists.")
+    @app_commands.command(name="tasks", description="Manage your task lists.", extras={'public': True})
     @app_commands.describe(action="Set a new list or Change existing one", number="Number of tasks")
     async def tasks(self, interaction: discord.Interaction, action: Literal["set", "change"], number: int):
         """Manage your task lists (set new or change existing)."""
@@ -313,7 +313,7 @@ class Tasks(commands.Cog, name="tasks"):
             self.bot.db.update_doc("tasks_active", "message_id", existing_doc['message_id'], {"total": number, "state": state})
             await interaction.response.send_message(f"I've changed your total tasks to {number}! Your progress has been saved. Run `/progress` to refresh the bar.", ephemeral=True)
 
-    @app_commands.command(name="progress", description="Shows your progress bar and buttons.")
+    @app_commands.command(name="progress", description="Shows your progress bar and buttons.", extras={'public': True})
     async def progress(self, interaction: discord.Interaction):
         """Shows your progress bar and buttons."""
         # Restriction Check
