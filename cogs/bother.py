@@ -15,12 +15,12 @@ from typing import Literal
 # - __init__(bot)
 # - cog_load()
 # - restore_views()
-# - get_options(guild_id)
-# - save_options(guild_id, options)
+# - get_config(guild_id)
+# - save_config(guild_id, config)
 # - get_dashboards()
 # - save_dashboards(dashboards)
-# - create_dashboard_embed(guild, options)
-# - bb(interaction, action, label, key, ping_text) [Slash Command]
+# - create_dashboard_embed(guild, title)
+# - bb(interaction, action, label, key, ping_text, text) [Slash Command]
 # - bbdashboard(interaction) [Slash Command]
 # setup(bot)
 
@@ -80,27 +80,36 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
         count = 0
         for dash in dashboards:
             guild_id = dash['guild_id']
-            options = self.get_options(guild_id)
-            if options:
-                view = BotherView(self.bot, options, guild_id)
+            config = self.get_config(guild_id)
+            if config['options']:
+                view = BotherView(self.bot, config['options'], guild_id)
                 self.bot.add_view(view)
                 count += 1
         print(f"✅ Restored {count} Bother Buggy dashboard views, you genius!")
 
     # --- DB HELPERS ---
 
-    def get_options(self, guild_id):
-        """Returns the list of bother options for a guild."""
+    def get_config(self, guild_id):
+        """Returns the full config dict for a guild."""
         collection = self.bot.db.get_collection("bb_options")
-        # Structure: [{"guild_id": 123, "options": [...]}]
+        # Structure: [{"guild_id": 123, "options": [...], "title": "..."}]
         doc = next((d for d in collection if d['guild_id'] == guild_id), None)
-        return doc['options'] if doc else []
+        
+        # Default structure
+        if not doc:
+            doc = {"guild_id": guild_id, "options": [], "title": "🔔 Bother Buggy"}
+        
+        # Ensure title exists (migration safe)
+        if "title" not in doc:
+            doc["title"] = "🔔 Bother Buggy"
+            
+        return doc
 
-    def save_options(self, guild_id, options):
-        """Saves the list of options for a guild."""
+    def save_config(self, guild_id, config):
+        """Saves the config for a guild."""
         collection = self.bot.db.get_collection("bb_options")
         collection = [d for d in collection if d['guild_id'] != guild_id]
-        collection.append({"guild_id": guild_id, "options": options})
+        collection.append(config)
         self.bot.db.save_collection("bb_options", collection)
 
     def get_dashboards(self):
@@ -111,20 +120,13 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
         """Saves active dashboards."""
         self.bot.db.save_collection("bb_dashboards", dashboards)
 
-    def create_dashboard_embed(self, guild, options):
-        """Creates the embed for the dashboard."""
+    def create_dashboard_embed(self, guild, title):
+        """Creates the minimal embed for the dashboard."""
         embed = discord.Embed(
-            title="🔔 Bother Buggy",
-            description="Click a button below to bother buggy! Please be patient for a response.",
+            title=title,
+            description="Click what you want to do with buggy!",
             color=discord.Color.gold()
         )
-        if options:
-            option_list = "\n".join([f"• **{o['label']}**" for o in options])
-            embed.add_field(name="Available Options", value=option_list, inline=False)
-        else:
-            embed.description = "No options configured yet, buggy!"
-        
-        embed.set_footer(text=f"Server: {guild.name}")
         return embed
 
     # --- SLASH COMMANDS ---
@@ -134,16 +136,19 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
         action="What would you like to do?",
         label="[Add] Text shown on the button",
         key="[Add/Remove] Unique one-word ID for the option",
-        ping_text="[Add] Message sent to buggy"
+        ping_text="[Add] Message sent to buggy",
+        text="[Title] The new title for the dashboard"
     )
     @app_commands.default_permissions(administrator=True)
     async def bb(self, interaction: discord.Interaction, 
-                 action: Literal["Add", "Remove", "List"], 
+                 action: Literal["Add", "Remove", "List", "Title"], 
                  label: str = None, 
                  key: str = None, 
-                 ping_text: str = None):
+                 ping_text: str = None,
+                 text: str = None):
         
-        options = self.get_options(interaction.guild_id)
+        config = self.get_config(interaction.guild_id)
+        options = config['options']
 
         # --- ACTION: ADD ---
         if action == "Add":
@@ -161,8 +166,9 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
                 "key": key.lower(),
                 "ping_text": ping_text
             })
-            self.save_options(interaction.guild_id, options)
-            await interaction.response.send_message(f"✅ Added **{label}** to the list! Use `/bbdashboard` to spawn the updated dashboard.", ephemeral=True)
+            config['options'] = options
+            self.save_config(interaction.guild_id, config)
+            await interaction.response.send_message(f"✅ Added **{label}**! Use `/bbdashboard` to see the changes.", ephemeral=True)
 
         # --- ACTION: REMOVE ---
         elif action == "Remove":
@@ -173,7 +179,8 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
             options = [o for o in options if o['key'] != key.lower()]
             
             if len(options) < initial_len:
-                self.save_options(interaction.guild_id, options)
+                config['options'] = options
+                self.save_config(interaction.guild_id, config)
                 await interaction.response.send_message(f"✅ Removed the `{key}` option for you!", ephemeral=True)
             else:
                 await interaction.response.send_message(f"❌ I couldn't find an option with the key `{key}`.", ephemeral=True)
@@ -183,20 +190,29 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
             if not options:
                 return await interaction.response.send_message("📝 You haven't added any options yet, buggy!", ephemeral=True)
             
-            text = "**📋 Bother Buggy Options:**\n"
+            content = f"**Title:** {config['title']}\n**📋 Options:**\n"
             for o in options:
-                text += f"• `{o['key']}`: **{o['label']}** (Ping: {o['ping_text']})\n"
-            await interaction.response.send_message(text, ephemeral=True)
+                content += f"• `{o['key']}`: **{o['label']}** (Ping: {o['ping_text']})\n"
+            await interaction.response.send_message(content, ephemeral=True)
+
+        # --- ACTION: TITLE ---
+        elif action == "Title":
+            if not text:
+                return await interaction.response.send_message("❌ For 'Title', you must provide the `text`.", ephemeral=True)
+            
+            config['title'] = text
+            self.save_config(interaction.guild_id, config)
+            await interaction.response.send_message(f"✅ Dashboard title set to: **{text}**", ephemeral=True)
 
     @app_commands.command(name="bbdashboard", description="Spawn the Bother Buggy Dashboard in this channel.")
     @app_commands.default_permissions(administrator=True)
     async def bbdashboard(self, interaction: discord.Interaction):
-        options = self.get_options(interaction.guild_id)
-        if not options:
+        config = self.get_config(interaction.guild_id)
+        if not config['options']:
             return await interaction.response.send_message("❌ You need to add some options first via `/bb action:Add`!", ephemeral=True)
 
-        embed = self.create_dashboard_embed(interaction.guild, options)
-        view = BotherView(self.bot, options, interaction.guild_id)
+        embed = self.create_dashboard_embed(interaction.guild, config['title'])
+        view = BotherView(self.bot, config['options'], interaction.guild_id)
         
         # Send the dashboard as a regular message so everyone can see/use it
         msg = await interaction.channel.send(embed=embed, view=view)
