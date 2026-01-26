@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import commands
 import asyncio
 import re
+from typing import Literal, Optional
 
 # Function/Class List:
 # class Clone(commands.Cog)
@@ -19,10 +20,7 @@ import re
 # - handle_return_reply(message)
 # - on_raw_reaction_add(payload)
 # - on_message_delete(message)
-# - clone (Group) [Slash]
-#   - add(interaction, receive_channel, source_id, min_reactions, attachments_only, return_replies)
-#   - remove(interaction, receive_channel, source_id)
-#   - list(interaction)
+# - clone(interaction, action, receive_channel, source_id, min_reactions, attachments_only, return_replies) [Slash]
 # setup(bot)
 
 class Clone(commands.Cog):
@@ -330,127 +328,138 @@ class Clone(commands.Cog):
 
     # --- SLASH COMMANDS ---
 
-    clone = app_commands.Group(name="clone", description="Manage message cloning setups", default_permissions=discord.Permissions(administrator=True))
-
-    @clone.command(name="add", description="Add a clone setup.")
+    @app_commands.command(name="clone", description="Manage message cloning setups.")
     @app_commands.describe(
-        receive_channel="Where to send cloned messages", 
-        source_id="ID of Source Channel or Category",
-        min_reactions="Reactions needed to clone (0=Instant)",
-        attachments_only="Only clone messages with files?",
-        return_replies="Allow replies from receiver back to source?"
+        action="What would you like to do?",
+        receive_channel="[Add/Remove] Where to send cloned messages",
+        source_id="[Add/Remove] ID of Source Channel or Category",
+        min_reactions="[Add] Reactions needed to clone (0=Instant)",
+        attachments_only="[Add] Only clone messages with files?",
+        return_replies="[Add] Allow replies from receiver back to source?"
     )
-    async def clone_add(self, interaction: discord.Interaction, receive_channel: discord.TextChannel, source_id: str, 
-                        min_reactions: int = 0, attachments_only: bool = False, return_replies: bool = False):
-        """Add a clone setup."""
-        try:
-            s_id = int(source_id)
-        except:
-            return await interaction.response.send_message("❌ Source ID must be a valid number.", ephemeral=True)
-
-        setups = self.get_clone_setups()
+    @app_commands.default_permissions(administrator=True)
+    async def clone(self, interaction: discord.Interaction, 
+                    action: Literal["Add", "Remove", "List"],
+                    receive_channel: Optional[discord.TextChannel] = None,
+                    source_id: Optional[str] = None,
+                    min_reactions: int = 0,
+                    attachments_only: bool = False,
+                    return_replies: bool = False):
+        """Manage message cloning setups."""
         
-        # Check duplicates (Receiver + Source combo)
-        for s in setups:
-            if s['receive_id'] == receive_channel.id and s['source_id'] == s_id:
-                return await interaction.response.send_message("❌ A setup for this Receiver and Source already exists. Remove it first.", ephemeral=True)
-
-        # Create new setup object
-        new_setup = {
-            "receive_id": receive_channel.id,
-            "guild_id": interaction.guild_id, 
-            "source_id": s_id,
-            "ignore_channels": [],
-            "attachments_only": attachments_only,
-            "return_replies": return_replies,
-            "min_reactions": min_reactions
-        }
-
-        setups.append(new_setup)
-        self.save_clone_setups(setups)
-        
-        flags = []
-        if attachments_only: flags.append("MediaOnly")
-        if return_replies: flags.append("Replies")
-        if min_reactions > 0: flags.append(f"{min_reactions}+ Reacts")
-        flag_str = f" ({', '.join(flags)})" if flags else ""
-        
-        await interaction.response.send_message(f"✅ Setup added! Cloning from `{s_id}` to {receive_channel.mention}{flag_str}.", ephemeral=True)
-
-    @clone.command(name="remove", description="Remove a clone setup.")
-    @app_commands.describe(receive_channel="The receiving channel", source_id="The source ID to remove")
-    async def clone_remove(self, interaction: discord.Interaction, receive_channel: discord.TextChannel, source_id: str):
-        """Remove a clone setup."""
-        try: s_id = int(source_id)
-        except: return await interaction.response.send_message("❌ ID invalid.", ephemeral=True)
-
-        setups = self.get_clone_setups()
-        initial_len = len(setups)
-        
-        # Remove matching setup
-        setups = [s for s in setups if not (s['receive_id'] == receive_channel.id and s['source_id'] == s_id)]
-        
-        if len(setups) < initial_len:
-            self.save_clone_setups(setups)
-            await interaction.response.send_message(f"✅ Removed setup for {receive_channel.mention}.", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"❌ No matching setup found.", ephemeral=True)
-
-    @clone.command(name="list", description="List all clone setups for this server.")
-    async def clone_list(self, interaction: discord.Interaction):
-        """List all clone setups for this server."""
-        setups = self.get_clone_setups()
-        if not setups:
-            return await interaction.response.send_message("📝 No clone setups active.", ephemeral=True)
-
-        # 1. Map current guild channels for fast local lookup
-        current_guild_map = {c.id: c.name for c in interaction.guild.channels}
-
-        # 2. Filter setups
-        filtered_setups = []
-        for s in setups:
-            if s.get('guild_id') == interaction.guild_id:
-                filtered_setups.append(s)
-            elif s['receive_id'] in current_guild_map:
-                filtered_setups.append(s)
-
-        if not filtered_setups:
-            return await interaction.response.send_message("📝 No clone setups found for this server.", ephemeral=True)
-
-        # 3. Group by Receiver
-        grouped = {}
-        for s in filtered_setups:
-            rid = s['receive_id']
-            if rid not in grouped: grouped[rid] = []
-            grouped[rid].append(s)
-
-        text = "**🐏 Clone Setups (This Server):**\n"
-        
-        for rid, source_list in grouped.items():
-            if rid in current_guild_map:
-                r_name = current_guild_map[rid]
-            else:
-                r_channel = self.bot.get_channel(rid)
-                r_name = r_channel.name if r_channel else f"ID:{rid}"
+        # --- ADD ---
+        if action == "Add":
+            if not receive_channel or not source_id:
+                return await interaction.response.send_message("❌ Error: `receive_channel` and `source_id` are required to Add.", ephemeral=True)
             
-            text += f"\n📂 **Receiver: {r_name}**\n"
-            for s in source_list:
-                sid = s['source_id']
-                if sid in current_guild_map:
-                    s_name = current_guild_map[sid]
-                else:
-                    global_chan = self.bot.get_channel(sid)
-                    s_name = global_chan.name if global_chan else f"ID:{sid}"
-                
-                flags = []
-                if s.get('attachments_only'): flags.append("🖼️ MediaOnly")
-                if s.get('return_replies'): flags.append("↩️ Replies")
-                if s.get('min_reactions', 0) > 0: flags.append(f"⭐ {s['min_reactions']}+ Reacts")
-                
-                flag_text = f" ({', '.join(flags)})" if flags else ""
-                text += f" - Source: **{s_name}**{flag_text}\n"
+            try:
+                s_id = int(source_id)
+            except:
+                return await interaction.response.send_message("❌ Source ID must be a valid number.", ephemeral=True)
 
-        await interaction.response.send_message(text[:2000], ephemeral=True)
+            setups = self.get_clone_setups()
+            
+            # Check duplicates (Receiver + Source combo)
+            for s in setups:
+                if s['receive_id'] == receive_channel.id and s['source_id'] == s_id:
+                    return await interaction.response.send_message("❌ A setup for this Receiver and Source already exists. Remove it first.", ephemeral=True)
+
+            # Create new setup object
+            new_setup = {
+                "receive_id": receive_channel.id,
+                "guild_id": interaction.guild_id, 
+                "source_id": s_id,
+                "ignore_channels": [],
+                "attachments_only": attachments_only,
+                "return_replies": return_replies,
+                "min_reactions": min_reactions
+            }
+
+            setups.append(new_setup)
+            self.save_clone_setups(setups)
+            
+            flags = []
+            if attachments_only: flags.append("MediaOnly")
+            if return_replies: flags.append("Replies")
+            if min_reactions > 0: flags.append(f"{min_reactions}+ Reacts")
+            flag_str = f" ({', '.join(flags)})" if flags else ""
+            
+            await interaction.response.send_message(f"✅ Setup added! Cloning from `{s_id}` to {receive_channel.mention}{flag_str}.", ephemeral=True)
+
+        # --- REMOVE ---
+        elif action == "Remove":
+            if not receive_channel or not source_id:
+                return await interaction.response.send_message("❌ Error: `receive_channel` and `source_id` are required to Remove.", ephemeral=True)
+
+            try: s_id = int(source_id)
+            except: return await interaction.response.send_message("❌ ID invalid.", ephemeral=True)
+
+            setups = self.get_clone_setups()
+            initial_len = len(setups)
+            
+            # Remove matching setup
+            setups = [s for s in setups if not (s['receive_id'] == receive_channel.id and s['source_id'] == s_id)]
+            
+            if len(setups) < initial_len:
+                self.save_clone_setups(setups)
+                await interaction.response.send_message(f"✅ Removed setup for {receive_channel.mention}.", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ No matching setup found.", ephemeral=True)
+
+        # --- LIST ---
+        elif action == "List":
+            setups = self.get_clone_setups()
+            if not setups:
+                return await interaction.response.send_message("📝 No clone setups active.", ephemeral=True)
+
+            # 1. Map current guild channels for fast local lookup
+            current_guild_map = {c.id: c.name for c in interaction.guild.channels}
+
+            # 2. Filter setups
+            filtered_setups = []
+            for s in setups:
+                if s.get('guild_id') == interaction.guild_id:
+                    filtered_setups.append(s)
+                elif s['receive_id'] in current_guild_map:
+                    filtered_setups.append(s)
+
+            if not filtered_setups:
+                return await interaction.response.send_message("📝 No clone setups found for this server.", ephemeral=True)
+
+            # 3. Group by Receiver
+            grouped = {}
+            for s in filtered_setups:
+                rid = s['receive_id']
+                if rid not in grouped: grouped[rid] = []
+                grouped[rid].append(s)
+
+            text = "**🐏 Clone Setups (This Server):**\n"
+            
+            for rid, source_list in grouped.items():
+                if rid in current_guild_map:
+                    r_name = current_guild_map[rid]
+                else:
+                    r_channel = self.bot.get_channel(rid)
+                    r_name = r_channel.name if r_channel else f"ID:{rid}"
+                
+                text += f"\n📂 **Receiver: {r_name}**\n"
+                for s in source_list:
+                    sid = s['source_id']
+                    if sid in current_guild_map:
+                        s_name = current_guild_map[sid]
+                    else:
+                        global_chan = self.bot.get_channel(sid)
+                        s_name = global_chan.name if global_chan else f"ID:{sid}"
+                    
+                    flags = []
+                    if s.get('attachments_only'): flags.append("🖼️ MediaOnly")
+                    if s.get('return_replies'): flags.append("↩️ Replies")
+                    if s.get('min_reactions', 0) > 0: flags.append(f"⭐ {s['min_reactions']}+ Reacts")
+                    
+                    flag_text = f" ({', '.join(flags)})" if flags else ""
+                    text += f" - Source: **{s_name}**{flag_text}\n"
+
+            await interaction.response.send_message(text[:2000], ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(Clone(bot))
