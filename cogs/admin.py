@@ -27,6 +27,7 @@ from typing import Literal, Optional
 # - get_autoban_roles(guild_id)
 # - save_autoban_roles(guild_id, roles)
 # - log_to_channel(guild, embed)
+# - revive_sticky(channel_id)
 # - on_message(message)
 # - on_raw_reaction_add(payload)
 # - on_message_delete(message)
@@ -206,6 +207,25 @@ class Admin(commands.Cog):
             await log_channel.send(embed=embed)
         except:
             pass
+            
+    async def revive_sticky(self, channel_id):
+        """Called by purge cog to wake up a sticky that was dormant."""
+        stickies = self.get_stickies()
+        target = next((s for s in stickies if s['channel_id'] == channel_id), None)
+        
+        if target:
+            target['active'] = True
+            # Force a repost immediately
+            channel = self.bot.get_channel(channel_id)
+            if channel:
+                try:
+                    new_msg = await channel.send(target['content'])
+                    target['last_message_id'] = new_msg.id
+                    target['last_posted_at'] = datetime.datetime.now().timestamp()
+                except Exception as e:
+                    print(f"Failed to revive sticky: {e}")
+            
+            self.save_stickies(stickies)
 
     # --- EVENTS ---
 
@@ -224,6 +244,10 @@ class Admin(commands.Cog):
         sticky_data = next((s for s in stickies if s['channel_id'] == message.channel.id), None)
         
         if sticky_data:
+            # Check if active (default True if missing)
+            if not sticky_data.get('active', True):
+                return
+
             # Loop Prevention: Ignore ALL messages from the bot itself
             # This prevents the bot's own responses from triggering a sticky repost
             if message.author.id == self.bot.user.id:
@@ -402,27 +426,33 @@ class Admin(commands.Cog):
             await asyncio.sleep(delay)
             # Re-fetch stickies to ensure it wasn't deleted during the sleep
             current_stickies = self.get_stickies()
-            if not any(s['channel_id'] == message.channel.id for s in current_stickies):
-                return
             sticky_data = next((s for s in current_stickies if s['channel_id'] == message.channel.id), None)
             if not sticky_data: return
+            if not sticky_data.get('active', True): return
 
         # Delete old sticky
+        # If the old sticky is NOT found, it means it was deleted (e.g. by bother.py or user).
+        # In that case, we mark it as inactive and STOP loop.
         if sticky_data.get('last_message_id'):
             try:
                 old_msg = await message.channel.fetch_message(sticky_data['last_message_id'])
                 await old_msg.delete()
             except (discord.NotFound, discord.HTTPException):
-                pass
+                # Message is gone. Pause the sticky until revived.
+                sticky_data['active'] = False
+                self.save_stickies(stickies)
+                return
         
         # Send new sticky
         try:
             new_msg = await message.channel.send(sticky_data['content'])
+            # Refresh list again before saving to capture any race conditions
             stickies = self.get_stickies()
             for s in stickies:
                 if s['channel_id'] == message.channel.id:
                     s['last_message_id'] = new_msg.id
                     s['last_posted_at'] = datetime.datetime.now().timestamp()
+                    s['active'] = True # Ensure active
                     break
             self.save_stickies(stickies)
         except Exception as e:
@@ -512,7 +542,8 @@ class Admin(commands.Cog):
             "guild_id": interaction.guild_id,
             "content": content,
             "last_message_id": None,
-            "last_posted_at": datetime.datetime.now().timestamp()
+            "last_posted_at": datetime.datetime.now().timestamp(),
+            "active": True
         }
 
         try:
@@ -572,8 +603,9 @@ class Admin(commands.Cog):
             channel = interaction.guild.get_channel(s['channel_id'])
             chan_mention = channel.mention if channel else f"ID:{s['channel_id']} (Deleted)"
             content_preview = s['content'].replace("\n", " ")
+            status = " (Paused)" if not s.get('active', True) else ""
             if len(content_preview) > 50: content_preview = content_preview[:47] + "..."
-            text += f"• {chan_mention}: {content_preview}\n"
+            text += f"• {chan_mention}{status}: {content_preview}\n"
         
         await interaction.response.send_message(text, ephemeral=True)
 
