@@ -21,6 +21,7 @@ from typing import Literal
 # - save_dashboards(dashboards)
 # - create_dashboard_embed(guild, options)
 # - bb(interaction, action, label, key, ping_text) [Slash Command]
+# - bbdashboard(interaction) [Slash Command]
 # setup(bot)
 
 BUGGY_ID = 1433003746719170560
@@ -126,9 +127,9 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
         embed.set_footer(text=f"Server: {guild.name}")
         return embed
 
-    # --- SLASH COMMAND ---
+    # --- SLASH COMMANDS ---
 
-    @app_commands.command(name="bb", description="Manage the Bother Buggy Dashboard.")
+    @app_commands.command(name="bb", description="Manage the Bother Buggy settings.")
     @app_commands.describe(
         action="What would you like to do?",
         label="[Add] Text shown on the button",
@@ -137,7 +138,7 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
     )
     @app_commands.default_permissions(administrator=True)
     async def bb(self, interaction: discord.Interaction, 
-                 action: Literal["Add", "Remove", "List", "Spawn"], 
+                 action: Literal["Add", "Remove", "List"], 
                  label: str = None, 
                  key: str = None, 
                  ping_text: str = None):
@@ -161,7 +162,7 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
                 "ping_text": ping_text
             })
             self.save_options(interaction.guild_id, options)
-            await interaction.response.send_message(f"✅ Added **{label}** to the list! Use `/bb action:Spawn` to update the dashboard.", ephemeral=True)
+            await interaction.response.send_message(f"✅ Added **{label}** to the list! Use `/bbdashboard` to spawn the updated dashboard.", ephemeral=True)
 
         # --- ACTION: REMOVE ---
         elif action == "Remove":
@@ -187,27 +188,31 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
                 text += f"• `{o['key']}`: **{o['label']}** (Ping: {o['ping_text']})\n"
             await interaction.response.send_message(text, ephemeral=True)
 
-        # --- ACTION: SPAWN ---
-        elif action == "Spawn":
-            if not options:
-                return await interaction.response.send_message("❌ You need to add some options first, buggy!", ephemeral=True)
+    @app_commands.command(name="bbdashboard", description="Spawn the Bother Buggy Dashboard in this channel.")
+    @app_commands.default_permissions(administrator=True)
+    async def bbdashboard(self, interaction: discord.Interaction):
+        options = self.get_options(interaction.guild_id)
+        if not options:
+            return await interaction.response.send_message("❌ You need to add some options first via `/bb action:Add`!", ephemeral=True)
 
-            embed = self.create_dashboard_embed(interaction.guild, options)
-            view = BotherView(self.bot, options, interaction.guild_id)
-            
-            await interaction.response.send_message("✅ Dashboard spawned! I've recorded its location for persistence.", ephemeral=True)
-            await interaction.edit_original_response(content=None, embed=embed, view=view)
-            msg = await interaction.original_response()
+        embed = self.create_dashboard_embed(interaction.guild, options)
+        view = BotherView(self.bot, options, interaction.guild_id)
+        
+        # Send the dashboard as a regular message so everyone can see/use it
+        msg = await interaction.channel.send(embed=embed, view=view)
+        
+        # Confirm to the admin
+        await interaction.response.send_message("✅ Dashboard spawned! I've recorded its location for persistence.", ephemeral=True)
 
-            dashboards = self.get_dashboards()
-            dashboards = [d for d in dashboards if d['guild_id'] != interaction.guild_id]
-            
-            dashboards.append({
-                "guild_id": interaction.guild_id,
-                "channel_id": interaction.channel_id,
-                "message_id": msg.id
-            })
-            self.save_dashboards(dashboards)
+        dashboards = self.get_dashboards()
+        dashboards = [d for d in dashboards if d['guild_id'] != interaction.guild_id]
+        
+        dashboards.append({
+            "guild_id": interaction.guild_id,
+            "channel_id": interaction.channel_id,
+            "message_id": msg.id
+        })
+        self.save_dashboards(dashboards)
 
 async def setup(bot):
     await bot.add_cog(BotherBuggy(bot))
