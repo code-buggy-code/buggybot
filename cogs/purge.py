@@ -20,8 +20,8 @@ from typing import Literal, Optional, Union
 # - get_pin_settings()
 # - save_pin_settings(settings)
 # - on_message(message)
-# - purge(interaction, time, user, category, entire_server) [Slash]
-# - replypurge(interaction, filter_option, target_message) [Slash]
+# - purge(interaction, time, scope, user, entire_server) [Slash]
+# - replypurge(interaction, target_message, filter_option) [Slash]
 # - purge_till_here(interaction, message) [Context Menu]
 # - schedulepurge(interaction, action, keep_media, keep_links) [Slash]
 # - pinpurge(interaction, enabled) [Slash]
@@ -31,7 +31,6 @@ class Purge(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         # Fixed Timezone: UTC-5 (EST)
-        # We manually define the offset to avoid 'zoneinfo' crashes on some systems
         self.est_offset = timezone(timedelta(hours=-5))
         
         self.purge_scheduler.start()
@@ -65,7 +64,6 @@ class Purge(commands.Cog):
         
         # Sticky Protection: Check if this message is the current sticky for the channel
         stickies = self.bot.db.get_collection("sticky_messages")
-        # We check if this message's ID matches the 'last_message_id' of any sticky setup
         if any(s.get('last_message_id') == message.id for s in stickies):
             return True
 
@@ -95,7 +93,6 @@ class Purge(commands.Cog):
     @tasks.loop(minutes=1)
     async def purge_scheduler(self):
         """Checks every minute if it is 4am EST."""
-        # Use simple offset instead of zoneinfo
         now = datetime.datetime.now(self.est_offset)
         
         if now.hour == 4 and now.minute == 0:
@@ -136,29 +133,25 @@ class Purge(commands.Cog):
         if message.author.bot:
             return
         
-        # 1. Manual "Reply Purge" Logic (Text Trigger)
-        # Usage: Reply to a message -> Type "/replypurge [attachments/text]"
+        # 1. Manual "Reply Purge" Logic (Text Trigger for Context)
         msg_content = message.content.lower().strip()
         if msg_content.startswith("/replypurge") or msg_content.startswith("!replypurge"):
             # Permission check
             if not message.channel.permissions_for(message.author).manage_messages:
                 return
 
-            # Must be a reply
             if not message.reference:
-                # If they just typed the command without replying, we ignore it here.
                 return 
 
             try:
-                # Fetch the message that was replied to
                 ref_msg = await message.channel.fetch_message(message.reference.message_id)
-                await message.delete() # Delete the command trigger immediately
+                await message.delete()
 
                 # Determine Mode
                 mode = "all"
                 if "attachment" in msg_content or "media" in msg_content:
                     mode = "attachments"
-                elif "text" in msg_content:
+                elif "text" in msg_content or "non-media" in msg_content:
                     mode = "text"
 
                 # Validation
@@ -168,7 +161,7 @@ class Purge(commands.Cog):
                     return await message.channel.send("❌ **Error:** You selected 'Attachments Only' but replied to a text message.", delete_after=5)
                 
                 if mode == "text" and ref_is_media:
-                    return await message.channel.send("❌ **Error:** You selected 'Text Only' but replied to a media message.", delete_after=5)
+                    return await message.channel.send("❌ **Error:** You selected 'Non-Media Only' but replied to a media message.", delete_after=5)
 
                 # Define Check
                 def purge_check(m):
@@ -181,7 +174,7 @@ class Purge(commands.Cog):
                 # Execute
                 deleted = await message.channel.purge(limit=None, after=ref_msg, check=purge_check)
                 
-                # Inclusive Delete (Delete the reference message too if it matches)
+                # Inclusive Delete
                 ref_deleted = False
                 if purge_check(ref_msg):
                     try:
@@ -209,14 +202,14 @@ class Purge(commands.Cog):
                 except:
                     pass
 
-    # --- SLASH COMMAND: PURGE (Main) ---
+    # --- SLASH COMMANDS: PURGE ---
     
-    @app_commands.command(name="purge", description="Purge messages with time and scope options.")
+    @app_commands.command(name="purge", description="Purge messages from a channel, category, or server.")
     @app_commands.describe(
-        time="Time range to purge",
-        user="Optional: Only purge messages from this user",
-        category="Optional: Purge an entire category",
-        entire_server="Optional: Purge ALL channels in the server (Dangerous!)"
+        time="How far back to purge [Mandatory]",
+        scope="Channel or Category to purge (Defaults to this channel)",
+        user="Only purge messages from this user",
+        entire_server="Purge the ENTIRE server? (Overrides scope)"
     )
     @app_commands.choices(time=[
         app_commands.Choice(name="All Time", value="all"),
@@ -226,22 +219,29 @@ class Purge(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     async def purge(self, interaction: discord.Interaction, 
                     time: app_commands.Choice[str],
+                    scope: Optional[Union[discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel]] = None,
                     user: Optional[discord.User] = None,
-                    category: Optional[discord.CategoryChannel] = None,
                     entire_server: bool = False):
-        """Purge messages with time and scope options."""
+        """Purge messages from a channel, category, or server."""
         
         # 1. Determine Scope
         target_channels = []
         scope_name = "Current Channel"
 
         if entire_server:
+            # Server Wide
             target_channels = interaction.guild.text_channels
             scope_name = "Entire Server"
-        elif category:
-            target_channels = category.text_channels
-            scope_name = f"Category: {category.name}"
+        elif isinstance(scope, discord.CategoryChannel):
+            # Category
+            target_channels = scope.text_channels
+            scope_name = f"Category: {scope.name}"
+        elif isinstance(scope, (discord.TextChannel, discord.VoiceChannel)):
+            # Specific Channel
+            target_channels = [scope]
+            scope_name = f"Channel: {scope.name}"
         else:
+            # Default to Current
             target_channels = [interaction.channel]
             scope_name = "Current Channel"
 
@@ -256,7 +256,7 @@ class Purge(commands.Cog):
         # If 'all', cutoff remains None
 
         # Confirmation for large purges
-        if entire_server or (category and len(target_channels) > 1):
+        if entire_server or (scope and isinstance(scope, discord.CategoryChannel)) or len(target_channels) > 1:
              await interaction.response.send_message(f"⚠️ **WARNING:** You are about to purge **{scope_name}** ({len(target_channels)} channels) for **{time.name}**. This may take a while.", ephemeral=True)
         else:
              await interaction.response.defer(ephemeral=True)
@@ -278,58 +278,60 @@ class Purge(commands.Cog):
             except Exception as e:
                 print(f"Failed to purge {channel.name}: {e}")
 
-        # Followup only works if we deferred or replied.
+        # Followup
         try:
+            msg_content = f"✅ **Purge Complete!**\nDeleted **{total_deleted}** messages in **{scope_name}** ({time.name})."
             if interaction.response.is_done():
-                await interaction.followup.send(f"✅ **Purge Complete!**\nDeleted **{total_deleted}** messages in **{scope_name}** ({time.name}).", ephemeral=True)
+                await interaction.followup.send(msg_content, ephemeral=True)
             else:
-                 await interaction.followup.send(f"✅ **Purge Complete!**\nDeleted **{total_deleted}** messages in **{scope_name}** ({time.name}).", ephemeral=True)
+                 await interaction.followup.send(msg_content, ephemeral=True)
         except: pass
 
-    # --- SLASH COMMAND: REPLYPURGE (New Slash Version) ---
+    # --- SLASH COMMAND: REPLY PURGE ---
 
-    @app_commands.command(name="replypurge", description="Purge messages until a specific message (using ID/Link).")
+    @app_commands.command(name="replypurge", description="Purge messages until a specific message.")
     @app_commands.describe(
-        filter_option="Keep Media or Text?",
-        target_message="Paste the Message ID or Message Link to purge until."
+        target_message="Paste the Message ID or Link to purge until.",
+        filter_option="Optional: Filter for attachments or text only"
     )
     @app_commands.choices(filter_option=[
         app_commands.Choice(name="Attachments Only", value="attachments"),
         app_commands.Choice(name="Non-Media Only (Text)", value="text")
     ])
     @app_commands.default_permissions(administrator=True)
-    async def slash_replypurge(self, interaction: discord.Interaction, 
-                               filter_option: app_commands.Choice[str], 
-                               target_message: str):
-        """Purge messages until a specific message using ID or Link."""
+    async def replypurge(self, interaction: discord.Interaction, 
+                         target_message: str,
+                         filter_option: Optional[app_commands.Choice[str]] = None):
+        """Purge messages until a specific message."""
         await interaction.response.defer(ephemeral=True)
 
-        # 1. Parse Message ID from input (handle Link or ID)
+        # 1. Parse Message ID from input
         msg_id = None
         try:
             if "discord.com/channels" in target_message:
-                # Extract ID from link
                 msg_id = int(target_message.split("/")[-1])
             else:
                 msg_id = int(target_message)
         except ValueError:
             return await interaction.followup.send("❌ Invalid Message ID or Link.", ephemeral=True)
 
-        # 2. Fetch the target message
+        # 2. Fetch target
         try:
             ref_msg = await interaction.channel.fetch_message(msg_id)
         except discord.NotFound:
             return await interaction.followup.send("❌ Could not find that message in this channel.", ephemeral=True)
 
-        # 3. Validation Logic (Same as text version)
+        # 3. Determine Mode
+        mode = filter_option.value if filter_option else "all"
+
+        # Validation
         ref_is_media = self.is_media_message(ref_msg)
-        mode = filter_option.value
 
         if mode == "attachments" and not ref_is_media:
             return await interaction.followup.send("❌ **Error:** You selected 'Attachments Only' but the target message is text.", ephemeral=True)
         
         if mode == "text" and ref_is_media:
-            return await interaction.followup.send("❌ **Error:** You selected 'Text Only' but the target message is media.", ephemeral=True)
+            return await interaction.followup.send("❌ **Error:** You selected 'Non-Media Only' but the target message is media.", ephemeral=True)
 
         # 4. Define Check
         def purge_check(m):
@@ -352,10 +354,10 @@ class Purge(commands.Cog):
                 except: pass
             
             count = len(deleted) + (1 if ref_deleted else 0)
-            await interaction.followup.send(f"✅ Purged **{count}** messages matching **{filter_option.name}** down to the target.", ephemeral=True)
+            mode_text = f" matching **{filter_option.name}**" if filter_option else ""
+            await interaction.followup.send(f"✅ Purged **{count}** messages{mode_text} down to the target.", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ Failed to purge: {e}", ephemeral=True)
-
 
     # --- CONTEXT MENU: PURGE TILL HERE ---
 
@@ -363,29 +365,24 @@ class Purge(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     async def purge_till_here(self, interaction: discord.Interaction, message: discord.Message):
         """Context menu to purge messages newer than the selected one."""
-        # Permission Check (Self)
         if not interaction.channel.permissions_for(interaction.guild.me).manage_messages:
             return await interaction.response.send_message("❌ I need `Manage Messages` permission to do this.", ephemeral=True)
         
         await interaction.response.defer(ephemeral=True)
         
         try:
-            # Purge everything after (newer than) the selected message
-            # 'after' is exclusive, so it keeps the 'message'
             deleted = await interaction.channel.purge(limit=None, after=message)
-            
-            # Delete the message itself to be inclusive
             try:
                 await message.delete()
                 count = len(deleted) + 1
             except (discord.NotFound, discord.Forbidden):
-                count = len(deleted) # Already gone or can't delete
+                count = len(deleted)
                 
             await interaction.followup.send(f"✅ Purged **{count}** messages down to the selected message.", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ Failed to purge: {e}", ephemeral=True)
 
-    # --- SLASH COMMAND: SCHEDULE PURGE (4am Task) ---
+    # --- SLASH COMMAND: SCHEDULE PURGE ---
 
     @app_commands.command(name="schedulepurge", description="Manage the 4am EST purge schedule.")
     @app_commands.describe(
@@ -400,7 +397,6 @@ class Purge(commands.Cog):
                             keep_links: bool = False):
         """Manage the 4am EST purge schedule."""
         
-        # --- 1. ADD ---
         if action == "Add":
             schedules = self.get_schedules()
             if any(s['channel_id'] == interaction.channel_id for s in schedules):
@@ -415,7 +411,6 @@ class Purge(commands.Cog):
             self.save_schedules(schedules)
             await interaction.response.send_message(f"✅ Channel added to 4am EST purge schedule.\nOptions: Media={keep_media}, Links={keep_links}", ephemeral=True)
 
-        # --- 2. EDIT ---
         elif action == "Edit":
             schedules = self.get_schedules()
             found = False
@@ -432,7 +427,6 @@ class Purge(commands.Cog):
             else:
                 await interaction.response.send_message("❌ This channel is not in the schedule.", ephemeral=True)
 
-        # --- 3. REMOVE ---
         elif action == "Remove":
             schedules = self.get_schedules()
             initial_len = len(schedules)
@@ -444,7 +438,6 @@ class Purge(commands.Cog):
             else:
                 await interaction.response.send_message("❌ This channel was not scheduled.", ephemeral=True)
 
-        # --- 4. LIST ---
         elif action == "List":
             schedules = self.get_schedules()
             guild_schedules = [s for s in schedules if s['guild_id'] == interaction.guild_id]
