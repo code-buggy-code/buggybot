@@ -28,6 +28,7 @@ from typing import Literal, Optional, Union
 # - point_saver()
 # - lead(interaction, action, group_num, name) [Slash - Admin]
 # - track(interaction, group_num, action, channel) [Slash - Admin]
+# - setpoints(interaction, action_type, value) [Slash - Admin]
 # - award(interaction, member, group_num, amount) [Slash - Admin]
 # - remove(interaction, member, group_num, amount) [Slash - Admin]
 # - leaderboard(interaction, group_num) [Slash - Buggy/Admin]
@@ -188,7 +189,8 @@ class Lead(commands.Cog):
         else:
             top_users = cache_entry['top_users']
 
-        embed = discord.Embed(title=f"🏆 {group_name} Leaderboard", color=discord.Color.gold())
+        # Updated Color to #ff90aa
+        embed = discord.Embed(title=f"🏆 {group_name} Leaderboard", color=discord.Color(0xff90aa))
         
         desc = ""
         if not top_users:
@@ -460,6 +462,29 @@ class Lead(commands.Cog):
             config["groups"][group_key]["tracked_ids"].remove(channel.id)
             await self.save_config(interaction.guild_id, config)
             await interaction.response.send_message(f"✅ Stopped tracking **{channel.name}** for Group {group_num}.", ephemeral=True)
+
+    # --- SET POINTS COMMAND ---
+
+    @app_commands.command(name="setpoints", description="Configure point values for actions.")
+    @app_commands.describe(
+        action_type="The action to configure",
+        value="The new point value"
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def setpoints(self, interaction: discord.Interaction, 
+                        action_type: Literal["message", "attachment", "voice_minute", "reaction_add", "reaction_receive"],
+                        value: int):
+        """Configure point values for specific actions."""
+        config = await self.get_config(interaction.guild_id)
+        
+        # Ensure point_values dict exists (migration safety)
+        if "point_values" not in config:
+            config["point_values"] = self.DEFAULT_POINT_VALUES.copy()
+            
+        config["point_values"][action_type] = value
+        await self.save_config(interaction.guild_id, config)
+        
+        await interaction.response.send_message(f"✅ Points for **{action_type}** set to **{value}**.", ephemeral=True)
 
     # --- TOP LEVEL ADMIN COMMANDS (AWARD / REMOVE) ---
 
