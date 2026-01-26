@@ -516,9 +516,13 @@ class Lead(commands.Cog):
         embed = await self.create_leaderboard_embed(interaction.guild, group_key, config["groups"][group_key])
         
         # If admin runs it, update the "pinned" message tracking
-        if interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message(embed=embed)
-            msg = await interaction.original_response()
+        if interaction.user.guild_permissions.administrator or interaction.user.id == BUGGY_ID:
+            # Acknowledge ephemerally to hide the "Used /leaderboard" text
+            await interaction.response.send_message("✅ Leaderboard updated.", ephemeral=True)
+            
+            # Send separate message into the channel
+            msg = await interaction.channel.send(embed=embed)
+            
             config["groups"][group_key]["last_lb_msg"] = {
                 "channel_id": interaction.channel_id,
                 "message_id": msg.id
