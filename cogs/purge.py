@@ -20,6 +20,7 @@ from typing import Literal
 # - save_pin_settings(settings)
 # - on_message(message)
 # - purge(interaction, target, amount, user, scope_id) [Slash]
+# - purge_till_here(interaction, message) [Context Menu]
 # - schedulepurge(interaction, action, keep_media, keep_links) [Slash]
 # - pinpurge(interaction, enabled) [Slash]
 # setup(bot)
@@ -205,6 +206,34 @@ class Purge(commands.Cog):
                 except Exception as e: print(f"Failed to purge in {channel.name}: {e}")
 
             await interaction.followup.send(f"✅ Purged **{count_deleted}** messages from {user.mention}.", ephemeral=True)
+
+    # --- CONTEXT MENU: PURGE TILL HERE ---
+
+    @app_commands.context_menu(name="Purge till here")
+    @app_commands.default_permissions(administrator=True)
+    async def purge_till_here(self, interaction: discord.Interaction, message: discord.Message):
+        """Context menu to purge messages newer than the selected one."""
+        # Permission Check (Self)
+        if not interaction.channel.permissions_for(interaction.guild.me).manage_messages:
+            return await interaction.response.send_message("❌ I need `Manage Messages` permission to do this.", ephemeral=True)
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            # Purge everything after (newer than) the selected message
+            # 'after' is exclusive, so it keeps the 'message'
+            deleted = await interaction.channel.purge(limit=None, after=message)
+            
+            # Delete the message itself to be inclusive
+            try:
+                await message.delete()
+                count = len(deleted) + 1
+            except (discord.NotFound, discord.Forbidden):
+                count = len(deleted) # Already gone or can't delete
+                
+            await interaction.followup.send(f"✅ Purged **{count}** messages down to the selected message.", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Failed to purge: {e}", ephemeral=True)
 
     # --- SLASH COMMAND: SCHEDULE PURGE (4am Task) ---
 
