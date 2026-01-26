@@ -4,6 +4,7 @@ from discord import app_commands
 import asyncio
 import datetime
 from typing import Literal
+import secrets
 
 # Function/Class List:
 # class BotherButton(discord.ui.Button)
@@ -20,6 +21,8 @@ from typing import Literal
 # - get_dashboards()
 # - save_dashboards(dashboards)
 # - create_dashboard_embed(guild, title)
+# - repost_dashboard(channel, dashboard_data)
+# - on_message(message)
 # - bb(interaction, action, label, key, ping_text, text) [Slash Command]
 # - bbdashboard(interaction) [Slash Command]
 # setup(bot)
@@ -92,16 +95,23 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
     def get_config(self, guild_id):
         """Returns the full config dict for a guild."""
         collection = self.bot.db.get_collection("bb_options")
-        # Structure: [{"guild_id": 123, "options": [...], "title": "..."}]
+        # Structure: [{"guild_id": 123, "options": [...], "title": "...", "hash": "..."}]
         doc = next((d for d in collection if d['guild_id'] == guild_id), None)
         
         # Default structure
         if not doc:
-            doc = {"guild_id": guild_id, "options": [], "title": "🔔 Bother Buggy"}
+            doc = {
+                "guild_id": guild_id, 
+                "options": [], 
+                "title": "🔔 Bother Buggy",
+                "hash": secrets.token_hex(16)
+            }
         
-        # Ensure title exists (migration safe)
+        # Ensure fields exist (migration safe)
         if "title" not in doc:
             doc["title"] = "🔔 Bother Buggy"
+        if "hash" not in doc:
+            doc["hash"] = secrets.token_hex(16)
             
         return doc
 
@@ -128,6 +138,90 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
             color=discord.Color.gold()
         )
         return embed
+
+    # --- STICKY / REPOST LOGIC ---
+
+    async def repost_dashboard(self, channel, dashboard_data):
+        """Deletes the old dashboard and posts a new one at the bottom."""
+        # 1. Delete old message
+        try:
+            if dashboard_data['message_id']:
+                old_msg = await channel.fetch_message(dashboard_data['message_id'])
+                await old_msg.delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass # Message might already be gone
+
+        # 2. Prepare new message
+        config = self.get_config(channel.guild.id)
+        if not config['options']: return # Should have options if it was spawned
+        
+        embed = self.create_dashboard_embed(channel.guild, config['title'])
+        view = BotherView(self.bot, config['options'], channel.guild.id)
+        
+        # 3. Send new message
+        try:
+            new_msg = await channel.send(embed=embed, view=view)
+            
+            # 4. Update DB
+            dashboards = self.get_dashboards()
+            # Update the specific entry
+            found = False
+            for d in dashboards:
+                if d['guild_id'] == channel.guild.id:
+                    d['message_id'] = new_msg.id
+                    d['channel_id'] = channel.id # Ensure channel matches current
+                    found = True
+                    break
+            
+            if not found:
+                 # Should have been added by caller, but safety net
+                 dashboards.append({
+                     "guild_id": channel.guild.id,
+                     "channel_id": channel.id,
+                     "message_id": new_msg.id
+                 })
+
+            self.save_dashboards(dashboards)
+        except Exception as e:
+            print(f"Failed to repost Bother Buggy dashboard: {e}")
+
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        """Checks for the specific sticky HASH to trigger a dashboard repost."""
+        # Note: We do NOT check for bot authors here, because the sticky bot is likely a bot.
+        if not message.guild: return
+        
+        config = self.get_config(message.guild.id)
+        target_hash = config.get('hash')
+        
+        if not target_hash: return
+
+        # Check if the message IS the hash
+        if message.content.strip() == target_hash:
+            # 1. Delete the hash trigger immediately
+            try:
+                await message.delete()
+            except (discord.Forbidden, discord.NotFound):
+                pass
+            
+            # 2. Find existing dashboard data to manage the repost
+            dashboards = self.get_dashboards()
+            dashboard = next((d for d in dashboards if d['guild_id'] == message.guild.id), None)
+            
+            if not dashboard:
+                # If we've never spawned it before but the hash matches, create a record
+                dashboard = {
+                    "guild_id": message.guild.id,
+                    "channel_id": message.channel.id,
+                    "message_id": 0
+                }
+                dashboards.append(dashboard)
+                self.save_dashboards(dashboards)
+            
+            # 3. Trigger the repost logic (which deletes old -> posts new)
+            # Update channel_id to where the hash was posted, in case it changed
+            dashboard['channel_id'] = message.channel.id 
+            await self.repost_dashboard(message.channel, dashboard)
 
     # --- SLASH COMMANDS ---
 
@@ -190,7 +284,7 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
             if not options:
                 return await interaction.response.send_message("📝 You haven't added any options yet, buggy!", ephemeral=True)
             
-            content = f"**Title:** {config['title']}\n**📋 Options:**\n"
+            content = f"**Title:** {config['title']}\n**Sticky Hash:** `{config['hash']}`\n**📋 Options:**\n"
             for o in options:
                 content += f"• `{o['key']}`: **{o['label']}** (Ping: {o['ping_text']})\n"
             await interaction.response.send_message(content, ephemeral=True)
@@ -208,17 +302,31 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
     @app_commands.default_permissions(administrator=True)
     async def bbdashboard(self, interaction: discord.Interaction):
         config = self.get_config(interaction.guild_id)
+        
+        # Ensure hash is saved/generated
+        if 'hash' not in config:
+            config['hash'] = secrets.token_hex(16)
+            self.save_config(interaction.guild_id, config)
+            
         if not config['options']:
             return await interaction.response.send_message("❌ You need to add some options first via `/bb action:Add`!", ephemeral=True)
 
         embed = self.create_dashboard_embed(interaction.guild, config['title'])
         view = BotherView(self.bot, config['options'], interaction.guild_id)
         
-        # Send the dashboard as a regular message so everyone can see/use it
-        msg = await interaction.channel.send(embed=embed, view=view)
+        # 1. Send Ephemeral Response with the Hash
+        # This allows the user to copy the hash for their sticky bot
+        await interaction.response.send_message(
+            f"✅ **Dashboard Spawned!**\n\n"
+            f"👇 **Sticky Bot Configuration** 👇\n"
+            f"Copy this hash and set it up in your sticky message bot:\n"
+            f"```\n{config['hash']}\n```\n"
+            f"When your sticky bot posts this exact code, I will automatically delete it and repost the dashboard in its place!",
+            ephemeral=True
+        )
         
-        # Confirm to the admin
-        await interaction.response.send_message("✅ Dashboard spawned! I've recorded its location for persistence.", ephemeral=True)
+        # 2. Send the dashboard message initially
+        msg = await interaction.channel.send(embed=embed, view=view)
 
         dashboards = self.get_dashboards()
         dashboards = [d for d in dashboards if d['guild_id'] != interaction.guild_id]
