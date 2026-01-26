@@ -2,6 +2,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import asyncio
+from typing import Literal
 
 # Function/Class List:
 # class Tickets(commands.Cog)
@@ -11,11 +12,7 @@ import asyncio
 # - find_ticket_by_user_and_role(user_id, role_id)
 # - save_active_ticket(data)
 # - delete_active_ticket(channel_id)
-# - ticket (Group) [Slash]
-#   - add(interaction, role, ticket_name, prompt, category, admin, message_id, emoji, access, demessage_id)
-#   - edit(interaction, role, ticket_name, prompt, category, admin, message_id, emoji, access, demessage_id)
-#   - remove(interaction, role)
-#   - list(interaction)
+# - ticket(interaction, action, role, ticket_name, prompt, category, admin, message_id, emoji, access, demessage_id) [Slash]
 # - close(interaction) [Slash - Top Level]
 # - accept(interaction) [Slash - Top Level]
 # - on_member_update(before, after)
@@ -69,11 +66,10 @@ class Tickets(commands.Cog):
 
     # --- SLASH COMMANDS ---
     
-    ticket = app_commands.Group(name="ticket", description="Manage the ticket system", default_permissions=discord.Permissions(administrator=True))
-
-    @ticket.command(name="add", description="Create a new ticket setup linked to a role.")
+    @app_commands.command(name="ticket", description="Manage the ticket system.")
     @app_commands.describe(
-        role="The role that triggers the ticket creation",
+        action="What would you like to do?",
+        role="The role for the setup (Required for add/edit/remove)",
         ticket_name="Name of the channel (use {user})",
         prompt="Message sent in ticket (use {user}, {admin}, \\n for line)",
         category="Optional: Category to create tickets in",
@@ -83,10 +79,12 @@ class Tickets(commands.Cog):
         access="Optional: Role to give when ticket is accepted",
         demessage_id="Optional: Message ID to remove access role on ANY reaction"
     )
-    async def ticket_add(self, interaction: discord.Interaction, 
-                  role: discord.Role, 
-                  ticket_name: str, 
-                  prompt: str,
+    @app_commands.default_permissions(administrator=True)
+    async def ticket(self, interaction: discord.Interaction, 
+                  action: Literal["add", "edit", "remove", "list"],
+                  role: discord.Role = None, 
+                  ticket_name: str = None, 
+                  prompt: str = None,
                   category: discord.CategoryChannel = None,
                   admin: discord.Role = None, 
                   message_id: str = None, 
@@ -94,109 +92,91 @@ class Tickets(commands.Cog):
                   access: discord.Role = None,
                   demessage_id: str = None):
         
-        # Validation: message_id and emoji must appear together or not at all (Gate)
-        if (message_id and not emoji) or (emoji and not message_id):
-            return await interaction.response.send_message("❌ Error: `message_id` and `emoji` (Gate) must be provided together or not at all.", ephemeral=True)
+        # --- LIST ---
+        if action == "list":
+            setups = self.bot.db.get_collection("ticket_setups")
+            current_guild_roles = {r.id for r in interaction.guild.roles}
+            filtered_setups = [s for s in setups if s['role_id'] in current_guild_roles]
 
-        existing = self.get_setup(role.id)
-        if existing:
-            return await interaction.response.send_message(f"❌ Error: A setup for {role.mention} already exists. Use `/ticket edit` instead.", ephemeral=True)
+            if not filtered_setups:
+                return await interaction.response.send_message("📝 No ticket setups found for this server.", ephemeral=True)
+            
+            text = "**🎫 Ticket Setups:**\n"
+            for s in filtered_setups:
+                role_ping = f"<@&{s['role_id']}>"
+                admin_ping = f"<@&{s['admin_role_id']}>" if s['admin_role_id'] else "None"
+                cat_ping = f"<#{s.get('category_id')}>" if s.get('category_id') else "None"
+                gate = "Yes" if s.get('gate_message_id') else "No"
+                demessage = "Yes" if s.get('demessage_id') else "No"
+                text += f"• **Role:** {role_ping} | **buggy:** {admin_ping} | **Cat:** {cat_ping} | **Gate:** {gate} | **DeMsg:** {demessage}\n"
+            
+            return await interaction.response.send_message(text, ephemeral=True)
 
-        new_setup = {
-            "guild_id": interaction.guild.id, 
-            "role_id": role.id,
-            "ticket_name": ticket_name,
-            "prompt": prompt,
-            "category_id": category.id if category else None,
-            "admin_role_id": admin.id if admin else None,
-            "gate_message_id": int(message_id) if message_id else None,
-            "gate_emoji": emoji,
-            "access_role_id": access.id if access else None,
-            "demessage_id": int(demessage_id) if demessage_id else None
-        }
+        # For Add/Edit/Remove, Role is required
+        if not role:
+            return await interaction.response.send_message("❌ Error: You must specify a `role` for this action.", ephemeral=True)
 
-        self.bot.db.update_doc("ticket_setups", "role_id", role.id, new_setup)
-        await interaction.response.send_message(f"✅ Ticket setup added! Assigning {role.mention} will now trigger a ticket.", ephemeral=True)
+        # --- ADD ---
+        if action == "add":
+            if not ticket_name or not prompt:
+                return await interaction.response.send_message("❌ Error: `ticket_name` and `prompt` are required for adding a setup.", ephemeral=True)
 
-    @ticket.command(name="edit", description="Edit an existing ticket setup.")
-    @app_commands.describe(
-        role="The role to edit setup for",
-        ticket_name="Name of the channel (use {user})",
-        prompt="Message (use {user}, {admin}, \\n for line)",
-        category="Category to create tickets in",
-        admin="buggy role for this ticket",
-        message_id="Gate Message ID",
-        emoji="Gate Emoji",
-        access="Role to give on accept",
-        demessage_id="Message ID for removal"
-    )
-    async def ticket_edit(self, interaction: discord.Interaction, 
-                   role: discord.Role, 
-                   ticket_name: str = None, 
-                   prompt: str = None, 
-                   category: discord.CategoryChannel = None, 
-                   admin: discord.Role = None, 
-                   message_id: str = None, 
-                   emoji: str = None, 
-                   access: discord.Role = None,
-                   demessage_id: str = None):
-        
-        setup = self.get_setup(role.id)
-        if not setup:
-            return await interaction.response.send_message(f"❌ Error: No setup found for {role.mention}.", ephemeral=True)
+            if (message_id and not emoji) or (emoji and not message_id):
+                return await interaction.response.send_message("❌ Error: `message_id` and `emoji` (Gate) must be provided together or not at all.", ephemeral=True)
 
-        # Update fields if provided
-        if ticket_name: setup['ticket_name'] = ticket_name
-        if prompt: setup['prompt'] = prompt
-        if category: setup['category_id'] = category.id
-        if admin: setup['admin_role_id'] = admin.id
-        
-        # Handle the gate logic update
-        if message_id is not None or emoji is not None:
-             if (message_id and not emoji) or (emoji and not message_id):
-                 return await interaction.response.send_message("❌ Error: To update the gate, provide both `message_id` and `emoji`.", ephemeral=True)
-             setup['gate_message_id'] = int(message_id)
-             setup['gate_emoji'] = emoji
-        
-        # Handle the demessage logic update
-        if demessage_id is not None:
-             setup['demessage_id'] = int(demessage_id)
-        
-        if access: setup['access_role_id'] = access.id
+            existing = self.get_setup(role.id)
+            if existing:
+                return await interaction.response.send_message(f"❌ Error: A setup for {role.mention} already exists. Use `action: edit` instead.", ephemeral=True)
 
-        self.bot.db.update_doc("ticket_setups", "role_id", role.id, setup)
-        await interaction.response.send_message(f"✅ Updated ticket setup for {role.mention}.", ephemeral=True)
+            new_setup = {
+                "guild_id": interaction.guild.id, 
+                "role_id": role.id,
+                "ticket_name": ticket_name,
+                "prompt": prompt,
+                "category_id": category.id if category else None,
+                "admin_role_id": admin.id if admin else None,
+                "gate_message_id": int(message_id) if message_id else None,
+                "gate_emoji": emoji,
+                "access_role_id": access.id if access else None,
+                "demessage_id": int(demessage_id) if demessage_id else None
+            }
 
-    @ticket.command(name="remove", description="Remove a ticket setup.")
-    async def ticket_remove(self, interaction: discord.Interaction, role: discord.Role):
-        setup = self.get_setup(role.id)
-        if not setup:
-            return await interaction.response.send_message(f"❌ Error: No setup found for {role.mention}.", ephemeral=True)
-        
-        self.bot.db.delete_doc("ticket_setups", "role_id", role.id)
-        await interaction.response.send_message(f"✅ Removed ticket setup for {role.mention}.", ephemeral=True)
+            self.bot.db.update_doc("ticket_setups", "role_id", role.id, new_setup)
+            return await interaction.response.send_message(f"✅ Ticket setup added! Assigning {role.mention} will now trigger a ticket.", ephemeral=True)
 
-    @ticket.command(name="list", description="List all ticket setups.")
-    async def ticket_list(self, interaction: discord.Interaction):
-        setups = self.bot.db.get_collection("ticket_setups")
-        
-        # Filter for current guild
-        current_guild_roles = {r.id for r in interaction.guild.roles}
-        filtered_setups = [s for s in setups if s['role_id'] in current_guild_roles]
+        # --- EDIT ---
+        elif action == "edit":
+            setup = self.get_setup(role.id)
+            if not setup:
+                return await interaction.response.send_message(f"❌ Error: No setup found for {role.mention}.", ephemeral=True)
 
-        if not filtered_setups:
-            return await interaction.response.send_message("📝 No ticket setups found for this server.", ephemeral=True)
-        
-        text = "**🎫 Ticket Setups:**\n"
-        for s in filtered_setups:
-            role_ping = f"<@&{s['role_id']}>"
-            admin_ping = f"<@&{s['admin_role_id']}>" if s['admin_role_id'] else "None"
-            cat_ping = f"<#{s.get('category_id')}>" if s.get('category_id') else "None"
-            gate = "Yes" if s.get('gate_message_id') else "No"
-            demessage = "Yes" if s.get('demessage_id') else "No"
-            text += f"• **Role:** {role_ping} | **buggy:** {admin_ping} | **Cat:** {cat_ping} | **Gate:** {gate} | **DeMsg:** {demessage}\n"
-        
-        await interaction.response.send_message(text, ephemeral=True)
+            if ticket_name: setup['ticket_name'] = ticket_name
+            if prompt: setup['prompt'] = prompt
+            if category: setup['category_id'] = category.id
+            if admin: setup['admin_role_id'] = admin.id
+            
+            if message_id is not None or emoji is not None:
+                if (message_id and not emoji) or (emoji and not message_id):
+                    return await interaction.response.send_message("❌ Error: To update the gate, provide both `message_id` and `emoji`.", ephemeral=True)
+                setup['gate_message_id'] = int(message_id)
+                setup['gate_emoji'] = emoji
+            
+            if demessage_id is not None:
+                setup['demessage_id'] = int(demessage_id)
+            
+            if access: setup['access_role_id'] = access.id
+
+            self.bot.db.update_doc("ticket_setups", "role_id", role.id, setup)
+            return await interaction.response.send_message(f"✅ Updated ticket setup for {role.mention}.", ephemeral=True)
+
+        # --- REMOVE ---
+        elif action == "remove":
+            setup = self.get_setup(role.id)
+            if not setup:
+                return await interaction.response.send_message(f"❌ Error: No setup found for {role.mention}.", ephemeral=True)
+            
+            self.bot.db.delete_doc("ticket_setups", "role_id", role.id)
+            return await interaction.response.send_message(f"✅ Removed ticket setup for {role.mention}.", ephemeral=True)
 
     # --- TOP LEVEL COMMANDS ---
 
