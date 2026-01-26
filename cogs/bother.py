@@ -64,7 +64,7 @@ class BotherView(discord.ui.View):
             custom_id = f"bb_{guild_id}_{opt['key']}"
             self.add_item(BotherButton(label=opt['label'], custom_id=custom_id, ping_text=opt['ping_text']))
 
-class BotherBuggy(commands.Cog):
+class BotherBuggy(commands.Cog, name="Bother Buggy"):
     def __init__(self, bot):
         self.bot = bot
         self.description = "Bother Buggy: A dashboard system for users to send private alerts to buggy."
