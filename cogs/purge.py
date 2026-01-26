@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 import asyncio
 import datetime
+from datetime import timedelta
 import re
 from zoneinfo import ZoneInfo
 from typing import Literal
@@ -19,7 +20,7 @@ from typing import Literal
 # - get_pin_settings()
 # - save_pin_settings(settings)
 # - on_message(message)
-# - purge(interaction, target, amount, user, scope_id) [Slash]
+# - purge(interaction, time, user) [Slash]
 # - purge_till_here(interaction, message) [Context Menu]
 # - schedulepurge(interaction, action, keep_media, keep_links) [Slash]
 # - pinpurge(interaction, enabled) [Slash]
@@ -119,10 +120,38 @@ class Purge(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message):
-        """Handles auto-deletion of 'User pinned a message' system messages."""
+        """Handles manual 'reply purge' and 'User pinned a message' deletion."""
         if message.author.bot:
             return
         
+        # 1. Manual "Purge Till Here" via Reply
+        # If user replies to a message and sends "/purge" or "purge" (and has permissions)
+        if message.reference and message.content.lower().strip() in ["/purge", "purge", "/purge till reply"]:
+            if message.channel.permissions_for(message.author).manage_messages:
+                try:
+                    # Fetch the message that was replied to
+                    ref_msg = await message.channel.fetch_message(message.reference.message_id)
+                    
+                    # Delete the command message
+                    await message.delete()
+                    
+                    # Purge everything after that reference
+                    deleted = await message.channel.purge(limit=None, after=ref_msg)
+                    
+                    # Also try to delete the reference message itself (inclusive purge)
+                    try:
+                        await ref_msg.delete()
+                        count = len(deleted) + 1
+                    except:
+                        count = len(deleted)
+                        
+                    # Feedback (self-delete after 5s)
+                    await message.channel.send(f"✅ Purged **{count}** messages.", delete_after=5)
+                except Exception as e:
+                    print(f"Failed to execute reply purge: {e}")
+            return
+
+        # 2. Pin Announcement Deletion
         if message.type == discord.MessageType.pins_add:
             settings = self.get_pin_settings()
             guild_setting = next((s for s in settings if s['guild_id'] == message.guild.id), None)
@@ -133,79 +162,51 @@ class Purge(commands.Cog):
                 except:
                     pass
 
-    # --- SLASH COMMAND: PURGE (Immediate Actions) ---
+    # --- SLASH COMMAND: PURGE (Time Based) ---
     
-    @app_commands.command(name="purge", description="Purge messages or messages from a user.")
+    @app_commands.command(name="purge", description="Purge messages based on time.")
     @app_commands.describe(
-        target="What action to take?",
-        amount="Number of messages (Required)",
-        user="The user to purge (Required if target is User)",
-        scope_id="Channel/Category ID (Optional for User purge)"
+        time="How far back to purge?",
+        user="Optional: Only purge messages from this user"
     )
+    @app_commands.choices(time=[
+        app_commands.Choice(name="Past Hour", value="hour"),
+        app_commands.Choice(name="Today (Past 24h)", value="today")
+    ])
     @app_commands.default_permissions(administrator=True)
     async def purge(self, interaction: discord.Interaction, 
-                    target: Literal["Messages", "User"],
-                    amount: str,
-                    user: discord.User = None,
-                    scope_id: str = None):
-        """Purge messages or messages from a user."""
+                    time: app_commands.Choice[str],
+                    user: discord.User = None):
+        """Purge messages based on time."""
         
-        # --- 1. MESSAGES (Bulk Delete) ---
-        if target == "Messages":
-            try:
-                limit = int(amount)
-            except ValueError:
-                return await interaction.response.send_message("❌ Error: `amount` must be a number.", ephemeral=True)
+        # Calculate time limit
+        now = datetime.datetime.now(datetime.timezone.utc)
+        
+        if time.value == "hour":
+            cutoff = now - timedelta(hours=1)
+        elif time.value == "today":
+            cutoff = now - timedelta(hours=24)
+        else:
+            cutoff = now - timedelta(hours=1) # Default
             
-            await interaction.response.defer(ephemeral=True)
-            try:
-                deleted = await interaction.channel.purge(limit=limit)
-                await interaction.followup.send(f"✅ Purged **{len(deleted)}** messages.", ephemeral=True)
-            except Exception as e:
-                await interaction.followup.send(f"❌ Failed to purge: {e}", ephemeral=True)
-
-        # --- 2. USER (Specific User) ---
-        elif target == "User":
-            if not user: return await interaction.response.send_message("❌ Error: `user` is required for User purge.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        
+        def check(m):
+            # 1. Time Check (Too old? Keep it. We only delete NEWER than cutoff)
+            # purge(after=cutoff) handles the main logic, but 'check' is for extra filters
             
-            await interaction.response.defer(ephemeral=True)
-            
-            limit = None
-            if amount.lower() != "all":
-                try: limit = int(amount)
-                except ValueError: return await interaction.followup.send("❌ Amount must be a number or 'all'.", ephemeral=True)
+            # 2. User Check
+            if user and m.author.id != user.id:
+                return False
+                
+            return True
 
-            channels_to_purge = []
-            if not scope_id:
-                channels_to_purge.append(interaction.channel)
-            else:
-                try:
-                    s_id = int(scope_id)
-                    if s_id == interaction.guild_id:
-                        channels_to_purge = interaction.guild.text_channels
-                    else:
-                        chan = interaction.guild.get_channel(s_id)
-                        if isinstance(chan, discord.CategoryChannel):
-                            channels_to_purge = chan.text_channels
-                        elif isinstance(chan, discord.TextChannel):
-                            channels_to_purge.append(chan)
-                        else:
-                            return await interaction.followup.send("❌ Invalid Scope ID.", ephemeral=True)
-                except ValueError: return await interaction.followup.send("❌ Scope ID must be a number.", ephemeral=True)
-
-            count_deleted = 0
-            def check(m): return m.author.id == user.id
-
-            for channel in channels_to_purge:
-                try:
-                    deleted = await channel.purge(limit=limit, check=check)
-                    count_deleted += len(deleted)
-                    if limit is not None:
-                        limit -= len(deleted)
-                        if limit <= 0: break
-                except Exception as e: print(f"Failed to purge in {channel.name}: {e}")
-
-            await interaction.followup.send(f"✅ Purged **{count_deleted}** messages from {user.mention}.", ephemeral=True)
+        try:
+            # Note: 'after' argument in purge() means "Delete messages that are NEWER than this date"
+            deleted = await interaction.channel.purge(limit=None, after=cutoff, check=check)
+            await interaction.followup.send(f"✅ Purged **{len(deleted)}** messages from the **{time.name}**.", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Failed to purge: {e}", ephemeral=True)
 
     # --- CONTEXT MENU: PURGE TILL HERE ---
 
@@ -213,23 +214,18 @@ class Purge(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     async def purge_till_here(self, interaction: discord.Interaction, message: discord.Message):
         """Context menu to purge messages newer than the selected one."""
-        # Permission Check (Self)
         if not interaction.channel.permissions_for(interaction.guild.me).manage_messages:
             return await interaction.response.send_message("❌ I need `Manage Messages` permission to do this.", ephemeral=True)
         
         await interaction.response.defer(ephemeral=True)
         
         try:
-            # Purge everything after (newer than) the selected message
-            # 'after' is exclusive, so it keeps the 'message'
             deleted = await interaction.channel.purge(limit=None, after=message)
-            
-            # Delete the message itself to be inclusive
             try:
                 await message.delete()
                 count = len(deleted) + 1
-            except (discord.NotFound, discord.Forbidden):
-                count = len(deleted) # Already gone or can't delete
+            except:
+                count = len(deleted)
                 
             await interaction.followup.send(f"✅ Purged **{count}** messages down to the selected message.", ephemeral=True)
         except Exception as e:
