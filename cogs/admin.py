@@ -6,6 +6,7 @@ import datetime
 import json
 import os
 import re
+from typing import Literal, Optional
 
 # Function/Class List:
 # class Admin(commands.Cog)
@@ -39,14 +40,10 @@ import re
 # - stickylist(interaction) [Slash]
 # - stickytime(interaction, timing, number, unit) [Slash]
 # - setlogchannel(interaction, channel) [Slash]
-# - dmset(interaction) [Slash]
-# - dmunset(interaction) [Slash]
-# - dmreq (Group) [Slash]
-#   - roles(interaction, role1, role2, role3)
-#   - reacts(interaction, accept, deny)
-#   - message(interaction, index, message)
-#   - listmessages(interaction)
-#   - list(interaction)
+# - dmconfig(interaction, action) [Slash]
+# - dmroles(interaction, role1, role2, role3) [Slash]
+# - dmreacts(interaction, accept, deny) [Slash]
+# - dmmessage(interaction, action, index, message) [Slash]
 # - vote(interaction, member) [Slash - Public]
 # - voteset(interaction, channel) [Slash]
 # - voterole(interaction, role) [Slash]
@@ -611,52 +608,72 @@ class Admin(commands.Cog):
 
     # --- DM REQUEST COMMANDS (Slash) ---
     
-    @app_commands.command(name="dmset", description="Set THIS channel as a DM Request channel.")
+    @app_commands.command(name="dmconfig", description="Manage DM Request channels and settings.")
+    @app_commands.describe(action="Add/Remove THIS channel, or List settings.")
     @app_commands.default_permissions(administrator=True)
-    async def dmset(self, interaction: discord.Interaction):
-        """Set THIS channel as a DM Request channel."""
+    async def dmconfig(self, interaction: discord.Interaction, action: Literal["Add Channel", "Remove Channel", "List Settings"]):
+        """Manage DM Request channels and settings."""
         settings = self.get_dm_settings(interaction.guild_id)
         
-        if interaction.channel_id in settings['channels']:
-            return await interaction.response.send_message("⚠️ This channel is already set for DM Requests.", ephemeral=True)
-        
-        settings['channels'].append(interaction.channel_id)
-        self.save_dm_settings(interaction.guild_id, settings)
-        await interaction.response.send_message(f"✅ <#{interaction.channel_id}> is now a DM Request channel.", ephemeral=True)
+        # --- ADD ---
+        if action == "Add Channel":
+            if interaction.channel_id in settings['channels']:
+                return await interaction.response.send_message("⚠️ This channel is already set for DM Requests.", ephemeral=True)
+            
+            settings['channels'].append(interaction.channel_id)
+            self.save_dm_settings(interaction.guild_id, settings)
+            await interaction.response.send_message(f"✅ <#{interaction.channel_id}> is now a DM Request channel.", ephemeral=True)
+            
+        # --- REMOVE ---
+        elif action == "Remove Channel":
+            if interaction.channel_id not in settings['channels']:
+                return await interaction.response.send_message("⚠️ This channel is not a DM Request channel.", ephemeral=True)
+            
+            settings['channels'].remove(interaction.channel_id)
+            self.save_dm_settings(interaction.guild_id, settings)
+            await interaction.response.send_message(f"✅ Removed <#{interaction.channel_id}> from DM Request channels.", ephemeral=True)
+            
+        # --- LIST ---
+        elif action == "List Settings":
+            channels = settings.get('channels', [])
+            chan_text = " ".join([f"<#{c}>" for c in channels]) if channels else "None"
+            
+            roles = settings.get('roles', [0, 0, 0])
+            reacts = settings.get('reacts', [])
+            
+            text = "**📨 DM Request Settings**\n"
+            text += f"**Active Channels:** {chan_text}\n"
+            text += f"**Roles:** <@&{roles[0]}>, <@&{roles[1]}>, <@&{roles[2]}>\n"
+            text += f"**Reacts:** {reacts[0]} {reacts[1]}\n"
+            
+            await interaction.response.send_message(text, ephemeral=True)
 
-    @app_commands.command(name="dmunset", description="Remove THIS channel from DM Request channels.")
-    @app_commands.default_permissions(administrator=True)
-    async def dmunset(self, interaction: discord.Interaction):
-        """Remove THIS channel from DM Request channels."""
-        settings = self.get_dm_settings(interaction.guild_id)
-        
-        if interaction.channel_id not in settings['channels']:
-            return await interaction.response.send_message("⚠️ This channel is not a DM Request channel.", ephemeral=True)
-        
-        settings['channels'].remove(interaction.channel_id)
-        self.save_dm_settings(interaction.guild_id, settings)
-        await interaction.response.send_message(f"✅ Removed <#{interaction.channel_id}> from DM Request channels.", ephemeral=True)
-
-    dmreq = app_commands.Group(name="dmreq", description="Manage DM Request settings", default_permissions=discord.Permissions(administrator=True))
-
-    @dmreq.command(name="roles", description="Set the 3 roles for DM request logic.")
+    @app_commands.command(name="dmroles", description="Set the 3 roles for DM request logic.")
     @app_commands.describe(role1="Role 1 (Opens Reacts)", role2="Role 2 (Sends Msg 3)", role3="Role 3 (Sends Msg 4)")
-    async def dmreq_roles(self, interaction: discord.Interaction, role1: discord.Role, role2: discord.Role, role3: discord.Role):
+    @app_commands.default_permissions(administrator=True)
+    async def dmroles(self, interaction: discord.Interaction, role1: discord.Role, role2: discord.Role, role3: discord.Role):
+        """Set the 3 roles for DM request logic."""
         settings = self.get_dm_settings(interaction.guild_id)
         settings['roles'] = [role1.id, role2.id, role3.id]
         self.save_dm_settings(interaction.guild_id, settings)
         await interaction.response.send_message(f"✅ **DM Roles Set:**\n1. {role1.mention}\n2. {role2.mention}\n3. {role3.mention}", ephemeral=True)
 
-    @dmreq.command(name="reacts", description="Set the Accept/Deny emojis.")
+    @app_commands.command(name="dmreacts", description="Set the Accept/Deny emojis.")
     @app_commands.describe(accept="Accept Emoji", deny="Deny Emoji")
-    async def dmreq_reacts(self, interaction: discord.Interaction, accept: str, deny: str):
+    @app_commands.default_permissions(administrator=True)
+    async def dmreacts(self, interaction: discord.Interaction, accept: str, deny: str):
+        """Set the Accept/Deny emojis."""
         settings = self.get_dm_settings(interaction.guild_id)
         settings['reacts'] = [accept, deny]
         self.save_dm_settings(interaction.guild_id, settings)
         await interaction.response.send_message(f"✅ **DM Reacts Set:** {accept} (Accept) and {deny} (Deny)", ephemeral=True)
 
-    @dmreq.command(name="message", description="Update a specific DM Request system message.")
-    @app_commands.describe(index="Message Index (0-5)", message="The content of the message")
+    @app_commands.command(name="dmmessage", description="Manage DM Request system messages.")
+    @app_commands.describe(
+        action="List all or Edit one",
+        index="Message Index (0-5) (Required for Edit)",
+        message="The new content (Required for Edit)"
+    )
     @app_commands.choices(index=[
         app_commands.Choice(name="0: Bad Format Warning", value="0"),
         app_commands.Choice(name="1: Request Accepted", value="1"),
@@ -665,38 +682,31 @@ class Admin(commands.Cog):
         app_commands.Choice(name="4: Role 3 Notification", value="4"),
         app_commands.Choice(name="5: No Role Notification", value="5")
     ])
-    async def dmreq_message(self, interaction: discord.Interaction, index: app_commands.Choice[str], message: str):
+    @app_commands.default_permissions(administrator=True)
+    async def dmmessage(self, interaction: discord.Interaction, 
+                        action: Literal["List", "Edit"],
+                        index: Optional[app_commands.Choice[str]] = None, 
+                        message: Optional[str] = None):
+        """Manage DM Request system messages."""
         settings = self.get_dm_settings(interaction.guild_id)
-        settings['messages'][index.value] = message
-        self.save_dm_settings(interaction.guild_id, settings)
-        await interaction.response.send_message(f"✅ **Message {index.value} Updated.**\nPreview: `{message}`", ephemeral=True)
 
-    @dmreq.command(name="listmessages", description="List current DM messages.")
-    async def dmreq_listmessages(self, interaction: discord.Interaction):
-        settings = self.get_dm_settings(interaction.guild_id)
-        text = "**📨 Current DM Messages:**\n"
-        for i in range(6):
-            key = str(i)
-            msg = settings['messages'].get(key, "Not set")
-            text += f"**[{key}]:** {msg}\n"
-        await interaction.response.send_message(text, ephemeral=True)
+        # --- LIST ---
+        if action == "List":
+            text = "**📨 Current DM Messages:**\n"
+            for i in range(6):
+                key = str(i)
+                msg = settings['messages'].get(key, "Not set")
+                text += f"**[{key}]:** {msg}\n"
+            await interaction.response.send_message(text, ephemeral=True)
 
-    @dmreq.command(name="list", description="List all DM request settings.")
-    async def dmreq_list(self, interaction: discord.Interaction):
-        settings = self.get_dm_settings(interaction.guild_id)
-        
-        channels = settings.get('channels', [])
-        chan_text = " ".join([f"<#{c}>" for c in channels]) if channels else "None"
-        
-        roles = settings.get('roles', [0, 0, 0])
-        reacts = settings.get('reacts', [])
-        
-        text = "**📨 DM Request Settings**\n"
-        text += f"**Active Channels:** {chan_text}\n"
-        text += f"**Roles:** <@&{roles[0]}>, <@&{roles[1]}>, <@&{roles[2]}>\n"
-        text += f"**Reacts:** {reacts[0]} {reacts[1]}\n"
-        
-        await interaction.response.send_message(text, ephemeral=True)
+        # --- EDIT ---
+        elif action == "Edit":
+            if not index or not message:
+                return await interaction.response.send_message("❌ Error: `index` and `message` are required to Edit.", ephemeral=True)
+            
+            settings['messages'][index.value] = message
+            self.save_dm_settings(interaction.guild_id, settings)
+            await interaction.response.send_message(f"✅ **Message {index.value} Updated.**\nPreview: `{message}`", ephemeral=True)
 
     # --- VOTE KICK COMMANDS ---
     
