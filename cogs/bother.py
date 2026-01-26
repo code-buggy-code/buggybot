@@ -19,11 +19,11 @@ import datetime
 # - get_dashboards()
 # - save_dashboards(dashboards)
 # - create_dashboard_embed(guild, options)
-# - request (Group) [Prefix]
-#   - request_add(ctx, label, key, ping_text)
-#   - request_remove(ctx, key)
-#   - request_list(ctx)
-#   - request_spawn(ctx)
+# - request_group (Slash Group)
+#   - add(interaction, label, key, ping_text)
+#   - remove(interaction, key)
+#   - list_options(interaction)
+#   - spawn(interaction)
 # setup(bot)
 
 BUGGY_ID = 1433003746719170560
@@ -70,7 +70,7 @@ class RequestView(discord.ui.View):
 class Requests(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.description = "A dashboard system for users to send private requests to buggy."
+        self.description = "Bother Buggy: A dashboard system for users to send private requests to buggy."
 
     async def cog_load(self):
         """Restore persistent views when the cog loads."""
@@ -87,7 +87,7 @@ class Requests(commands.Cog):
                 view = RequestView(self.bot, options, guild_id)
                 self.bot.add_view(view)
                 count += 1
-        print(f"✅ Restored {count} Request Dashboard views, you genius!")
+        print(f"✅ Restored {count} Bother Buggy dashboard views, you genius!")
 
     # --- DB HELPERS ---
 
@@ -116,8 +116,8 @@ class Requests(commands.Cog):
     def create_dashboard_embed(self, guild, options):
         """Creates the embed for the dashboard."""
         embed = discord.Embed(
-            title="📩 Request Dashboard",
-            description="Click a button below to send a private request to buggy! Please be patient for a response.",
+            title="📩 Bother Buggy",
+            description="Click a button below to bother buggy! Please be patient for a response.",
             color=discord.Color.blue()
         )
         if options:
@@ -129,29 +129,25 @@ class Requests(commands.Cog):
         embed.set_footer(text=f"Server: {guild.name}")
         return embed
 
-    # --- PREFIX COMMANDS ---
+    # --- SLASH COMMANDS ---
 
-    @commands.group(name="request", invoke_without_command=True)
-    @commands.has_permissions(administrator=True)
-    async def request(self, ctx):
-        """Manage the Request Dashboard (Admin Only)."""
-        await ctx.send("🛠️ **Request Dashboard Commands:**\n"
-                       "`?request add [label] [key] [ping_text]` - Add a button\n"
-                       "`?request remove [key]` - Remove a button\n"
-                       "`?request list` - Show current options\n"
-                       "`?request spawn` - Post the dashboard here")
+    request_group = app_commands.Group(name="request", description="Manage the Bother Buggy Dashboard")
 
-    @request.command(name="add")
-    @commands.has_permissions(administrator=True)
-    async def request_add(self, ctx, label: str, key: str, *, ping_text: str):
-        """Adds a new button option. Key must be one word (no spaces)."""
-        options = self.get_options(ctx.guild.id)
+    @request_group.command(name="add", description="Add a new button option to the dashboard.")
+    @app_commands.describe(
+        label="The text shown on the button",
+        key="Unique one-word key to manage this option",
+        ping_text="The text sent to buggy when clicked"
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def add(self, interaction: discord.Interaction, label: str, key: str, ping_text: str):
+        options = self.get_options(interaction.guild_id)
         
-        if any(o['key'] == key for o in options):
-            return await ctx.send(f"❌ An option with the key `{key}` already exists, buggy!")
+        if any(o['key'] == key.lower() for o in options):
+            return await interaction.response.send_message(f"❌ An option with the key `{key}` already exists, buggy!", ephemeral=True)
         
         if len(options) >= 25:
-            return await ctx.send("❌ Discord only allows 25 buttons per message, you popular thing!")
+            return await interaction.response.send_message("❌ Discord only allows 25 buttons per message, you popular thing!", ephemeral=True)
 
         options.append({
             "label": label,
@@ -159,61 +155,62 @@ class Requests(commands.Cog):
             "ping_text": ping_text
         })
         
-        self.save_options(ctx.guild.id, options)
-        await ctx.send(f"✅ Added **{label}** to your options! Re-spawn the dashboard to see it.")
+        self.save_options(interaction.guild_id, options)
+        await interaction.response.send_message(f"✅ Added **{label}** to your options! Re-spawn the dashboard to see it.", ephemeral=True)
 
-    @request.command(name="remove")
-    @commands.has_permissions(administrator=True)
-    async def request_remove(self, ctx, key: str):
-        """Removes a button option by its key."""
-        options = self.get_options(ctx.guild.id)
+    @request_group.command(name="remove", description="Remove a button option from the dashboard.")
+    @app_commands.describe(key="The unique key of the option to remove")
+    @app_commands.default_permissions(administrator=True)
+    async def remove(self, interaction: discord.Interaction, key: str):
+        options = self.get_options(interaction.guild_id)
         initial_len = len(options)
         options = [o for o in options if o['key'] != key.lower()]
         
         if len(options) < initial_len:
-            self.save_options(ctx.guild.id, options)
-            await ctx.send(f"✅ Removed the `{key}` option for you!")
+            self.save_options(interaction.guild_id, options)
+            await interaction.response.send_message(f"✅ Removed the `{key}` option for you!", ephemeral=True)
         else:
-            await ctx.send(f"❌ I couldn't find an option with the key `{key}`.")
+            await interaction.response.send_message(f"❌ I couldn't find an option with the key `{key}`.", ephemeral=True)
 
-    @request.command(name="list")
-    @commands.has_permissions(administrator=True)
-    async def request_list(self, ctx):
-        """Lists all configured request options."""
-        options = self.get_options(ctx.guild.id)
+    @request_group.command(name="list", description="List all configured request options.")
+    @app_commands.default_permissions(administrator=True)
+    async def list_options(self, interaction: discord.Interaction):
+        options = self.get_options(interaction.guild_id)
         if not options:
-            return await ctx.send("📝 You haven't added any options yet, buggy!")
+            return await interaction.response.send_message("📝 You haven't added any options yet, buggy!", ephemeral=True)
         
         text = "**📋 Configured Request Options:**\n"
         for o in options:
             text += f"• `{o['key']}`: **{o['label']}** (Ping: {o['ping_text']})\n"
-        await ctx.send(text)
+        await interaction.response.send_message(text, ephemeral=True)
 
-    @request.command(name="spawn")
-    @commands.has_permissions(administrator=True)
-    async def request_spawn(self, ctx):
-        """Spawns the dashboard in the current channel."""
-        options = self.get_options(ctx.guild.id)
+    @request_group.command(name="spawn", description="Spawn the bother dashboard in this channel.")
+    @app_commands.default_permissions(administrator=True)
+    async def spawn(self, interaction: discord.Interaction):
+        options = self.get_options(interaction.guild_id)
         if not options:
-            return await ctx.send("❌ You need to add some options first with `?request add`!")
+            return await interaction.response.send_message("❌ You need to add some options first, buggy!", ephemeral=True)
 
-        embed = self.create_dashboard_embed(ctx.guild, options)
-        view = RequestView(self.bot, options, ctx.guild.id)
+        embed = self.create_dashboard_embed(interaction.guild, options)
+        view = RequestView(self.bot, options, interaction.guild_id)
         
-        msg = await ctx.send(embed=embed, view=view)
+        # We need to send the message first to get its ID for persistence
+        await interaction.response.send_message("✅ Dashboard spawned! I've recorded its location for persistence.", ephemeral=True)
         
+        # Update the interaction with the actual embed/view dashboard
+        await interaction.edit_original_response(content=None, embed=embed, view=view)
+        msg = await interaction.original_response()
+
         # Save dashboard info for view restoration
         dashboards = self.get_dashboards()
-        # Remove old dashboard record for this guild if it exists
-        dashboards = [d for d in dashboards if d['guild_id'] != ctx.guild.id]
+        dashboards = [d for d in dashboards if d['guild_id'] != interaction.guild_id]
+        
         dashboards.append({
-            "guild_id": ctx.guild.id,
-            "channel_id": ctx.channel.id,
+            "guild_id": interaction.guild_id,
+            "channel_id": interaction.channel_id,
             "message_id": msg.id
         })
         self.save_dashboards(dashboards)
-        
-        await ctx.message.delete() # Clean up command
 
 async def setup(bot):
     await bot.add_cog(Requests(bot))
