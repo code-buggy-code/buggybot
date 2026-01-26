@@ -36,12 +36,15 @@ class BotherButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         """Sends the private message to buggy."""
+        # Defer immediately to "acknowledge" silently so we can delete it later
+        await interaction.response.defer(ephemeral=True)
+
         buggy = interaction.client.get_user(BUGGY_ID)
         if not buggy:
             try:
                 buggy = await interaction.client.fetch_user(BUGGY_ID)
             except:
-                return await interaction.response.send_message("❌ I couldn't find buggy to bother! Is the ID correct?", ephemeral=True)
+                return await interaction.followup.send("❌ I couldn't find buggy to bother! Is the ID correct?", ephemeral=True)
 
         embed = discord.Embed(
             title="🔔 Bother Buggy Alert",
@@ -53,9 +56,10 @@ class BotherButton(discord.ui.Button):
         
         try:
             await buggy.send(embed=embed)
-            await interaction.response.send_message(f"✅ You have successfully bothered buggy about **{self.label}**!", ephemeral=True)
+            # Success! Delete the "Thinking..." state so it appears invisible
+            await interaction.delete_original_response()
         except discord.Forbidden:
-            await interaction.response.send_message("❌ I couldn't DM buggy! Make sure his DMs are open.", ephemeral=True)
+            await interaction.followup.send("❌ I couldn't DM buggy! Make sure his DMs are open.", ephemeral=True)
 
 class BotherView(discord.ui.View):
     def __init__(self, bot, options, guild_id):
