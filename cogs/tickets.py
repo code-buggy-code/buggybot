@@ -12,11 +12,12 @@ import asyncio
 # - save_active_ticket(data)
 # - delete_active_ticket(channel_id)
 # - ticket (Group) [Slash]
-#   - setup(interaction, role, ticket_name, prompt, category, admin, message_id, emoji, access, demessage_id)
+#   - add(interaction, role, ticket_name, prompt, category, admin, message_id, emoji, access, demessage_id)
 #   - edit(interaction, role, ticket_name, prompt, category, admin, message_id, emoji, access, demessage_id)
 #   - remove(interaction, role)
 #   - list(interaction)
-#   - close(interaction, accept)
+# - close(interaction) [Slash - Top Level]
+# - accept(interaction) [Slash - Top Level]
 # - on_member_update(before, after)
 # - create_ticket(member, setup)
 # - on_raw_reaction_add(payload)
@@ -70,7 +71,7 @@ class Tickets(commands.Cog):
     
     ticket = app_commands.Group(name="ticket", description="Manage the ticket system", default_permissions=discord.Permissions(administrator=True))
 
-    @ticket.command(name="setup", description="Create a new ticket setup linked to a role.")
+    @ticket.command(name="add", description="Create a new ticket setup linked to a role.")
     @app_commands.describe(
         role="The role that triggers the ticket creation",
         ticket_name="Name of the channel (use {user})",
@@ -82,7 +83,7 @@ class Tickets(commands.Cog):
         access="Optional: Role to give when ticket is accepted",
         demessage_id="Optional: Message ID to remove access role on ANY reaction"
     )
-    async def ticket_setup(self, interaction: discord.Interaction, 
+    async def ticket_add(self, interaction: discord.Interaction, 
                   role: discord.Role, 
                   ticket_name: str, 
                   prompt: str,
@@ -197,10 +198,40 @@ class Tickets(commands.Cog):
         
         await interaction.response.send_message(text, ephemeral=True)
 
-    @ticket.command(name="close", description="Close the ticket. Optional: Set accept to True to grant access role.")
-    @app_commands.describe(accept="If True, grant the access role (Accept). If False/Empty, just delete (Deny).")
-    async def ticket_close(self, interaction: discord.Interaction, accept: bool = False):
-        # 1. Check if we are in a ticket
+    # --- TOP LEVEL COMMANDS ---
+
+    @app_commands.command(name="close", description="Close and delete this ticket.")
+    async def close(self, interaction: discord.Interaction):
+        """Closes the ticket (Deny/Finish)."""
+        ticket_data = self.get_active_ticket(interaction.channel.id)
+        if not ticket_data:
+            return await interaction.response.send_message("❌ This command can only be used in an active ticket channel.", ephemeral=True)
+
+        user_id = ticket_data['user_id']
+        setup_role_id = ticket_data['setup_role_id']
+        
+        member = interaction.guild.get_member(user_id)
+        # Fetch if missing (e.g. they left) to try and clean roles if they returned or bot cache is stale
+        if not member:
+            try: member = await interaction.guild.fetch_member(user_id)
+            except: member = None
+
+        await interaction.response.send_message("🔒 Closing ticket...")
+
+        # Remove Trigger Role (Cleanup)
+        trigger_role = interaction.guild.get_role(setup_role_id)
+        if member and trigger_role:
+            try: await member.remove_roles(trigger_role)
+            except Exception as e: print(f"Failed to remove trigger role: {e}")
+
+        # Clean DB and Delete Channel
+        await self.delete_active_ticket(interaction.channel.id)
+        await asyncio.sleep(2)
+        await interaction.channel.delete()
+
+    @app_commands.command(name="accept", description="Accept the ticket, grant the role, and close.")
+    async def accept(self, interaction: discord.Interaction):
+        """Accepts the ticket, grants access role, and closes."""
         ticket_data = self.get_active_ticket(interaction.channel.id)
         if not ticket_data:
             return await interaction.response.send_message("❌ This command can only be used in an active ticket channel.", ephemeral=True)
@@ -213,16 +244,10 @@ class Tickets(commands.Cog):
             try: member = await interaction.guild.fetch_member(user_id)
             except: member = None
 
-        await interaction.response.send_message("🔒 Closing ticket...")
+        await interaction.response.send_message("✅ **Accepted!** Granting role and closing...")
 
-        # 2. Logic: Remove Trigger Role
-        trigger_role = interaction.guild.get_role(setup_role_id)
-        if member and trigger_role:
-            try: await member.remove_roles(trigger_role)
-            except Exception as e: print(f"Failed to remove trigger role: {e}")
-
-        # 3. Logic: Handle Accept (Give Access Role)
-        if accept and member:
+        if member:
+            # 1. Grant Access Role
             setup = self.get_setup(setup_role_id)
             if setup and setup.get('access_role_id'):
                 access_role = interaction.guild.get_role(setup['access_role_id'])
@@ -230,7 +255,13 @@ class Tickets(commands.Cog):
                     try: await member.add_roles(access_role)
                     except Exception as e: print(f"Failed to add access role: {e}")
 
-        # 4. Clean DB and Delete Channel
+            # 2. Remove Trigger Role (Cleanup)
+            trigger_role = interaction.guild.get_role(setup_role_id)
+            if trigger_role:
+                try: await member.remove_roles(trigger_role)
+                except Exception as e: print(f"Failed to remove trigger role: {e}")
+
+        # 3. Clean DB and Delete Channel
         await self.delete_active_ticket(interaction.channel.id)
         await asyncio.sleep(2)
         await interaction.channel.delete()
@@ -256,8 +287,6 @@ class Tickets(commands.Cog):
         # Check if they already have a ticket for this setup
         existing = self.find_ticket_by_user_and_role(member.id, setup['role_id'])
         if existing:
-            # Buggy requested: If ticket exists, clean it up and start fresh.
-            # This handles phantom tickets where the channel was deleted manually.
             try:
                 # Try to find and delete the old channel
                 old_channel = guild.get_channel(existing['channel_id'])
@@ -307,7 +336,6 @@ class Tickets(commands.Cog):
             return
 
         # 5. Send Prompt
-        # Added .replace("\\n", "\n") so users can type literal \n in the slash command to get a new line
         prompt_text = setup['prompt']\
             .replace("{user}", member.mention)\
             .replace("{admin}", admin_role.mention if admin_role else "")\
