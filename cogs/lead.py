@@ -26,14 +26,8 @@ from typing import Literal, Optional, Union
 # - on_voice_state_update(member, before, after)
 # - voice_time_checker()
 # - point_saver()
-# - lead (Group) [Slash - Admin]
-#   - add(interaction, name)
-#   - delete(interaction, group_num)
-#   - list(interaction)
-#   - edit(interaction, group_num, name)
-# - track (Group) [Slash - Admin]
-#   - add(interaction, group_num, channel)
-#   - remove(interaction, group_num, channel)
+# - lead(interaction, action, group_num, name) [Slash - Admin]
+# - track(interaction, group_num, action, channel) [Slash - Admin]
 # - award(interaction, member, group_num, amount) [Slash - Admin]
 # - remove(interaction, member, group_num, amount) [Slash - Admin]
 # - leaderboard(interaction, group_num) [Slash - Public]
@@ -339,116 +333,133 @@ class Lead(commands.Cog):
 
     # --- ADMIN SLASH COMMANDS ---
 
-    lead = app_commands.Group(name="lead", description="Manage leaderboard groups", default_permissions=discord.Permissions(administrator=True))
-
-    @lead.command(name="add", description="Create a new leaderboard group.")
-    @app_commands.describe(name="Name of the new group")
-    async def lead_create(self, interaction: discord.Interaction, name: str):
-        config = await self.get_config(interaction.guild_id)
+    @app_commands.command(name="lead", description="Manage leaderboard groups.")
+    @app_commands.describe(
+        action="What do you want to do?",
+        group_num="Group ID (for Edit/Delete)",
+        name="Group Name (for Add/Edit)"
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def lead(self, interaction: discord.Interaction, 
+                   action: Literal["Add", "Edit", "Delete", "List"],
+                   group_num: Optional[int] = None,
+                   name: Optional[str] = None):
+        """Manage leaderboard groups."""
         
-        existing_ids = [int(k) for k in config["groups"].keys()]
-        next_id = str(max(existing_ids) + 1 if existing_ids else 1)
-        
-        config["groups"][next_id] = {
-            "name": name,
-            "tracked_ids": [],
-            "last_lb_msg": None
-        }
-        await self.save_config(interaction.guild_id, config)
-        await interaction.response.send_message(f"✅ Created group **{name}** (ID: {next_id})", ephemeral=True)
+        # --- 1. ADD ---
+        if action == "Add":
+            if not name:
+                return await interaction.response.send_message("❌ Error: `name` is required to add a group.", ephemeral=True)
+            
+            config = await self.get_config(interaction.guild_id)
+            existing_ids = [int(k) for k in config["groups"].keys()]
+            next_id = str(max(existing_ids) + 1 if existing_ids else 1)
+            
+            config["groups"][next_id] = {
+                "name": name,
+                "tracked_ids": [],
+                "last_lb_msg": None
+            }
+            await self.save_config(interaction.guild_id, config)
+            await interaction.response.send_message(f"✅ Created group **{name}** (ID: {next_id})", ephemeral=True)
 
-    @lead.command(name="edit", description="Rename a leaderboard group.")
-    @app_commands.describe(group_num="The Group ID", name="New Name")
-    async def lead_edit(self, interaction: discord.Interaction, group_num: int, name: str):
+        # --- 2. EDIT ---
+        elif action == "Edit":
+            if not group_num or not name:
+                return await interaction.response.send_message("❌ Error: `group_num` and `name` are required to edit.", ephemeral=True)
+            
+            config = await self.get_config(interaction.guild_id)
+            group_key = str(group_num)
+            
+            if group_key not in config["groups"]:
+                return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
+                
+            old_name = config["groups"][group_key]["name"]
+            config["groups"][group_key]["name"] = name
+            await self.save_config(interaction.guild_id, config)
+            await interaction.response.send_message(f"✅ Renamed Group {group_num} from **{old_name}** to **{name}**.", ephemeral=True)
+
+        # --- 3. DELETE ---
+        elif action == "Delete":
+            if not group_num:
+                return await interaction.response.send_message("❌ Error: `group_num` is required to delete.", ephemeral=True)
+                
+            config = await self.get_config(interaction.guild_id)
+            group_key = str(group_num)
+
+            if group_key not in config["groups"]:
+                return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
+
+            del_name = config["groups"][group_key]["name"]
+            del config["groups"][group_key]
+            await self.save_config(interaction.guild_id, config)
+            await interaction.response.send_message(f"🗑️ Deleted group **{del_name}** (ID: {group_num}).", ephemeral=True)
+
+        # --- 4. LIST ---
+        elif action == "List":
+            config = await self.get_config(interaction.guild_id)
+            groups = config.get("groups", {})
+
+            if not groups:
+                return await interaction.response.send_message("📝 No leaderboard groups set up.", ephemeral=True)
+
+            text = "**📊 Leaderboard Groups**\n"
+            for group_key, data in groups.items():
+                g_name = data.get("name", "Unnamed")
+                tracked = data.get("tracked_ids", [])
+                
+                tracked_names = []
+                for tid in tracked:
+                    obj = interaction.guild.get_channel(int(tid))
+                    if obj:
+                        tracked_names.append(obj.mention)
+                    else:
+                        tracked_names.append(f"ID:{tid} (Deleted)")
+                
+                track_str = ", ".join(tracked_names) if tracked_names else "None"
+                text += f"**[{group_key}] {g_name}**\nTracking: {track_str}\n\n"
+            
+            await interaction.response.send_message(text, ephemeral=True)
+
+    # --- TRACK COMMAND ---
+
+    @app_commands.command(name="track", description="Manage channels to track.")
+    @app_commands.describe(
+        group_num="The Group ID",
+        action="Add or Remove a channel",
+        channel="The channel to track/untrack"
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def track(self, interaction: discord.Interaction, 
+                    group_num: int, 
+                    action: Literal["Add", "Remove"], 
+                    channel: Union[discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel]):
+        """Manage channels to track."""
         config = await self.get_config(interaction.guild_id)
         group_key = str(group_num)
-        
+
         if group_key not in config["groups"]:
             return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
             
-        old_name = config["groups"][group_key]["name"]
-        config["groups"][group_key]["name"] = name
-        await self.save_config(interaction.guild_id, config)
-        
-        await interaction.response.send_message(f"✅ Renamed Group {group_num} from **{old_name}** to **{name}**.", ephemeral=True)
+        # --- ADD ---
+        if action == "Add":
+            if channel.id in config["groups"][group_key]["tracked_ids"]:
+                return await interaction.response.send_message(f"⚠️ **{channel.name}** is already tracked by this group.", ephemeral=True)
 
-    @lead.command(name="delete", description="Delete a leaderboard group.")
-    @app_commands.describe(group_num="The Group ID to delete")
-    async def lead_delete(self, interaction: discord.Interaction, group_num: int):
-        config = await self.get_config(interaction.guild_id)
-        group_key = str(group_num)
+            config["groups"][group_key]["tracked_ids"].append(channel.id)
+            await self.save_config(interaction.guild_id, config)
+            await interaction.response.send_message(f"✅ Group {group_num} is now tracking **{channel.name}**.", ephemeral=True)
 
-        if group_key not in config["groups"]:
-            return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
+        # --- REMOVE ---
+        elif action == "Remove":
+            if channel.id not in config["groups"][group_key]["tracked_ids"]:
+                return await interaction.response.send_message(f"⚠️ **{channel.name}** was not being tracked.", ephemeral=True)
 
-        name = config["groups"][group_key]["name"]
-        del config["groups"][group_key]
-        await self.save_config(interaction.guild_id, config)
-        await interaction.response.send_message(f"🗑️ Deleted group **{name}** (ID: {group_num}).", ephemeral=True)
+            config["groups"][group_key]["tracked_ids"].remove(channel.id)
+            await self.save_config(interaction.guild_id, config)
+            await interaction.response.send_message(f"✅ Stopped tracking **{channel.name}** for Group {group_num}.", ephemeral=True)
 
-    @lead.command(name="list", description="List all leaderboard groups.")
-    async def lead_list(self, interaction: discord.Interaction):
-        config = await self.get_config(interaction.guild_id)
-        groups = config.get("groups", {})
-
-        if not groups:
-            return await interaction.response.send_message("📝 No leaderboard groups set up.", ephemeral=True)
-
-        text = "**📊 Leaderboard Groups**\n"
-        for group_key, data in groups.items():
-            name = data.get("name", "Unnamed")
-            tracked = data.get("tracked_ids", [])
-            
-            tracked_names = []
-            for tid in tracked:
-                obj = interaction.guild.get_channel(int(tid))
-                if obj:
-                    tracked_names.append(obj.mention)
-                else:
-                    tracked_names.append(f"ID:{tid} (Deleted)")
-            
-            track_str = ", ".join(tracked_names) if tracked_names else "None"
-            text += f"**[{group_key}] {name}**\nTracking: {track_str}\n\n"
-        
-        await interaction.response.send_message(text, ephemeral=True)
-
-    # --- TRACK COMMANDS ---
-
-    track = app_commands.Group(name="track", description="Manage channels to track", default_permissions=discord.Permissions(administrator=True))
-
-    @track.command(name="add", description="Add a channel/category to a group's tracking list.")
-    @app_commands.describe(group_num="The Group ID", channel="The channel to track")
-    async def track_add(self, interaction: discord.Interaction, group_num: int, channel: Union[discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel]):
-        config = await self.get_config(interaction.guild_id)
-        group_key = str(group_num)
-
-        if group_key not in config["groups"]:
-            return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
-        
-        if channel.id in config["groups"][group_key]["tracked_ids"]:
-            return await interaction.response.send_message(f"⚠️ **{channel.name}** is already tracked by this group.", ephemeral=True)
-
-        config["groups"][group_key]["tracked_ids"].append(channel.id)
-        await self.save_config(interaction.guild_id, config)
-        await interaction.response.send_message(f"✅ Group {group_num} is now tracking **{channel.name}**.", ephemeral=True)
-
-    @track.command(name="remove", description="Remove a channel/category from a group's tracking list.")
-    @app_commands.describe(group_num="The Group ID", channel="The channel to remove")
-    async def track_remove(self, interaction: discord.Interaction, group_num: int, channel: Union[discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel]):
-        config = await self.get_config(interaction.guild_id)
-        group_key = str(group_num)
-
-        if group_key not in config["groups"]:
-            return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
-        
-        if channel.id not in config["groups"][group_key]["tracked_ids"]:
-            return await interaction.response.send_message(f"⚠️ **{channel.name}** was not being tracked.", ephemeral=True)
-
-        config["groups"][group_key]["tracked_ids"].remove(channel.id)
-        await self.save_config(interaction.guild_id, config)
-        await interaction.response.send_message(f"✅ Stopped tracking **{channel.name}** for Group {group_num}.", ephemeral=True)
-
-    # --- TOP LEVEL ADMIN COMMANDS ---
+    # --- TOP LEVEL ADMIN COMMANDS (AWARD / REMOVE) ---
 
     @app_commands.command(name="award", description="Award points to a user (Publicly Visible).")
     @app_commands.describe(member="The user to award", group_num="The Group ID to award points in", amount="Points to give")
