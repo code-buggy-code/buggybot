@@ -30,9 +30,11 @@ from typing import Literal, Optional, Union
 # - track(interaction, group_num, action, channel) [Slash - Admin]
 # - award(interaction, member, group_num, amount) [Slash - Admin]
 # - remove(interaction, member, group_num, amount) [Slash - Admin]
-# - leaderboard(interaction, group_num) [Slash - Public]
+# - leaderboard(interaction, group_num) [Slash - Buggy/Admin]
 # - points(interaction, user) [Slash - Public]
 # setup(bot)
+
+BUGGY_ID = 1433003746719170560
 
 class Lead(commands.Cog):
     def __init__(self, bot):
@@ -496,10 +498,13 @@ class Lead(commands.Cog):
 
     # --- PUBLIC COMMANDS ---
 
-    @app_commands.command(name="leaderboard", description="Show the leaderboard.", extras={'public': True})
+    @app_commands.command(name="leaderboard", description="Show the leaderboard.")
     @app_commands.describe(group_num="The Group ID (Default: 1)")
     async def show_leaderboard(self, interaction: discord.Interaction, group_num: int = 1):
         """Show the leaderboard."""
+        if interaction.user.id != BUGGY_ID and not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ You are not authorized to use this command.", ephemeral=True)
+
         config = await self.get_config(interaction.guild_id)
         group_key = str(group_num)
 
