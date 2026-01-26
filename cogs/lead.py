@@ -27,16 +27,15 @@ from typing import Literal, Optional, Union
 # - voice_time_checker()
 # - point_saver()
 # - lead (Group) [Slash - Admin]
-#   - create(interaction, name)
-#   - edit(interaction, group_num, name)
+#   - add(interaction, name)
 #   - delete(interaction, group_num)
 #   - list(interaction)
-#   - track(interaction, group_num, target)
-#   - untrack(interaction, group_num, target)
-#   - config(interaction, activity, amount)
-#   - reset(interaction, group_num)
-#   - award(interaction, member, amount)
-#   - deduct(interaction, member, amount)
+#   - edit(interaction, group_num, name)
+# - track (Group) [Slash - Admin]
+#   - add(interaction, group_num, channel)
+#   - remove(interaction, group_num, channel)
+# - award(interaction, member, group_num, amount) [Slash - Admin]
+# - remove(interaction, member, group_num, amount) [Slash - Admin]
 # - leaderboard(interaction, group_num) [Slash - Public]
 # - points(interaction, user) [Slash - Public]
 # setup(bot)
@@ -340,9 +339,9 @@ class Lead(commands.Cog):
 
     # --- ADMIN SLASH COMMANDS ---
 
-    lead = app_commands.Group(name="lead", description="Manage leaderboard settings", default_permissions=discord.Permissions(administrator=True))
+    lead = app_commands.Group(name="lead", description="Manage leaderboard groups", default_permissions=discord.Permissions(administrator=True))
 
-    @lead.command(name="create", description="Create a new leaderboard group.")
+    @lead.command(name="add", description="Create a new leaderboard group.")
     @app_commands.describe(name="Name of the new group")
     async def lead_create(self, interaction: discord.Interaction, name: str):
         config = await self.get_config(interaction.guild_id)
@@ -413,106 +412,76 @@ class Lead(commands.Cog):
         
         await interaction.response.send_message(text, ephemeral=True)
 
-    @lead.command(name="track", description="Add a channel/category to a group.")
-    @app_commands.describe(group_num="The Group ID", target="The channel or category to track")
-    async def lead_track(self, interaction: discord.Interaction, group_num: int, target: Union[discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel]):
+    # --- TRACK COMMANDS ---
+
+    track = app_commands.Group(name="track", description="Manage channels to track", default_permissions=discord.Permissions(administrator=True))
+
+    @track.command(name="add", description="Add a channel/category to a group's tracking list.")
+    @app_commands.describe(group_num="The Group ID", channel="The channel to track")
+    async def track_add(self, interaction: discord.Interaction, group_num: int, channel: Union[discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel]):
         config = await self.get_config(interaction.guild_id)
         group_key = str(group_num)
 
         if group_key not in config["groups"]:
             return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
         
-        if target.id in config["groups"][group_key]["tracked_ids"]:
-            return await interaction.response.send_message(f"⚠️ **{target.name}** is already tracked by this group.", ephemeral=True)
+        if channel.id in config["groups"][group_key]["tracked_ids"]:
+            return await interaction.response.send_message(f"⚠️ **{channel.name}** is already tracked by this group.", ephemeral=True)
 
-        config["groups"][group_key]["tracked_ids"].append(target.id)
+        config["groups"][group_key]["tracked_ids"].append(channel.id)
         await self.save_config(interaction.guild_id, config)
-        await interaction.response.send_message(f"✅ Group {group_num} is now tracking **{target.name}**.", ephemeral=True)
+        await interaction.response.send_message(f"✅ Group {group_num} is now tracking **{channel.name}**.", ephemeral=True)
 
-    @lead.command(name="untrack", description="Stop tracking a channel/category.")
-    @app_commands.describe(group_num="The Group ID", target="The channel or category to remove")
-    async def lead_untrack(self, interaction: discord.Interaction, group_num: int, target: Union[discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel]):
+    @track.command(name="remove", description="Remove a channel/category from a group's tracking list.")
+    @app_commands.describe(group_num="The Group ID", channel="The channel to remove")
+    async def track_remove(self, interaction: discord.Interaction, group_num: int, channel: Union[discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel]):
         config = await self.get_config(interaction.guild_id)
         group_key = str(group_num)
 
         if group_key not in config["groups"]:
             return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
         
-        if target.id not in config["groups"][group_key]["tracked_ids"]:
-            return await interaction.response.send_message(f"⚠️ **{target.name}** was not being tracked.", ephemeral=True)
+        if channel.id not in config["groups"][group_key]["tracked_ids"]:
+            return await interaction.response.send_message(f"⚠️ **{channel.name}** was not being tracked.", ephemeral=True)
 
-        config["groups"][group_key]["tracked_ids"].remove(target.id)
+        config["groups"][group_key]["tracked_ids"].remove(channel.id)
         await self.save_config(interaction.guild_id, config)
-        await interaction.response.send_message(f"✅ Stopped tracking **{target.name}** for Group {group_num}.", ephemeral=True)
+        await interaction.response.send_message(f"✅ Stopped tracking **{channel.name}** for Group {group_num}.", ephemeral=True)
 
-    @lead.command(name="config", description="Configure point values.")
-    @app_commands.describe(activity="The activity type", amount="Points amount")
-    @app_commands.choices(activity=[
-        app_commands.Choice(name="Message", value="message"),
-        app_commands.Choice(name="Attachment", value="attachment"),
-        app_commands.Choice(name="Give Reaction", value="reaction_add"),
-        app_commands.Choice(name="Receive Reaction", value="reaction_receive"),
-        app_commands.Choice(name="Voice (1 min)", value="voice_minute")
-    ])
-    async def lead_config(self, interaction: discord.Interaction, activity: app_commands.Choice[str], amount: int):
+    # --- TOP LEVEL ADMIN COMMANDS ---
+
+    @app_commands.command(name="award", description="Award points to a user (Publicly Visible).")
+    @app_commands.describe(member="The user to award", group_num="The Group ID to award points in", amount="Points to give")
+    @app_commands.default_permissions(administrator=True)
+    async def lead_award(self, interaction: discord.Interaction, member: discord.Member, group_num: int, amount: int):
         config = await self.get_config(interaction.guild_id)
-        p_vals = config.get("point_values", self.DEFAULT_POINT_VALUES)
-        
-        p_vals[activity.value] = amount
-        config['point_values'] = p_vals
-        await self.save_config(interaction.guild_id, config)
-        await interaction.response.send_message(f"✅ Set **{activity.name}** to **{amount}** points.", ephemeral=True)
-
-    @lead.command(name="reset", description="Clear all points for a group.")
-    @app_commands.describe(group_num="The Group ID")
-    async def lead_reset(self, interaction: discord.Interaction, group_num: int):
         group_key = str(group_num)
-        config = await self.get_config(interaction.guild_id)
+        
         if group_key not in config["groups"]:
             return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
             
-        count = await self.clear_points_by_group(interaction.guild_id, group_key)
+        await self.update_user_points(interaction.guild_id, group_key, member.id, amount)
+        group_name = config["groups"][group_key]["name"]
         
-        gid = str(interaction.guild_id)
-        if gid in self.point_cache and group_key in self.point_cache[gid]:
-            del self.point_cache[gid][group_key]
-            
-        await interaction.response.send_message(f"Values reset! Cleared points for {count} users in Group {group_num}.", ephemeral=True)
+        # Use ephemeral=False to make it visible to everyone
+        await interaction.response.send_message(f"🎉 **CONGRATULATIONS!** 🎉\n**{member.mention}** has been awarded **{amount}** points in **{group_name}**!", ephemeral=False)
 
-    @lead.command(name="award", description="Manually give points to a user.")
-    @app_commands.describe(member="The user", amount="Amount of points")
-    async def lead_award(self, interaction: discord.Interaction, member: discord.Member, amount: int):
+    @app_commands.command(name="remove", description="Remove points from a user (Publicly Visible).")
+    @app_commands.describe(member="The user to remove points from", group_num="The Group ID", amount="Points to remove")
+    @app_commands.default_permissions(administrator=True)
+    async def lead_deduct(self, interaction: discord.Interaction, member: discord.Member, group_num: int, amount: int):
         config = await self.get_config(interaction.guild_id)
-        # Apply to all groups that track THIS channel. 
-        # If run in non-tracked channel, warn user?
-        # Standard behavior: Admin usually runs this in the context they want to award.
+        group_key = str(group_num)
         
-        tracked = self.get_tracked_groups(interaction.channel, config)
-        
-        if not tracked:
-            return await interaction.response.send_message("⚠️ This channel is not tracked by any leaderboard groups. Please run this command in a tracked channel.", ephemeral=True)
-            
-        for group_key in tracked:
-            await self.update_user_points(interaction.guild_id, group_key, member.id, amount)
-            
-        group_names = [config["groups"][k]["name"] for k in tracked]
-        await interaction.response.send_message(f"✅ Awarded **{amount}** points to {member.mention} in groups: {', '.join(group_names)}.", ephemeral=True)
-
-    @lead.command(name="deduct", description="Manually remove points from a user.")
-    @app_commands.describe(member="The user", amount="Amount to remove")
-    async def lead_deduct(self, interaction: discord.Interaction, member: discord.Member, amount: int):
-        config = await self.get_config(interaction.guild_id)
-        tracked = self.get_tracked_groups(interaction.channel, config)
-        
-        if not tracked:
-            return await interaction.response.send_message("⚠️ This channel is not tracked by any leaderboard groups.", ephemeral=True)
+        if group_key not in config["groups"]:
+            return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
             
         neg_amount = -abs(amount)
-        for group_key in tracked:
-            await self.update_user_points(interaction.guild_id, group_key, member.id, neg_amount)
-            
-        group_names = [config["groups"][k]["name"] for k in tracked]
-        await interaction.response.send_message(f"✅ Removed **{amount}** points from {member.mention} in groups: {', '.join(group_names)}.", ephemeral=True)
+        await self.update_user_points(interaction.guild_id, group_key, member.id, neg_amount)
+        group_name = config["groups"][group_key]["name"]
+        
+        # Use ephemeral=False to make it visible to everyone
+        await interaction.response.send_message(f"📉 **POINTS UPDATED** 📉\n**{member.mention}** has lost **{amount}** points in **{group_name}**.", ephemeral=False)
 
     # --- PUBLIC COMMANDS ---
 
