@@ -1,341 +1,300 @@
 import discord
-from discord.ext import commands
 from discord import app_commands
+from discord.ext import commands, tasks
 import asyncio
 import datetime
-from typing import Literal
-import secrets
+import re
+from zoneinfo import ZoneInfo
 
 # Function/Class List:
-# class BotherButton(discord.ui.Button)
-# - __init__(label, custom_id, ping_text)
-# - callback(interaction)
-# class BotherView(discord.ui.View)
-# - __init__(bot, options, guild_id)
-# class BotherBuggy(commands.Cog)
+# class Purge(commands.Cog)
 # - __init__(bot)
-# - cog_load()
-# - restore_views()
-# - get_config(guild_id)
-# - save_config(guild_id, config)
-# - get_dashboards()
-# - save_dashboards(dashboards)
-# - create_dashboard_embed(guild, title)
-# - repost_dashboard(channel, dashboard_data)
+# - cog_unload()
+# - purge_scheduler()
+# - perform_scheduled_purge()
+# - check_should_keep(message, keep_media, keep_links)
+# - get_schedules()
+# - save_schedules(schedules)
+# - get_pin_settings()
+# - save_pin_settings(settings)
 # - on_message(message)
-# - bb(interaction, action, label, key, ping_text) [Slash Command]
-# - bbdashboard(interaction, text) [Slash Command]
+# - purge (Group) [Slash - Admin]
+#   - add(interaction, keep_media, keep_links)
+#   - edit(interaction, keep_media, keep_links)
+#   - remove(interaction)
+#   - list(interaction)
+#   - pins(interaction, enabled)
+#   - user(interaction, target, amount, scope_id)
+#   - messages(interaction, amount)
 # setup(bot)
 
-BUGGY_ID = 1433003746719170560
-
-class BotherButton(discord.ui.Button):
-    def __init__(self, label, custom_id, ping_text):
-        super().__init__(style=discord.ButtonStyle.secondary, label=label, custom_id=custom_id)
-        self.ping_text = ping_text
-
-    async def callback(self, interaction: discord.Interaction):
-        """Sends the private message to buggy."""
-        # Defer immediately to "acknowledge" silently so we can delete it later
-        await interaction.response.defer(ephemeral=True)
-
-        buggy = interaction.client.get_user(BUGGY_ID)
-        if not buggy:
-            try:
-                buggy = await interaction.client.fetch_user(BUGGY_ID)
-            except:
-                return await interaction.followup.send("❌ I couldn't find buggy to bother! Is the ID correct?", ephemeral=True)
-
-        embed = discord.Embed(
-            title="🔔 Bother Buggy Alert",
-            description=f"**User:** {interaction.user.mention} ({interaction.user.id})\n**Channel:** {interaction.channel.mention}\n**Button Clicked:** {self.label}",
-            color=discord.Color(0xff90aa),
-            timestamp=datetime.datetime.now()
-        )
-        embed.add_field(name="Message Content", value=self.ping_text or "No specific text set.")
-        
-        try:
-            await buggy.send(embed=embed)
-            # Success! Delete the "Thinking..." state so it appears invisible
-            await interaction.delete_original_response()
-        except discord.Forbidden:
-            await interaction.followup.send("❌ I couldn't DM buggy! Make sure his DMs are open.", ephemeral=True)
-
-class BotherView(discord.ui.View):
-    def __init__(self, bot, options, guild_id):
-        super().__init__(timeout=None) # Persistent
-        self.bot = bot
-        
-        # Options: List of {"label": str, "key": str, "ping_text": str}
-        for opt in options:
-            # We use the "key" in the custom_id to make it unique
-            custom_id = f"bb_{guild_id}_{opt['key']}"
-            self.add_item(BotherButton(label=opt['label'], custom_id=custom_id, ping_text=opt['ping_text']))
-
-class BotherBuggy(commands.Cog, name="Bother Buggy"):
+class Purge(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.description = "Bother Buggy: A dashboard system for users to send private alerts to buggy."
+        self.timezone = ZoneInfo("America/New_York")
+        self.purge_scheduler.start()
 
-    async def cog_load(self):
-        """Restore persistent views when the cog loads."""
-        asyncio.create_task(self.restore_views())
+    def cog_unload(self):
+        self.purge_scheduler.cancel()
 
-    async def restore_views(self):
+    # --- HELPERS ---
+
+    def get_schedules(self):
+        """Returns the list of scheduled purge channels."""
+        return self.bot.db.get_collection("purge_schedules")
+
+    def save_schedules(self, schedules):
+        """Saves the list of schedules."""
+        self.bot.db.save_collection("purge_schedules", schedules)
+
+    def get_pin_settings(self):
+        """Returns the pin purge settings for servers."""
+        return self.bot.db.get_collection("purge_pin_settings")
+
+    def save_pin_settings(self, settings):
+        """Saves the pin settings."""
+        self.bot.db.save_collection("purge_pin_settings", settings)
+
+    def check_should_keep(self, message, keep_media, keep_links):
+        """Determines if a message should be kept based on flags."""
+        if message.pinned:
+            return True
+        
+        # Sticky Protection: Check if this message is the current sticky for the channel
+        stickies = self.bot.db.get_collection("sticky_messages")
+        # We check if this message's ID matches the 'last_message_id' of any sticky setup
+        if any(s.get('last_message_id') == message.id for s in stickies):
+            return True
+
+        if keep_media:
+            if message.attachments:
+                return True
+            if message.embeds:
+                for e in message.embeds:
+                    if e.type in ('image', 'video', 'gifv'):
+                        return True
+        
+        if keep_links:
+            url_pattern = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+')
+            if url_pattern.search(message.content):
+                return True
+                
+        return False
+
+    # --- SCHEDULER ---
+
+    @tasks.loop(minutes=1)
+    async def purge_scheduler(self):
+        """Checks every minute if it is 4am EST."""
+        now = datetime.datetime.now(self.timezone)
+        
+        if now.hour == 4 and now.minute == 0:
+            await self.perform_scheduled_purge()
+
+    async def perform_scheduled_purge(self):
+        schedules = self.get_schedules()
+        if not schedules: return
+
+        print(f"[purge] Starting scheduled purge for {len(schedules)} channels.")
+
+        admin_cog = self.bot.get_cog("Admin")
+
+        for sch in schedules:
+            channel_id = sch['channel_id']
+            channel = self.bot.get_channel(channel_id)
+            
+            if not channel: continue
+
+            keep_media = sch.get('keep_media', False)
+            keep_links = sch.get('keep_links', False)
+
+            def check(m):
+                return not self.check_should_keep(m, keep_media, keep_links)
+
+            try:
+                await channel.purge(limit=None, check=check)
+                # After purge, ensure sticky messages are revived (if they were deleted or paused)
+                if admin_cog:
+                    await admin_cog.revive_sticky(channel_id)
+            except Exception as e:
+                print(f"[purge] Failed to purge channel {channel_id}: {e}")
+
+    @purge_scheduler.before_loop
+    async def before_scheduler(self):
         await self.bot.wait_until_ready()
-        dashboards = self.get_dashboards()
-        count = 0
-        for dash in dashboards:
-            guild_id = dash['guild_id']
-            config = self.get_config(guild_id)
-            if config['options']:
-                view = BotherView(self.bot, config['options'], guild_id)
-                self.bot.add_view(view)
-                count += 1
-        print(f"✅ Restored {count} Bother Buggy dashboard views, you genius!")
 
-    # --- DB HELPERS ---
-
-    def get_config(self, guild_id):
-        """Returns the full config dict for a guild."""
-        collection = self.bot.db.get_collection("bb_options")
-        # Structure: [{"guild_id": 123, "options": [...], "title": "...", "hash": "..."}]
-        doc = next((d for d in collection if d['guild_id'] == guild_id), None)
-        
-        # Default structure
-        if not doc:
-            doc = {
-                "guild_id": guild_id, 
-                "options": [], 
-                "title": "🔔 Bother Buggy",
-                "hash": secrets.token_hex(16)
-            }
-        
-        # Ensure fields exist (migration safe)
-        if "title" not in doc:
-            doc["title"] = "🔔 Bother Buggy"
-        if "hash" not in doc:
-            doc["hash"] = secrets.token_hex(16)
-            
-        return doc
-
-    def save_config(self, guild_id, config):
-        """Saves the config for a guild."""
-        collection = self.bot.db.get_collection("bb_options")
-        collection = [d for d in collection if d['guild_id'] != guild_id]
-        collection.append(config)
-        self.bot.db.save_collection("bb_options", collection)
-
-    def get_dashboards(self):
-        """Returns active dashboard messages to restore views."""
-        return self.bot.db.get_collection("bb_dashboards")
-
-    def save_dashboards(self, dashboards):
-        """Saves active dashboards."""
-        self.bot.db.save_collection("bb_dashboards", dashboards)
-
-    def create_dashboard_embed(self, guild, title):
-        """Creates the minimal embed for the dashboard."""
-        embed = discord.Embed(
-            title=title,
-            description="Click what you want to do with buggy!",
-            color=discord.Color(0xff90aa)
-        )
-        return embed
-
-    # --- STICKY / REPOST LOGIC ---
-
-    async def repost_dashboard(self, channel, dashboard_data):
-        """Deletes the old dashboard and posts a new one at the bottom."""
-        # 1. Delete old message
-        try:
-            if dashboard_data['message_id']:
-                old_msg = await channel.fetch_message(dashboard_data['message_id'])
-                await old_msg.delete()
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            pass # Message might already be gone
-
-        # 2. Prepare new message
-        config = self.get_config(channel.guild.id)
-        if not config['options']: return # Should have options if it was spawned
-        
-        embed = self.create_dashboard_embed(channel.guild, config['title'])
-        view = BotherView(self.bot, config['options'], channel.guild.id)
-        
-        # 3. Send new message
-        try:
-            new_msg = await channel.send(embed=embed, view=view)
-            
-            # 4. Update DB
-            dashboards = self.get_dashboards()
-            # Update the specific entry
-            found = False
-            for d in dashboards:
-                if d['guild_id'] == channel.guild.id:
-                    d['message_id'] = new_msg.id
-                    d['channel_id'] = channel.id # Ensure channel matches current
-                    found = True
-                    break
-            
-            if not found:
-                 # Should have been added by caller, but safety net
-                 dashboards.append({
-                     "guild_id": channel.guild.id,
-                     "channel_id": channel.id,
-                     "message_id": new_msg.id
-                 })
-
-            self.save_dashboards(dashboards)
-        except Exception as e:
-            print(f"Failed to repost Bother Buggy dashboard: {e}")
+    # --- EVENTS ---
 
     @commands.Cog.listener()
     async def on_message(self, message):
-        """Checks for the specific sticky HASH to trigger a dashboard repost."""
-        # Note: We do NOT check for bot authors here, because the sticky bot is likely a bot.
-        if not message.guild: return
+        """Handles auto-deletion of 'User pinned a message' system messages."""
+        if message.author.bot:
+            return
         
-        config = self.get_config(message.guild.id)
-        target_hash = config.get('hash')
-        
-        if not target_hash: return
-
-        # Check if the message IS the hash
-        if message.content.strip() == target_hash:
-            # 1. Delete the hash trigger immediately
-            try:
-                await message.delete()
-            except (discord.Forbidden, discord.NotFound):
-                pass
+        if message.type == discord.MessageType.pins_add:
+            settings = self.get_pin_settings()
+            guild_setting = next((s for s in settings if s['guild_id'] == message.guild.id), None)
             
-            # 2. Find existing dashboard data to manage the repost
-            dashboards = self.get_dashboards()
-            dashboard = next((d for d in dashboards if d['guild_id'] == message.guild.id), None)
-            
-            if not dashboard:
-                # If we've never spawned it before but the hash matches, create a record
-                dashboard = {
-                    "guild_id": message.guild.id,
-                    "channel_id": message.channel.id,
-                    "message_id": 0
-                }
-                dashboards.append(dashboard)
-                self.save_dashboards(dashboards)
-            
-            # 3. Trigger the repost logic (which deletes old -> posts new)
-            # Update channel_id to where the hash was posted, in case it changed
-            dashboard['channel_id'] = message.channel.id 
-            await self.repost_dashboard(message.channel, dashboard)
+            if guild_setting and guild_setting.get('enabled', False):
+                try:
+                    await message.delete()
+                except:
+                    pass
 
-    # --- SLASH COMMANDS ---
+    # --- SLASH COMMANDS (Admin) ---
+    
+    purge = app_commands.Group(name="purge", description="Manage message purging", default_permissions=discord.Permissions(administrator=True))
 
-    @app_commands.command(name="bb", description="Manage the Bother Buggy settings.")
-    @app_commands.describe(
-        action="What would you like to do?",
-        label="[Add] Text shown on the button",
-        key="[Add/Remove] Unique one-word ID for the option",
-        ping_text="[Add] Message sent to buggy"
-    )
-    @app_commands.default_permissions(administrator=True)
-    async def bb(self, interaction: discord.Interaction, 
-                 action: Literal["Add", "Remove", "List"], 
-                 label: str = None, 
-                 key: str = None, 
-                 ping_text: str = None):
-        
-        config = self.get_config(interaction.guild_id)
-        options = config['options']
+    # 1. Scheduled purge Commands
 
-        # --- ACTION: ADD ---
-        if action == "Add":
-            if not label or not key or not ping_text:
-                return await interaction.response.send_message("❌ For 'Add', you must provide `label`, `key`, and `ping_text`.", ephemeral=True)
-            
-            if any(o['key'] == key.lower() for o in options):
-                return await interaction.response.send_message(f"❌ An option with the key `{key}` already exists, buggy!", ephemeral=True)
-            
-            if len(options) >= 25:
-                return await interaction.response.send_message("❌ Discord only allows 25 buttons per message, you popular thing!", ephemeral=True)
+    @purge.command(name="add", description="Add this channel to the 4am EST purge schedule.")
+    @app_commands.describe(keep_media="Keep images/videos?", keep_links="Keep messages with links?")
+    async def purge_add(self, interaction: discord.Interaction, keep_media: bool = False, keep_links: bool = False):
+        """Add this channel to the 4am EST purge schedule."""
+        schedules = self.get_schedules()
+        if any(s['channel_id'] == interaction.channel_id for s in schedules):
+            return await interaction.response.send_message("❌ This channel is already scheduled for purging. Use `/purge edit`.", ephemeral=True)
 
-            options.append({
-                "label": label,
-                "key": key.lower(),
-                "ping_text": ping_text
-            })
-            config['options'] = options
-            self.save_config(interaction.guild_id, config)
-            await interaction.response.send_message(f"✅ Added **{label}**! Use `/bbdashboard` to see the changes.", ephemeral=True)
-
-        # --- ACTION: REMOVE ---
-        elif action == "Remove":
-            if not key:
-                return await interaction.response.send_message("❌ For 'Remove', you must provide the `key`.", ephemeral=True)
-
-            initial_len = len(options)
-            options = [o for o in options if o['key'] != key.lower()]
-            
-            if len(options) < initial_len:
-                config['options'] = options
-                self.save_config(interaction.guild_id, config)
-                await interaction.response.send_message(f"✅ Removed the `{key}` option for you!", ephemeral=True)
-            else:
-                await interaction.response.send_message(f"❌ I couldn't find an option with the key `{key}`.", ephemeral=True)
-
-        # --- ACTION: LIST ---
-        elif action == "List":
-            if not options:
-                return await interaction.response.send_message("📝 You haven't added any options yet, buggy!", ephemeral=True)
-            
-            content = f"**Title:** {config['title']}\n**Sticky Hash:** `{config['hash']}`\n**📋 Options:**\n"
-            for o in options:
-                content += f"• `{o['key']}`: **{o['label']}** (Ping: {o['ping_text']})\n"
-            await interaction.response.send_message(content, ephemeral=True)
-
-    @app_commands.command(name="bbdashboard", description="Spawn the Bother Buggy Dashboard in this channel.")
-    @app_commands.describe(text="[Optional] Set a new title for the dashboard before spawning.")
-    @app_commands.default_permissions(administrator=True)
-    async def bbdashboard(self, interaction: discord.Interaction, text: str = None):
-        config = self.get_config(interaction.guild_id)
-        
-        # Ensure hash is saved/generated
-        if 'hash' not in config:
-            config['hash'] = secrets.token_hex(16)
-            self.save_config(interaction.guild_id, config)
-
-        # Update title if provided
-        if text:
-            config['title'] = text
-            self.save_config(interaction.guild_id, config)
-            
-        if not config['options']:
-            return await interaction.response.send_message("❌ You need to add some options first via `/bb action:Add`!", ephemeral=True)
-
-        embed = self.create_dashboard_embed(interaction.guild, config['title'])
-        view = BotherView(self.bot, config['options'], interaction.guild_id)
-        
-        # 1. Send Ephemeral Response with the Hash
-        # This allows the user to copy the hash for their sticky bot
-        await interaction.response.send_message(
-            f"✅ **Dashboard Spawned!**\n\n"
-            f"👇 **Sticky Bot Configuration** 👇\n"
-            f"Copy this hash and set it up in your sticky message bot:\n"
-            f"```\n{config['hash']}\n```\n"
-            f"When your sticky bot posts this exact code, I will automatically delete it and repost the dashboard in its place!",
-            ephemeral=True
-        )
-        
-        # 2. Send the dashboard message initially
-        msg = await interaction.channel.send(embed=embed, view=view)
-
-        dashboards = self.get_dashboards()
-        dashboards = [d for d in dashboards if d['guild_id'] != interaction.guild_id]
-        
-        dashboards.append({
-            "guild_id": interaction.guild_id,
+        schedules.append({
             "channel_id": interaction.channel_id,
-            "message_id": msg.id
+            "guild_id": interaction.guild_id,
+            "keep_media": keep_media,
+            "keep_links": keep_links
         })
-        self.save_dashboards(dashboards)
+        self.save_schedules(schedules)
+        await interaction.response.send_message(f"✅ Channel added to 4am EST purge schedule.\nOptions: Media={keep_media}, Links={keep_links}", ephemeral=True)
+
+    @purge.command(name="edit", description="Edit purge settings for this channel.")
+    @app_commands.describe(keep_media="Keep images/videos?", keep_links="Keep messages with links?")
+    async def purge_edit(self, interaction: discord.Interaction, keep_media: bool, keep_links: bool):
+        """Edit purge settings for this channel."""
+        schedules = self.get_schedules()
+        found = False
+        for s in schedules:
+            if s['channel_id'] == interaction.channel_id:
+                s['keep_media'] = keep_media
+                s['keep_links'] = keep_links
+                found = True
+                break
+        
+        if found:
+            self.save_schedules(schedules)
+            await interaction.response.send_message(f"✅ Updated schedule settings.\nOptions: Media={keep_media}, Links={keep_links}", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ This channel is not in the schedule.", ephemeral=True)
+
+    @purge.command(name="remove", description="Remove this channel from the purge schedule.")
+    async def purge_remove(self, interaction: discord.Interaction):
+        """Remove this channel from the purge schedule."""
+        schedules = self.get_schedules()
+        initial_len = len(schedules)
+        schedules = [s for s in schedules if s['channel_id'] != interaction.channel_id]
+        
+        if len(schedules) < initial_len:
+            self.save_schedules(schedules)
+            await interaction.response.send_message("✅ Channel removed from purge schedule.", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ This channel was not scheduled.", ephemeral=True)
+
+    @purge.command(name="list", description="List all scheduled purge channels in this server.")
+    async def purge_list(self, interaction: discord.Interaction):
+        """List all scheduled purge channels in this server."""
+        schedules = self.get_schedules()
+        guild_schedules = [s for s in schedules if s['guild_id'] == interaction.guild_id]
+        
+        if not guild_schedules:
+            return await interaction.response.send_message("📝 No channels scheduled for purging in this server.", ephemeral=True)
+
+        text = "**🗑️ Scheduled 4am EST purges:**\n"
+        for s in guild_schedules:
+            channel = interaction.guild.get_channel(s['channel_id'])
+            name = channel.mention if channel else f"ID:{s['channel_id']} (Deleted)"
+            opts = []
+            if s.get('keep_media'): opts.append("KeepMedia")
+            if s.get('keep_links'): opts.append("KeepLinks")
+            opts_str = f" ({', '.join(opts)})" if opts else ""
+            text += f"- {name}{opts_str}\n"
+
+        await interaction.response.send_message(text, ephemeral=True)
+
+    # 2. Pins purge Command
+
+    @purge.command(name="pins", description="Toggle auto-deletion of 'user pinned a message'.")
+    @app_commands.describe(enabled="Enable auto-deletion?")
+    async def purge_pins(self, interaction: discord.Interaction, enabled: bool):
+        """Toggle auto-deletion of 'user pinned a message' announcements."""
+        settings = self.get_pin_settings()
+        settings = [s for s in settings if s['guild_id'] != interaction.guild_id]
+        
+        settings.append({
+            "guild_id": interaction.guild_id,
+            "enabled": enabled
+        })
+        self.save_pin_settings(settings)
+        status = "enabled (messages will be deleted)" if enabled else "disabled"
+        await interaction.response.send_message(f"📌 Pin announcement cleaner is now **{status}** for this server.", ephemeral=True)
+
+    # 3. User purge Command
+
+    @purge.command(name="user", description="Purge messages from a specific user.")
+    @app_commands.describe(target="The user to purge", amount="Amount to delete (or 'all')", scope_id="Channel/Category ID (Optional)")
+    async def purge_user(self, interaction: discord.Interaction, target: discord.User, amount: str, scope_id: str = None):
+        """Purge messages from a specific user."""
+        await interaction.response.defer(ephemeral=True)
+        
+        limit = None
+        if amount.lower() != "all":
+            try: limit = int(amount)
+            except ValueError: return await interaction.followup.send("❌ Amount must be a number or 'all'.", ephemeral=True)
+
+        channels_to_purge = []
+        if not scope_id:
+            channels_to_purge.append(interaction.channel)
+        else:
+            try:
+                s_id = int(scope_id)
+                if s_id == interaction.guild_id:
+                    channels_to_purge = interaction.guild.text_channels
+                else:
+                    chan = interaction.guild.get_channel(s_id)
+                    if isinstance(chan, discord.CategoryChannel):
+                        channels_to_purge = chan.text_channels
+                    elif isinstance(chan, discord.TextChannel):
+                        channels_to_purge.append(chan)
+                    else:
+                        return await interaction.followup.send("❌ Invalid Scope ID.", ephemeral=True)
+            except ValueError: return await interaction.followup.send("❌ Scope ID must be a number.", ephemeral=True)
+
+        count_deleted = 0
+        def check(m): return m.author.id == target.id
+
+        for channel in channels_to_purge:
+            try:
+                deleted = await channel.purge(limit=limit, check=check)
+                count_deleted += len(deleted)
+                if limit is not None:
+                    limit -= len(deleted)
+                    if limit <= 0: break
+            except Exception as e: print(f"Failed to purge in {channel.name}: {e}")
+
+        await interaction.followup.send(f"✅ Purged **{count_deleted}** messages from {target.mention}.", ephemeral=True)
+
+    # 4. Message purge Command
+
+    @purge.command(name="messages", description="Bulk delete messages.")
+    @app_commands.describe(amount="Number of messages to delete")
+    async def purge_messages(self, interaction: discord.Interaction, amount: int):
+        """Bulk delete messages."""
+        await interaction.response.defer(ephemeral=True)
+
+        # Basic 'check' logic could be added here if needed, but standard bulk delete usually just wipes
+        # If you want to keep 'keep_media' logic here, we can add params, but kept simple for now per request.
+        
+        try:
+            deleted = await interaction.channel.purge(limit=amount)
+            await interaction.followup.send(f"✅ Purged **{len(deleted)}** messages.", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Failed to purge: {e}", ephemeral=True)
 
 async def setup(bot):
-    await bot.add_cog(BotherBuggy(bot))
+    await bot.add_cog(Purge(bot))
