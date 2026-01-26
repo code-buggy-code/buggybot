@@ -5,6 +5,7 @@ import asyncio
 import datetime
 import re
 from zoneinfo import ZoneInfo
+from typing import Literal
 
 # Function/Class List:
 # class Purge(commands.Cog)
@@ -18,14 +19,9 @@ from zoneinfo import ZoneInfo
 # - get_pin_settings()
 # - save_pin_settings(settings)
 # - on_message(message)
-# - purge (Group) [Slash - Admin]
-#   - add(interaction, keep_media, keep_links)
-#   - edit(interaction, keep_media, keep_links)
-#   - remove(interaction)
-#   - list(interaction)
-#   - pins(interaction, enabled)
-#   - user(interaction, target, amount, scope_id)
-#   - messages(interaction, amount)
+# - purge(interaction, target, amount, user, scope_id) [Slash]
+# - schedulepurge(interaction, action, keep_media, keep_links) [Slash]
+# - pinpurge(interaction, enabled) [Slash]
 # setup(bot)
 
 class Purge(commands.Cog):
@@ -136,87 +132,165 @@ class Purge(commands.Cog):
                 except:
                     pass
 
-    # --- SLASH COMMANDS (Admin) ---
+    # --- SLASH COMMAND: PURGE (Immediate Actions) ---
     
-    purge = app_commands.Group(name="purge", description="Manage message purging", default_permissions=discord.Permissions(administrator=True))
-
-    # 1. Scheduled purge Commands
-
-    @purge.command(name="add", description="Add this channel to the 4am EST purge schedule.")
-    @app_commands.describe(keep_media="Keep images/videos?", keep_links="Keep messages with links?")
-    async def purge_add(self, interaction: discord.Interaction, keep_media: bool = False, keep_links: bool = False):
-        """Add this channel to the 4am EST purge schedule."""
-        schedules = self.get_schedules()
-        if any(s['channel_id'] == interaction.channel_id for s in schedules):
-            return await interaction.response.send_message("❌ This channel is already scheduled for purging. Use `/purge edit`.", ephemeral=True)
-
-        schedules.append({
-            "channel_id": interaction.channel_id,
-            "guild_id": interaction.guild_id,
-            "keep_media": keep_media,
-            "keep_links": keep_links
-        })
-        self.save_schedules(schedules)
-        await interaction.response.send_message(f"✅ Channel added to 4am EST purge schedule.\nOptions: Media={keep_media}, Links={keep_links}", ephemeral=True)
-
-    @purge.command(name="edit", description="Edit purge settings for this channel.")
-    @app_commands.describe(keep_media="Keep images/videos?", keep_links="Keep messages with links?")
-    async def purge_edit(self, interaction: discord.Interaction, keep_media: bool, keep_links: bool):
-        """Edit purge settings for this channel."""
-        schedules = self.get_schedules()
-        found = False
-        for s in schedules:
-            if s['channel_id'] == interaction.channel_id:
-                s['keep_media'] = keep_media
-                s['keep_links'] = keep_links
-                found = True
-                break
+    @app_commands.command(name="purge", description="Purge messages or messages from a user.")
+    @app_commands.describe(
+        target="What action to take?",
+        amount="Number of messages (Required)",
+        user="The user to purge (Required if target is User)",
+        scope_id="Channel/Category ID (Optional for User purge)"
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def purge(self, interaction: discord.Interaction, 
+                    target: Literal["Messages", "User"],
+                    amount: str,
+                    user: discord.User = None,
+                    scope_id: str = None):
+        """Purge messages or messages from a user."""
         
-        if found:
+        # --- 1. MESSAGES (Bulk Delete) ---
+        if target == "Messages":
+            try:
+                limit = int(amount)
+            except ValueError:
+                return await interaction.response.send_message("❌ Error: `amount` must be a number.", ephemeral=True)
+            
+            await interaction.response.defer(ephemeral=True)
+            try:
+                deleted = await interaction.channel.purge(limit=limit)
+                await interaction.followup.send(f"✅ Purged **{len(deleted)}** messages.", ephemeral=True)
+            except Exception as e:
+                await interaction.followup.send(f"❌ Failed to purge: {e}", ephemeral=True)
+
+        # --- 2. USER (Specific User) ---
+        elif target == "User":
+            if not user: return await interaction.response.send_message("❌ Error: `user` is required for User purge.", ephemeral=True)
+            
+            await interaction.response.defer(ephemeral=True)
+            
+            limit = None
+            if amount.lower() != "all":
+                try: limit = int(amount)
+                except ValueError: return await interaction.followup.send("❌ Amount must be a number or 'all'.", ephemeral=True)
+
+            channels_to_purge = []
+            if not scope_id:
+                channels_to_purge.append(interaction.channel)
+            else:
+                try:
+                    s_id = int(scope_id)
+                    if s_id == interaction.guild_id:
+                        channels_to_purge = interaction.guild.text_channels
+                    else:
+                        chan = interaction.guild.get_channel(s_id)
+                        if isinstance(chan, discord.CategoryChannel):
+                            channels_to_purge = chan.text_channels
+                        elif isinstance(chan, discord.TextChannel):
+                            channels_to_purge.append(chan)
+                        else:
+                            return await interaction.followup.send("❌ Invalid Scope ID.", ephemeral=True)
+                except ValueError: return await interaction.followup.send("❌ Scope ID must be a number.", ephemeral=True)
+
+            count_deleted = 0
+            def check(m): return m.author.id == user.id
+
+            for channel in channels_to_purge:
+                try:
+                    deleted = await channel.purge(limit=limit, check=check)
+                    count_deleted += len(deleted)
+                    if limit is not None:
+                        limit -= len(deleted)
+                        if limit <= 0: break
+                except Exception as e: print(f"Failed to purge in {channel.name}: {e}")
+
+            await interaction.followup.send(f"✅ Purged **{count_deleted}** messages from {user.mention}.", ephemeral=True)
+
+    # --- SLASH COMMAND: SCHEDULE PURGE (4am Task) ---
+
+    @app_commands.command(name="schedulepurge", description="Manage the 4am EST purge schedule.")
+    @app_commands.describe(
+        action="What do you want to do?",
+        keep_media="Keep images/videos? (Add/Edit only)",
+        keep_links="Keep links? (Add/Edit only)"
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def schedulepurge(self, interaction: discord.Interaction, 
+                            action: Literal["Add", "Edit", "Remove", "List"],
+                            keep_media: bool = False,
+                            keep_links: bool = False):
+        """Manage the 4am EST purge schedule."""
+        
+        # --- 1. ADD ---
+        if action == "Add":
+            schedules = self.get_schedules()
+            if any(s['channel_id'] == interaction.channel_id for s in schedules):
+                return await interaction.response.send_message("❌ This channel is already scheduled for purging. Use `Edit`.", ephemeral=True)
+
+            schedules.append({
+                "channel_id": interaction.channel_id,
+                "guild_id": interaction.guild_id,
+                "keep_media": keep_media,
+                "keep_links": keep_links
+            })
             self.save_schedules(schedules)
-            await interaction.response.send_message(f"✅ Updated schedule settings.\nOptions: Media={keep_media}, Links={keep_links}", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ This channel is not in the schedule.", ephemeral=True)
+            await interaction.response.send_message(f"✅ Channel added to 4am EST purge schedule.\nOptions: Media={keep_media}, Links={keep_links}", ephemeral=True)
 
-    @purge.command(name="remove", description="Remove this channel from the purge schedule.")
-    async def purge_remove(self, interaction: discord.Interaction):
-        """Remove this channel from the purge schedule."""
-        schedules = self.get_schedules()
-        initial_len = len(schedules)
-        schedules = [s for s in schedules if s['channel_id'] != interaction.channel_id]
-        
-        if len(schedules) < initial_len:
-            self.save_schedules(schedules)
-            await interaction.response.send_message("✅ Channel removed from purge schedule.", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ This channel was not scheduled.", ephemeral=True)
+        # --- 2. EDIT ---
+        elif action == "Edit":
+            schedules = self.get_schedules()
+            found = False
+            for s in schedules:
+                if s['channel_id'] == interaction.channel_id:
+                    s['keep_media'] = keep_media
+                    s['keep_links'] = keep_links
+                    found = True
+                    break
+            
+            if found:
+                self.save_schedules(schedules)
+                await interaction.response.send_message(f"✅ Updated schedule settings.\nOptions: Media={keep_media}, Links={keep_links}", ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ This channel is not in the schedule.", ephemeral=True)
 
-    @purge.command(name="list", description="List all scheduled purge channels in this server.")
-    async def purge_list(self, interaction: discord.Interaction):
-        """List all scheduled purge channels in this server."""
-        schedules = self.get_schedules()
-        guild_schedules = [s for s in schedules if s['guild_id'] == interaction.guild_id]
-        
-        if not guild_schedules:
-            return await interaction.response.send_message("📝 No channels scheduled for purging in this server.", ephemeral=True)
+        # --- 3. REMOVE ---
+        elif action == "Remove":
+            schedules = self.get_schedules()
+            initial_len = len(schedules)
+            schedules = [s for s in schedules if s['channel_id'] != interaction.channel_id]
+            
+            if len(schedules) < initial_len:
+                self.save_schedules(schedules)
+                await interaction.response.send_message("✅ Channel removed from purge schedule.", ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ This channel was not scheduled.", ephemeral=True)
 
-        text = "**🗑️ Scheduled 4am EST purges:**\n"
-        for s in guild_schedules:
-            channel = interaction.guild.get_channel(s['channel_id'])
-            name = channel.mention if channel else f"ID:{s['channel_id']} (Deleted)"
-            opts = []
-            if s.get('keep_media'): opts.append("KeepMedia")
-            if s.get('keep_links'): opts.append("KeepLinks")
-            opts_str = f" ({', '.join(opts)})" if opts else ""
-            text += f"- {name}{opts_str}\n"
+        # --- 4. LIST ---
+        elif action == "List":
+            schedules = self.get_schedules()
+            guild_schedules = [s for s in schedules if s['guild_id'] == interaction.guild_id]
+            
+            if not guild_schedules:
+                return await interaction.response.send_message("📝 No channels scheduled for purging in this server.", ephemeral=True)
 
-        await interaction.response.send_message(text, ephemeral=True)
+            text = "**🗑️ Scheduled 4am EST purges:**\n"
+            for s in guild_schedules:
+                channel = interaction.guild.get_channel(s['channel_id'])
+                name = channel.mention if channel else f"ID:{s['channel_id']} (Deleted)"
+                opts = []
+                if s.get('keep_media'): opts.append("KeepMedia")
+                if s.get('keep_links'): opts.append("KeepLinks")
+                opts_str = f" ({', '.join(opts)})" if opts else ""
+                text += f"- {name}{opts_str}\n"
 
-    # 2. Pins purge Command
+            await interaction.response.send_message(text, ephemeral=True)
 
-    @purge.command(name="pins", description="Toggle auto-deletion of 'user pinned a message'.")
+    # --- SLASH COMMAND: PIN PURGE ---
+    
+    @app_commands.command(name="pinpurge", description="Toggle auto-deletion of 'user pinned a message'.")
     @app_commands.describe(enabled="Enable auto-deletion?")
-    async def purge_pins(self, interaction: discord.Interaction, enabled: bool):
+    @app_commands.default_permissions(administrator=True)
+    async def pinpurge(self, interaction: discord.Interaction, enabled: bool):
         """Toggle auto-deletion of 'user pinned a message' announcements."""
         settings = self.get_pin_settings()
         settings = [s for s in settings if s['guild_id'] != interaction.guild_id]
@@ -228,68 +302,6 @@ class Purge(commands.Cog):
         self.save_pin_settings(settings)
         status = "enabled (messages will be deleted)" if enabled else "disabled"
         await interaction.response.send_message(f"📌 Pin announcement cleaner is now **{status}** for this server.", ephemeral=True)
-
-    # 3. User purge Command
-
-    @purge.command(name="user", description="Purge messages from a specific user.")
-    @app_commands.describe(target="The user to purge", amount="Amount to delete (or 'all')", scope_id="Channel/Category ID (Optional)")
-    async def purge_user(self, interaction: discord.Interaction, target: discord.User, amount: str, scope_id: str = None):
-        """Purge messages from a specific user."""
-        await interaction.response.defer(ephemeral=True)
-        
-        limit = None
-        if amount.lower() != "all":
-            try: limit = int(amount)
-            except ValueError: return await interaction.followup.send("❌ Amount must be a number or 'all'.", ephemeral=True)
-
-        channels_to_purge = []
-        if not scope_id:
-            channels_to_purge.append(interaction.channel)
-        else:
-            try:
-                s_id = int(scope_id)
-                if s_id == interaction.guild_id:
-                    channels_to_purge = interaction.guild.text_channels
-                else:
-                    chan = interaction.guild.get_channel(s_id)
-                    if isinstance(chan, discord.CategoryChannel):
-                        channels_to_purge = chan.text_channels
-                    elif isinstance(chan, discord.TextChannel):
-                        channels_to_purge.append(chan)
-                    else:
-                        return await interaction.followup.send("❌ Invalid Scope ID.", ephemeral=True)
-            except ValueError: return await interaction.followup.send("❌ Scope ID must be a number.", ephemeral=True)
-
-        count_deleted = 0
-        def check(m): return m.author.id == target.id
-
-        for channel in channels_to_purge:
-            try:
-                deleted = await channel.purge(limit=limit, check=check)
-                count_deleted += len(deleted)
-                if limit is not None:
-                    limit -= len(deleted)
-                    if limit <= 0: break
-            except Exception as e: print(f"Failed to purge in {channel.name}: {e}")
-
-        await interaction.followup.send(f"✅ Purged **{count_deleted}** messages from {target.mention}.", ephemeral=True)
-
-    # 4. Message purge Command
-
-    @purge.command(name="messages", description="Bulk delete messages.")
-    @app_commands.describe(amount="Number of messages to delete")
-    async def purge_messages(self, interaction: discord.Interaction, amount: int):
-        """Bulk delete messages."""
-        await interaction.response.defer(ephemeral=True)
-
-        # Basic 'check' logic could be added here if needed, but standard bulk delete usually just wipes
-        # If you want to keep 'keep_media' logic here, we can add params, but kept simple for now per request.
-        
-        try:
-            deleted = await interaction.channel.purge(limit=amount)
-            await interaction.followup.send(f"✅ Purged **{len(deleted)}** messages.", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Failed to purge: {e}", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(Purge(bot))
