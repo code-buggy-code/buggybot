@@ -157,43 +157,43 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
         dashboards = self.get_dashboards()
         dashboard_data = next((d for d in dashboards if d['guild_id'] == channel.guild.id), None)
         
-        # 2. Delete old message
+        # 2. Delete old message safely
         try:
             if dashboard_data and dashboard_data.get('message_id'):
                 old_msg = await channel.fetch_message(dashboard_data['message_id'])
                 await old_msg.delete()
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            pass # Message might already be gone
+            pass 
 
-        # 3. Prepare new message
         config = self.get_config(channel.guild.id)
-        if not config['options']: return # Should have options if it was spawned
+        if not config['options']: return 
         
         embed = self.create_dashboard_embed(channel.guild, config['title'])
         view = BotherView(self.bot, config['options'], channel.guild.id)
         
-        # 4. Send new message
+        # 3. Send new message and update DB ATOMICALLY
         try:
             new_msg = await channel.send(embed=embed, view=view)
             
-            # 5. Update DB using ATOMIC UPDATE
-            # This prevents overwriting other guilds' dashboards if multiple events happen simultaneously
-            updated = self.bot.db.update_doc("bb_dashboards", "guild_id", channel.guild.id, {
-                "message_id": new_msg.id,
-                "channel_id": channel.id
-            })
-            
-            # If the doc didn't exist (unlikely if we just fetched it, but possible on first spawn), append it
-            if not updated:
+            # 4. Prepare data for update and pass FULL object to avoid data loss
+            if dashboard_data:
+                dashboard_data['message_id'] = new_msg.id
+                dashboard_data['channel_id'] = channel.id
+                self.bot.db.update_doc("bb_dashboards", "guild_id", channel.guild.id, dashboard_data)
+            else:
                  new_dash = {
                      "guild_id": channel.guild.id,
                      "channel_id": channel.id,
                      "message_id": new_msg.id
                  }
-                 # Refresh list again before append
-                 dashboards = self.get_dashboards()
-                 dashboards.append(new_dash)
-                 self.save_dashboards(dashboards)
+                 # If it doesn't exist, we must use update_doc carefully or append.
+                 # Assuming update_doc handles upsert if not found, or we rely on append logic elsewhere.
+                 # But sticking to consistent method:
+                 updated = self.bot.db.update_doc("bb_dashboards", "guild_id", channel.guild.id, new_dash)
+                 if not updated:
+                     dashboards = self.get_dashboards()
+                     dashboards.append(new_dash)
+                     self.save_dashboards(dashboards)
                  
         except Exception as e:
             print(f"Failed to repost Bother Buggy dashboard: {e}")
@@ -322,19 +322,18 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
         # 2. Send the dashboard message initially
         msg = await interaction.channel.send(embed=embed, view=view)
 
-        # 3. Save using atomic update or append
-        updated = self.bot.db.update_doc("bb_dashboards", "guild_id", interaction.guild_id, {
+        # 3. Save using atomic update with full object
+        new_dash = {
+            "guild_id": interaction.guild_id,
             "channel_id": interaction.channel_id,
             "message_id": msg.id
-        })
+        }
+        
+        updated = self.bot.db.update_doc("bb_dashboards", "guild_id", interaction.guild_id, new_dash)
         
         if not updated:
             dashboards = self.get_dashboards()
-            dashboards.append({
-                "guild_id": interaction.guild_id,
-                "channel_id": interaction.channel_id,
-                "message_id": msg.id
-            })
+            dashboards.append(new_dash)
             self.save_dashboards(dashboards)
 
 async def setup(bot):
