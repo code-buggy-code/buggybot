@@ -225,7 +225,8 @@ class Admin(commands.Cog):
                 except Exception as e:
                     print(f"Failed to revive sticky: {e}")
             
-            self.save_stickies(stickies)
+            # Use atomic update here too
+            self.bot.db.update_doc("sticky_messages", "channel_id", channel_id, target)
 
     # --- EVENTS ---
 
@@ -432,9 +433,12 @@ class Admin(commands.Cog):
         if mode == "after" and delay > 0:
             await asyncio.sleep(delay)
             # Re-fetch stickies to ensure it wasn't deleted during the sleep
+            # Because we sleep, the 'stickies' var is stale.
+            # Using get_stickies() again is safe, but we will use atomic update later anyway.
             current_stickies = self.get_stickies()
             sticky_data = next((s for s in current_stickies if s['channel_id'] == message.channel.id), None)
             if not sticky_data: return
+            
             # IMPORTANT: Do not check 'active' here strictly, as we want to revive it if it was deleted
             # if not sticky_data.get('active', True): return
 
@@ -452,15 +456,14 @@ class Admin(commands.Cog):
         # Send new sticky
         try:
             new_msg = await message.channel.send(sticky_data['content'])
-            # Refresh list again before saving to capture any race conditions
-            stickies = self.get_stickies()
-            for s in stickies:
-                if s['channel_id'] == message.channel.id:
-                    s['last_message_id'] = new_msg.id
-                    s['last_posted_at'] = datetime.datetime.now().timestamp()
-                    s['active'] = True # Force active to ensure it stays alive
-                    break
-            self.save_stickies(stickies)
+            
+            # Use atomic update to avoid overwriting other channels' data
+            self.bot.db.update_doc("sticky_messages", "channel_id", message.channel.id, {
+                "last_message_id": new_msg.id,
+                "last_posted_at": datetime.datetime.now().timestamp(),
+                "active": True
+            })
+
         except Exception as e:
             print(f"Failed to send sticky: {e}")
 
@@ -540,8 +543,13 @@ class Admin(commands.Cog):
     async def stick(self, interaction: discord.Interaction, message: str):
         """Stick a message to the bottom of this channel."""
         content = message.replace("\\n", "\n")
+        
+        # Clean up existing sticky for this channel
         stickies = self.get_stickies()
-        stickies = [s for s in stickies if s['channel_id'] != interaction.channel_id]
+        existing = next((s for s in stickies if s['channel_id'] == interaction.channel_id), None)
+        if existing:
+            # We don't need to delete from DB, we will overwrite/update
+            pass
 
         new_sticky = {
             "channel_id": interaction.channel_id,
@@ -559,12 +567,12 @@ class Admin(commands.Cog):
         except Exception as e:
             return await interaction.response.send_message(f"❌ Failed to send sticky message: {e}", ephemeral=True)
 
-        stickies.append(new_sticky)
-        self.save_stickies(stickies)
-        # If we didn't defer, we can't follow up, but we sent the message as the sticky itself.
-        # But slash commands need a response. The send_message above serves as the sticky AND the response.
-        # Ideally, we reply ephemerally "Set!" and send the real message separately, but to keep it simple:
-        # We used the response as the sticky.
+        # Upsert logic
+        updated = self.bot.db.update_doc("sticky_messages", "channel_id", interaction.channel_id, new_sticky)
+        if not updated:
+            stickies = self.get_stickies()
+            stickies.append(new_sticky)
+            self.save_stickies(stickies)
 
     @app_commands.command(name="unstick", description="Remove the sticky message from this channel.")
     @app_commands.default_permissions(administrator=True)
@@ -582,6 +590,7 @@ class Admin(commands.Cog):
                 await msg.delete()
             except: pass
 
+        # Actually delete from DB
         stickies = [s for s in stickies if s['channel_id'] != interaction.channel_id]
         self.save_stickies(stickies)
         await interaction.response.send_message("✅ Sticky message removed.", ephemeral=True)
