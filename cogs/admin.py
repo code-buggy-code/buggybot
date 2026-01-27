@@ -313,6 +313,13 @@ class Admin(commands.Cog):
     @commands.Cog.listener()
     async def on_message_delete(self, message):
         """Logs deleted messages."""
+        # 1. SPECIAL CHECK: If this was a sticky message, IGNORE IT.
+        # This prevents log spam AND ensures we don't accidentally think a user deleted it.
+        # The sticky system handles deletions in `handle_sticky`.
+        stickies = self.get_stickies()
+        if any(s.get('last_message_id') == message.id for s in stickies):
+            return
+
         # Ignored if bot OR if author is buggy
         if message.author.bot or message.author.id == BUGGY_ID or not message.guild:
             return
@@ -428,7 +435,8 @@ class Admin(commands.Cog):
             current_stickies = self.get_stickies()
             sticky_data = next((s for s in current_stickies if s['channel_id'] == message.channel.id), None)
             if not sticky_data: return
-            if not sticky_data.get('active', True): return
+            # IMPORTANT: Do not check 'active' here strictly, as we want to revive it if it was deleted
+            # if not sticky_data.get('active', True): return
 
         # Delete old sticky
         # If the old sticky is NOT found, it means it was deleted (e.g. by bother.py or user).
@@ -450,7 +458,7 @@ class Admin(commands.Cog):
                 if s['channel_id'] == message.channel.id:
                     s['last_message_id'] = new_msg.id
                     s['last_posted_at'] = datetime.datetime.now().timestamp()
-                    s['active'] = True # Ensure active
+                    s['active'] = True # Force active to ensure it stays alive
                     break
             self.save_stickies(stickies)
         except Exception as e:
