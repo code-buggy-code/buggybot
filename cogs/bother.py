@@ -36,7 +36,7 @@ class BotherButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         """Sends the private message to buggy."""
-        # Defer immediately to "acknowledge" silently so we can delete it later
+        # Defer immediately to prevent timeout
         await interaction.response.defer(ephemeral=True)
 
         buggy = interaction.client.get_user(BUGGY_ID)
@@ -57,7 +57,7 @@ class BotherButton(discord.ui.Button):
         
         try:
             await buggy.send(msg)
-            # Success! Delete the "Thinking..." state so it appears invisible
+            # Silent completion: Delete the "Thinking..." message so the user can click again immediately
             await interaction.delete_original_response()
         except discord.Forbidden:
             await interaction.followup.send("❌ I couldn't DM buggy! Make sure his DMs are open.", ephemeral=True)
