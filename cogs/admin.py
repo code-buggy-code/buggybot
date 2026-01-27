@@ -432,16 +432,14 @@ class Admin(commands.Cog):
 
         # Delete old sticky
         # If the old sticky is NOT found, it means it was deleted (e.g. by bother.py or user).
-        # In that case, we mark it as inactive and STOP loop.
+        # We do NOT mark it inactive anymore, to prevent conflicts with other bots/systems deleting it.
         if sticky_data.get('last_message_id'):
             try:
                 old_msg = await message.channel.fetch_message(sticky_data['last_message_id'])
                 await old_msg.delete()
             except (discord.NotFound, discord.HTTPException):
-                # Message is gone. Pause the sticky until revived.
-                sticky_data['active'] = False
-                self.save_stickies(stickies)
-                return
+                # Message is gone. We continue to post the new one anyway.
+                pass
         
         # Send new sticky
         try:
