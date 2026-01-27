@@ -457,12 +457,15 @@ class Admin(commands.Cog):
         try:
             new_msg = await message.channel.send(sticky_data['content'])
             
+            # Update local object
+            sticky_data['last_message_id'] = new_msg.id
+            sticky_data['last_posted_at'] = datetime.datetime.now().timestamp()
+            sticky_data['active'] = True
+
             # Use atomic update to avoid overwriting other channels' data
-            self.bot.db.update_doc("sticky_messages", "channel_id", message.channel.id, {
-                "last_message_id": new_msg.id,
-                "last_posted_at": datetime.datetime.now().timestamp(),
-                "active": True
-            })
+            # CRITICAL FIX: Pass the FULL sticky_data object to avoid replacing it with a partial dict
+            # which would cause 'content' to be lost.
+            self.bot.db.update_doc("sticky_messages", "channel_id", message.channel.id, sticky_data)
 
         except Exception as e:
             print(f"Failed to send sticky: {e}")
