@@ -11,11 +11,12 @@ from typing import Literal
 # - get_sticky(channel_id)
 # - save_sticky(data)
 # - delete_sticky(channel_id)
-# - delayed_repost(channel, delay) [New Helper]
+# - delayed_repost(channel, delay)
 # - repost_sticky(channel)
 # - on_message(message)
 # - sticky(interaction, message, set) [Slash Command]
 # - stickytime(interaction, timing, number, unit) [Slash Command]
+# - stickylist(interaction) [Slash Command]
 # - kick(interaction, user, reason) [Slash Command]
 # - ban(interaction, user, reason) [Slash Command]
 # - unban(interaction, user_id) [Slash Command]
@@ -199,6 +200,41 @@ class Admin(commands.Cog):
         mode_text = "Cooldown (Before)" if timing.value == "before" else "Delay (After)"
         
         await interaction.response.send_message(f"✅ Sticky timing updated.\nMode: **{mode_text}**\nTime: **{delay_text}**", ephemeral=True)
+
+    @app_commands.command(name="stickylist", description="List all sticky messages in the server, sorted by channel order.")
+    @app_commands.default_permissions(administrator=True)
+    async def stickylist(self, interaction: discord.Interaction):
+        # 1. Get all sticky configs
+        collection = self.bot.db.get_collection("sticky_messages")
+        
+        # 2. Map channel IDs to their sticky data for easy lookup
+        sticky_map = {s['channel_id']: s for s in collection}
+        
+        # 3. Iterate through guild channels in their natural order (Discord returns them sorted)
+        # This ensures the list matches the visual order in the sidebar
+        sorted_stickies = []
+        for channel in interaction.guild.text_channels:
+            if channel.id in sticky_map:
+                sorted_stickies.append((channel, sticky_map[channel.id]))
+        
+        if not sorted_stickies:
+            return await interaction.response.send_message("📝 No active sticky messages found in this server.", ephemeral=True)
+        
+        # 4. Build the embed
+        description = ""
+        for channel, data in sorted_stickies:
+            mode = data.get('mode', 'after').title()
+            delay = data.get('delay', 0)
+            short_content = (data['content'][:60] + "...") if len(data['content']) > 60 else data['content']
+            
+            description += f"{channel.mention} • **{mode}** ({delay}s)\n`{short_content}`\n\n"
+            
+        embed = discord.Embed(
+            title="📌 Sticky Messages",
+            description=description,
+            color=discord.Color.gold()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # --- GENERAL ADMIN COMMANDS ---
 
