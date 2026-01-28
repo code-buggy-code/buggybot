@@ -20,7 +20,7 @@ from typing import Literal
 # - get_dashboards()
 # - save_dashboards(dashboards)
 # - create_dashboard_embed(guild, title)
-# - delayed_repost(channel, delay) [New Helper]
+# - delayed_repost(channel_id, delay) [Updated: Uses ID]
 # - repost_dashboard(channel)
 # - on_message(message)
 # - bb(interaction, action, label, key, ping_text) [Slash Command]
@@ -149,20 +149,35 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
 
     # --- STICKY / REPOST LOGIC ---
 
-    async def delayed_repost(self, channel, delay):
+    async def delayed_repost(self, channel_id, delay):
         """Waits for the delay to pass. If not cancelled, reposts the dashboard."""
         try:
             await asyncio.sleep(delay)
-            await self.repost_dashboard(channel)
+            
+            # Re-fetch channel to ensure freshness after the wait
+            channel = self.bot.get_channel(channel_id)
+            if not channel:
+                try:
+                    channel = await self.bot.fetch_channel(channel_id)
+                except:
+                    pass
+            
+            if channel:
+                await self.repost_dashboard(channel)
+            else:
+                print(f"Could not find channel {channel_id} to repost dashboard.")
+
         except asyncio.CancelledError:
             # Task was cancelled because a new message appeared (resetting the timer)
             pass
+        except Exception as e:
+            print(f"Error in delayed_repost: {e}")
         finally:
             # Cleanup the task reference
-            if channel.id in self.sticky_tasks:
+            if channel_id in self.sticky_tasks:
                 # Only remove if it's THIS task (avoid removing a newer replacement)
-                if self.sticky_tasks[channel.id] == asyncio.current_task():
-                    del self.sticky_tasks[channel.id]
+                if self.sticky_tasks[channel_id] == asyncio.current_task():
+                    del self.sticky_tasks[channel_id]
 
     async def repost_dashboard(self, channel):
         """Deletes the old dashboard and posts a new one at the bottom."""
@@ -240,7 +255,7 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
                 
                 # Start a new timer task
                 self.sticky_tasks[message.channel.id] = asyncio.create_task(
-                    self.delayed_repost(message.channel, delay)
+                    self.delayed_repost(message.channel.id, delay)
                 )
                 return # We are done; the task will handle the repost later
             
