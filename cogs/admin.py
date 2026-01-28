@@ -81,7 +81,8 @@ class Admin(commands.Cog):
 
         # Send new message
         try:
-            embed = discord.Embed(description=data['content'], color=discord.Color.gold())
+            # Updated color to #ff90aa
+            embed = discord.Embed(description=data['content'], color=discord.Color(0xff90aa))
             # Optional: Add a footer or title if you want it to look distinct
             
             new_msg = await channel.send(embed=embed)
@@ -232,7 +233,7 @@ class Admin(commands.Cog):
         embed = discord.Embed(
             title="📌 Sticky Messages",
             description=description,
-            color=discord.Color.gold()
+            color=discord.Color(0xff90aa) # Updated color here too!
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
