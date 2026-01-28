@@ -67,6 +67,9 @@ class Admin(commands.Cog):
         
         self.vc_state = {}
         self.check_vcs.start()
+        
+        # Cache to prevent the bot from triggering stickies on its own sticky posts
+        self.ignore_ids = set()
 
         # Vote Kick Constants
         self.VOTE_THRESHOLD = 3 
@@ -220,6 +223,8 @@ class Admin(commands.Cog):
             if channel:
                 try:
                     new_msg = await channel.send(target['content'])
+                    # Add to ignore list immediately
+                    self.ignore_ids.add(new_msg.id)
                     target['last_message_id'] = new_msg.id
                     target['last_posted_at'] = datetime.datetime.now().timestamp()
                 except Exception as e:
@@ -240,7 +245,7 @@ class Admin(commands.Cog):
         if not message.author.bot:
             await self.handle_dm_request(message)
 
-        # 2. Sticky Logic (Allowed for Bots, but check loop prevention)
+        # 2. Sticky Logic 
         stickies = self.get_stickies()
         sticky_data = next((s for s in stickies if s['channel_id'] == message.channel.id), None)
         
@@ -249,9 +254,21 @@ class Admin(commands.Cog):
             if not sticky_data.get('active', True):
                 return
 
-            # Loop Prevention: Ignore ALL messages from the bot itself
-            # This prevents the bot's own responses from triggering a sticky repost
-            if message.author.id == self.bot.user.id:
+            # LOOP PREVENTION:
+            # 1. Check if this message IS the sticky message we just posted (via cache)
+            if message.id in self.ignore_ids:
+                self.ignore_ids.discard(message.id)
+                return
+
+            # 2. Check via DB ID (fallback)
+            if sticky_data.get('last_message_id') == message.id:
+                return
+
+            # 3. Ignore other bots (BUT allow myself if it wasn't the sticky message itself)
+            # This allows /anon messages (sent by bot) or other cogs to trigger stickies
+            is_me = (message.author.id == self.bot.user.id)
+            
+            if message.author.bot and not is_me:
                 return
 
             await self.handle_sticky(message)
@@ -434,7 +451,6 @@ class Admin(commands.Cog):
             await asyncio.sleep(delay)
             # Re-fetch stickies to ensure it wasn't deleted during the sleep
             # Because we sleep, the 'stickies' var is stale.
-            # Using get_stickies() again is safe, but we will use atomic update later anyway.
             current_stickies = self.get_stickies()
             sticky_data = next((s for s in current_stickies if s['channel_id'] == message.channel.id), None)
             if not sticky_data: return
@@ -443,8 +459,6 @@ class Admin(commands.Cog):
             # if not sticky_data.get('active', True): return
 
         # Delete old sticky
-        # If the old sticky is NOT found, it means it was deleted (e.g. by bother.py or user).
-        # We do NOT mark it inactive anymore, to prevent conflicts with other bots/systems deleting it.
         if sticky_data.get('last_message_id'):
             try:
                 old_msg = await message.channel.fetch_message(sticky_data['last_message_id'])
@@ -457,6 +471,9 @@ class Admin(commands.Cog):
         try:
             new_msg = await message.channel.send(sticky_data['content'])
             
+            # Add to ignore list so we don't trigger ourselves
+            self.ignore_ids.add(new_msg.id)
+
             # Update local object
             sticky_data['last_message_id'] = new_msg.id
             sticky_data['last_posted_at'] = datetime.datetime.now().timestamp()
@@ -464,7 +481,6 @@ class Admin(commands.Cog):
 
             # Use atomic update to avoid overwriting other channels' data
             # CRITICAL FIX: Pass the FULL sticky_data object to avoid replacing it with a partial dict
-            # which would cause 'content' to be lost.
             self.bot.db.update_doc("sticky_messages", "channel_id", message.channel.id, sticky_data)
 
         except Exception as e:
