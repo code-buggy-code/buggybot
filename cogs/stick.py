@@ -12,8 +12,11 @@ from typing import Literal
 # - save_stickies(stickies)
 # - get_sticky_settings()
 # - save_sticky_settings(settings)
+# - send_sticky(channel) [New Helper]
+# - sticky_task(channel, delay) [New Task]
 # - handle_sticky(message)
 # - on_message(message)
+# - on_message_delete(message)
 # - sticky(interaction, action, message) [Slash]
 # - stickytime(interaction, timing, number, unit) [Slash]
 # setup(bot)
@@ -23,6 +26,7 @@ class Stickies(commands.Cog):
         self.bot = bot
         self.description = "Manage sticky messages."
         self.ignore_ids = set()
+        self.pending_tasks = {} # {channel_id: asyncio.Task}
 
     # --- HELPERS ---
 
@@ -41,6 +45,53 @@ class Stickies(commands.Cog):
     def save_sticky_settings(self, settings):
         """Saves sticky settings."""
         self.bot.db.save_collection("sticky_settings", settings)
+
+    async def send_sticky(self, channel):
+        """Actually sends the sticky message."""
+        stickies = self.get_stickies()
+        sticky_data = next((s for s in stickies if s['channel_id'] == channel.id), None)
+        
+        if not sticky_data: return
+
+        # Check if the last message is already the sticky to avoid double posting
+        # (Though logic usually handles deletion, this is a safety check)
+        if channel.last_message_id == sticky_data.get('last_message_id'):
+             return
+
+        # Delete old sticky
+        if sticky_data.get('last_message_id'):
+            try:
+                old_msg = await channel.fetch_message(sticky_data['last_message_id'])
+                await old_msg.delete()
+            except (discord.NotFound, discord.HTTPException):
+                pass
+        
+        # Send new sticky
+        try:
+            embed = discord.Embed(description=sticky_data['content'], color=discord.Color(0xff90aa))
+            new_msg = await channel.send(embed=embed)
+            
+            self.ignore_ids.add(new_msg.id)
+
+            sticky_data['last_message_id'] = new_msg.id
+            sticky_data['last_posted_at'] = datetime.datetime.now().timestamp()
+            sticky_data['active'] = True
+
+            self.bot.db.update_doc("sticky_messages", "channel_id", channel.id, sticky_data)
+
+        except Exception as e:
+            print(f"Failed to send sticky: {e}")
+
+    async def sticky_task(self, channel, delay):
+        """Waits for delay then sends sticky."""
+        try:
+            await asyncio.sleep(delay)
+            await self.send_sticky(channel)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if channel.id in self.pending_tasks:
+                del self.pending_tasks[channel.id]
 
     async def handle_sticky(self, message):
         """Resends the sticky message to the bottom."""
@@ -66,37 +117,23 @@ class Stickies(commands.Cog):
             last_posted = sticky_data.get('last_posted_at', 0)
             if (now - last_posted) < delay:
                 return
+            # If cooldown passed, send immediately
+            await self.send_sticky(message.channel)
 
-        # LOGIC 2: AFTER (Delay)
-        if mode == "after" and delay > 0:
-            await asyncio.sleep(delay)
-            current_stickies = self.get_stickies()
-            sticky_data = next((s for s in current_stickies if s['channel_id'] == message.channel.id), None)
-            if not sticky_data: return
-
-        # Delete old sticky
-        if sticky_data.get('last_message_id'):
-            try:
-                old_msg = await message.channel.fetch_message(sticky_data['last_message_id'])
-                await old_msg.delete()
-            except (discord.NotFound, discord.HTTPException):
-                pass
-        
-        # Send new sticky
-        try:
-            embed = discord.Embed(description=sticky_data['content'], color=discord.Color(0xff90aa))
-            new_msg = await message.channel.send(embed=embed)
-            
-            self.ignore_ids.add(new_msg.id)
-
-            sticky_data['last_message_id'] = new_msg.id
-            sticky_data['last_posted_at'] = datetime.datetime.now().timestamp()
-            sticky_data['active'] = True
-
-            self.bot.db.update_doc("sticky_messages", "channel_id", message.channel.id, sticky_data)
-
-        except Exception as e:
-            print(f"Failed to send sticky: {e}")
+        # LOGIC 2: AFTER (Delay/Silence)
+        elif mode == "after":
+            if delay > 0:
+                # Cancel existing task (reset timer)
+                if message.channel.id in self.pending_tasks:
+                    self.pending_tasks[message.channel.id].cancel()
+                
+                # Start new task
+                self.pending_tasks[message.channel.id] = asyncio.create_task(
+                    self.sticky_task(message.channel, delay)
+                )
+            else:
+                # No delay, send immediately
+                await self.send_sticky(message.channel)
 
     # --- EVENTS ---
 
