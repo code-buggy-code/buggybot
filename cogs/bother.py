@@ -23,8 +23,7 @@ from typing import Literal
 # - repost_dashboard(channel)
 # - on_message(message)
 # - bb(interaction, action, label, key, ping_text) [Slash Command]
-# - bbdashboard(interaction, text) [Slash Command]
-# - bbset(interaction, active) [Slash Command]
+# - bbdashboard(interaction, active, text) [Slash Command]
 # - bbtime(interaction, timing, number, unit) [Slash Command]
 # setup(bot)
 
@@ -306,15 +305,20 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
             await interaction.response.send_message(content, ephemeral=True)
 
     @app_commands.command(name="bbdashboard", description="Spawn the Bother Buggy Dashboard in this channel.")
-    @app_commands.describe(text="[Optional] Set a new title for the dashboard before spawning.")
+    @app_commands.describe(
+        active="Should the dashboard stick to the bottom?",
+        text="[Optional] Set a new title for the dashboard before spawning."
+    )
     @app_commands.default_permissions(administrator=True)
-    async def bbdashboard(self, interaction: discord.Interaction, text: str = None):
+    async def bbdashboard(self, interaction: discord.Interaction, active: bool, text: str = None):
         config = self.get_config(interaction.guild_id)
         
-        # Update title if provided
+        # Update settings immediately
+        config['sticky_active'] = active
         if text:
             config['title'] = text
-            self.save_config(interaction.guild_id, config)
+        
+        self.save_config(interaction.guild_id, config)
             
         if not config['options']:
             return await interaction.response.send_message("❌ You need to add some options first via `/bb action:Add`!", ephemeral=True)
@@ -324,7 +328,9 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
         
         # Send the dashboard message initially
         msg = await interaction.channel.send(embed=embed, view=view)
-        await interaction.response.send_message("✅ Dashboard spawned! Use `/bbset true` to make it sticky.", ephemeral=True)
+        
+        status_text = "Enabled" if active else "Disabled"
+        await interaction.response.send_message(f"✅ Dashboard spawned! Sticky mode is **{status_text}**.", ephemeral=True)
 
         # Save using atomic update
         new_dash = {
@@ -340,22 +346,6 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
             dashboards = self.get_dashboards()
             dashboards.append(new_dash)
             self.save_dashboards(dashboards)
-
-    @app_commands.command(name="bbset", description="Turn the dashboard sticky mode on or off.")
-    @app_commands.describe(active="Should the dashboard stick to the bottom?")
-    @app_commands.default_permissions(administrator=True)
-    async def bbset(self, interaction: discord.Interaction, active: bool):
-        """Turn the dashboard sticky mode on or off."""
-        config = self.get_config(interaction.guild_id)
-        config['sticky_active'] = active
-        self.save_config(interaction.guild_id, config)
-        
-        state = "Enabled" if active else "Disabled"
-        await interaction.response.send_message(f"✅ Bother Buggy Dashboard Sticky is now **{state}**.", ephemeral=True)
-        
-        # If enabled, force a repost now
-        if active:
-            await self.repost_dashboard(interaction.channel)
 
     @app_commands.command(name="bbtime", description="Configure dashboard sticky timing.")
     @app_commands.describe(timing="Mode: 'before' (Cooldown) or 'after' (Delay)", number="Time amount", unit="Time unit")
