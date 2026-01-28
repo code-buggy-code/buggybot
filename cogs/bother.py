@@ -36,15 +36,15 @@ class BotherButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         """Sends the private message to buggy."""
-        # Defer immediately to prevent timeout
-        await interaction.response.defer(ephemeral=True)
-
+        # We SKIP deferring to avoid the "Thinking..." message entirely.
+        # We rely on the DM being sent quickly (under 3 seconds).
+        
         buggy = interaction.client.get_user(BUGGY_ID)
         if not buggy:
             try:
                 buggy = await interaction.client.fetch_user(BUGGY_ID)
             except:
-                return await interaction.followup.send("❌ I couldn't find buggy to bother! Is the ID correct?", ephemeral=True)
+                return await interaction.response.send_message("❌ I couldn't find buggy to bother! Is the ID correct?", ephemeral=True)
 
         # Formatting: [Nickname] [Ping Text]
         # Then Mention + Username + Channel Link
@@ -57,10 +57,18 @@ class BotherButton(discord.ui.Button):
         
         try:
             await buggy.send(msg)
-            # Silent completion: Delete the "Thinking..." message so the user can click again immediately
-            await interaction.delete_original_response()
+            # MAGIC TRICK: We "edit" the message with the exact same view.
+            # This counts as a valid response to stop the interaction loading state
+            # WITHOUT showing any text or "Thinking..." message in the channel!
+            await interaction.response.edit_message(view=self.view)
         except discord.Forbidden:
-            await interaction.followup.send("❌ I couldn't DM buggy! Make sure his DMs are open.", ephemeral=True)
+            # If it fails, we send an ephemeral error (only visible to the user)
+            await interaction.response.send_message("❌ I couldn't DM buggy! Make sure his DMs are open.", ephemeral=True)
+        except Exception as e:
+            # Fallback if connection times out
+            try:
+                await interaction.response.send_message("❌ Failed to send alert.", ephemeral=True)
+            except: pass
 
 class BotherView(discord.ui.View):
     def __init__(self, bot, options, guild_id):
