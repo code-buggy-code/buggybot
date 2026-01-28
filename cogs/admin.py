@@ -549,10 +549,10 @@ class Admin(commands.Cog):
     @app_commands.command(name="sticky", description="Manage sticky messages.")
     @app_commands.describe(
         action="Choose an action",
-        message="The message content (Required for Add/Edit)"
+        message="The message content (Required for Add)"
     )
     @app_commands.default_permissions(administrator=True)
-    async def sticky(self, interaction: discord.Interaction, action: Literal["Add", "Edit", "List", "Remove"], message: str = None):
+    async def sticky(self, interaction: discord.Interaction, action: Literal["Add", "List", "Remove"], message: str = None):
         """Manage sticky messages."""
         
         if action == "List":
@@ -581,7 +581,7 @@ class Admin(commands.Cog):
             
             return await interaction.response.send_message(text, ephemeral=True)
 
-        # Logic for Add/Edit/Remove
+        # Logic for Add/Remove
         
         if action == "Remove":
             stickies = self.get_stickies()
@@ -602,7 +602,7 @@ class Admin(commands.Cog):
                 await interaction.response.send_message("❌ No sticky message found in this channel.", ephemeral=True)
             return
 
-        # Add or Edit requires message
+        # Add requires message
         if not message:
             return await interaction.response.send_message(f"❌ You must provide a message to {action} a sticky!", ephemeral=True)
 
@@ -611,7 +611,7 @@ class Admin(commands.Cog):
 
         if action == "Add":
             if existing:
-                return await interaction.response.send_message("⚠️ A sticky message already exists in this channel. Use `Edit` to change it.", ephemeral=True)
+                return await interaction.response.send_message("⚠️ A sticky message already exists in this channel. Remove it first to set a new one.", ephemeral=True)
             
             # Create new
             new_sticky = {
@@ -637,31 +637,6 @@ class Admin(commands.Cog):
                 await interaction.response.send_message("✅ Sticky message added!", ephemeral=True)
             except Exception as e:
                 await interaction.response.send_message(f"❌ Failed to send sticky: {e}", ephemeral=True)
-
-        elif action == "Edit":
-            if not existing:
-                return await interaction.response.send_message("❌ No sticky message found in this channel to edit. Use `Add`.", ephemeral=True)
-            
-            # Update existing
-            existing['content'] = content
-            # Delete old if exists
-            if existing.get('last_message_id'):
-                try:
-                    old_msg = await interaction.channel.fetch_message(existing['last_message_id'])
-                    await old_msg.delete()
-                except: pass
-            
-            # Send new
-            try:
-                embed = discord.Embed(description=content, color=discord.Color(0xff90aa))
-                msg = await interaction.channel.send(embed=embed)
-                existing['last_message_id'] = msg.id
-                existing['last_posted_at'] = datetime.datetime.now().timestamp()
-                
-                self.bot.db.update_doc("sticky_messages", "channel_id", interaction.channel_id, existing)
-                await interaction.response.send_message("✅ Sticky message updated!", ephemeral=True)
-            except Exception as e:
-                await interaction.response.send_message(f"❌ Failed to repost sticky: {e}", ephemeral=True)
 
     @app_commands.command(name="stickytime", description="Configure server-wide sticky message timing.")
     @app_commands.describe(timing="Mode: 'before' (Cooldown) or 'after' (Delay)", number="Time amount", unit="Time unit")
