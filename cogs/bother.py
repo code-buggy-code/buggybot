@@ -20,6 +20,7 @@ from typing import Literal
 # - get_dashboards()
 # - save_dashboards(dashboards)
 # - create_dashboard_embed(guild, title)
+# - delayed_repost(channel, delay) [New Helper]
 # - repost_dashboard(channel)
 # - on_message(message)
 # - bb(interaction, action, label, key, ping_text) [Slash Command]
@@ -37,7 +38,6 @@ class BotherButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         """Sends the private message to buggy."""
         # We SKIP deferring to avoid the "Thinking..." message entirely.
-        # We rely on the DM being sent quickly (under 3 seconds).
         
         buggy = interaction.client.get_user(BUGGY_ID)
         if not buggy:
@@ -57,15 +57,11 @@ class BotherButton(discord.ui.Button):
         
         try:
             await buggy.send(msg)
-            # MAGIC TRICK: We "edit" the message with the exact same view.
-            # This counts as a valid response to stop the interaction loading state
-            # WITHOUT showing any text or "Thinking..." message in the channel!
+            # MAGIC TRICK: Edit with the same view to acknowledge silently
             await interaction.response.edit_message(view=self.view)
         except discord.Forbidden:
-            # If it fails, we send an ephemeral error (only visible to the user)
             await interaction.response.send_message("❌ I couldn't DM buggy! Make sure his DMs are open.", ephemeral=True)
-        except Exception as e:
-            # Fallback if connection times out
+        except Exception:
             try:
                 await interaction.response.send_message("❌ Failed to send alert.", ephemeral=True)
             except: pass
@@ -77,7 +73,6 @@ class BotherView(discord.ui.View):
         
         # Options: List of {"label": str, "key": str, "ping_text": str}
         for opt in options:
-            # We use the "key" in the custom_id to make it unique
             custom_id = f"bb_{guild_id}_{opt['key']}"
             self.add_item(BotherButton(label=opt['label'], custom_id=custom_id, ping_text=opt['ping_text']))
 
@@ -85,6 +80,8 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
     def __init__(self, bot):
         self.bot = bot
         self.description = "Bother Buggy: A dashboard system for users to send private alerts to buggy."
+        # Keep track of active tasks to cancel them if a new message comes in (Debounce logic)
+        self.sticky_tasks = {} # {channel_id: asyncio.Task}
 
     async def cog_load(self):
         """Restore persistent views when the cog loads."""
@@ -108,10 +105,8 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
     def get_config(self, guild_id):
         """Returns the full config dict for a guild."""
         collection = self.bot.db.get_collection("bb_options")
-        # Structure: [{"guild_id": 123, "options": [...], "title": "...", "sticky_active": bool, ...}]
         doc = next((d for d in collection if d['guild_id'] == guild_id), None)
         
-        # Default structure
         if not doc:
             doc = {
                 "guild_id": guild_id, 
@@ -122,7 +117,6 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
                 "sticky_delay": 0
             }
         
-        # Ensure fields exist (migration safe)
         if "title" not in doc: doc["title"] = "🔔 Bother Buggy"
         if "sticky_active" not in doc: doc["sticky_active"] = False
         if "sticky_mode" not in doc: doc["sticky_mode"] = "after"
@@ -131,7 +125,7 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
         return doc
 
     def save_config(self, guild_id, config):
-        """Saves the config for a guild using update_doc to prevent race conditions."""
+        """Saves the config for a guild using update_doc."""
         updated = self.bot.db.update_doc("bb_options", "guild_id", guild_id, config)
         if not updated:
             collection = self.bot.db.get_collection("bb_options")
@@ -140,15 +134,12 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
                 self.bot.db.save_collection("bb_options", collection)
 
     def get_dashboards(self):
-        """Returns active dashboard messages to restore views."""
         return self.bot.db.get_collection("bb_dashboards")
 
     def save_dashboards(self, dashboards):
-        """Saves active dashboards."""
         self.bot.db.save_collection("bb_dashboards", dashboards)
 
     def create_dashboard_embed(self, guild, title):
-        """Creates the minimal embed for the dashboard."""
         embed = discord.Embed(
             title=title,
             description="Click what you want to do with buggy!",
@@ -158,13 +149,27 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
 
     # --- STICKY / REPOST LOGIC ---
 
+    async def delayed_repost(self, channel, delay):
+        """Waits for the delay to pass. If not cancelled, reposts the dashboard."""
+        try:
+            await asyncio.sleep(delay)
+            await self.repost_dashboard(channel)
+        except asyncio.CancelledError:
+            # Task was cancelled because a new message appeared (resetting the timer)
+            pass
+        finally:
+            # Cleanup the task reference
+            if channel.id in self.sticky_tasks:
+                # Only remove if it's THIS task (avoid removing a newer replacement)
+                if self.sticky_tasks[channel.id] == asyncio.current_task():
+                    del self.sticky_tasks[channel.id]
+
     async def repost_dashboard(self, channel):
         """Deletes the old dashboard and posts a new one at the bottom."""
-        # 1. Fetch CURRENT data fresh from DB
         dashboards = self.get_dashboards()
         dashboard_data = next((d for d in dashboards if d['guild_id'] == channel.guild.id), None)
         
-        # 2. Delete old message safely
+        # Delete old message safely
         try:
             if dashboard_data and dashboard_data.get('message_id'):
                 old_msg = await channel.fetch_message(dashboard_data['message_id'])
@@ -178,11 +183,9 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
         embed = self.create_dashboard_embed(channel.guild, config['title'])
         view = BotherView(self.bot, config['options'], channel.guild.id)
         
-        # 3. Send new message and update DB ATOMICALLY
         try:
             new_msg = await channel.send(embed=embed, view=view)
             
-            # 4. Prepare data for update
             now = datetime.datetime.now().timestamp()
             
             if dashboard_data:
@@ -224,27 +227,33 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
         if not config.get('sticky_active', False):
             return
 
-        # 3. Check Timing Logic
         delay = config.get('sticky_delay', 0)
         mode = config.get('sticky_mode', 'after')
         now = datetime.datetime.now().timestamp()
         
+        # Mode: After (Delay/Silence)
+        if mode == 'after':
+            if delay > 0:
+                # Cancel existing timer (this resets the silence clock)
+                if message.channel.id in self.sticky_tasks:
+                    self.sticky_tasks[message.channel.id].cancel()
+                
+                # Start a new timer task
+                self.sticky_tasks[message.channel.id] = asyncio.create_task(
+                    self.delayed_repost(message.channel, delay)
+                )
+                return # We are done; the task will handle the repost later
+            
+            # If delay is 0, we fall through to immediate repost
+        
         # Mode: Before (Cooldown)
-        if mode == 'before' and delay > 0:
-            last_posted = dashboard.get('last_posted_at', 0)
-            if (now - last_posted) < delay:
-                return
+        elif mode == 'before':
+            if delay > 0:
+                last_posted = dashboard.get('last_posted_at', 0)
+                if (now - last_posted) < delay:
+                    return
 
-        # Mode: After (Delay)
-        if mode == 'after' and delay > 0:
-            await asyncio.sleep(delay)
-            # Re-fetch active dashboard status to ensure it wasn't disabled during sleep
-            # (We rely on `repost_dashboard` to handle fresh DB state, but we can do a quick check)
-            current_config = self.get_config(message.guild.id)
-            if not current_config.get('sticky_active', False):
-                return
-
-        # 4. Trigger Repost
+        # Immediate Repost (For Delay=0 or After Cooldown)
         await self.repost_dashboard(message.channel)
 
     # --- SLASH COMMANDS ---
@@ -266,7 +275,6 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
         config = self.get_config(interaction.guild_id)
         options = config['options']
 
-        # --- ACTION: ADD ---
         if action == "Add":
             if not label or not key or not ping_text:
                 return await interaction.response.send_message("❌ For 'Add', you must provide `label`, `key`, and `ping_text`.", ephemeral=True)
@@ -286,7 +294,6 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
             self.save_config(interaction.guild_id, config)
             await interaction.response.send_message(f"✅ Added **{label}**! Use `/bbdashboard` to see the changes.", ephemeral=True)
 
-        # --- ACTION: REMOVE ---
         elif action == "Remove":
             if not key:
                 return await interaction.response.send_message("❌ For 'Remove', you must provide the `key`.", ephemeral=True)
@@ -301,7 +308,6 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
             else:
                 await interaction.response.send_message(f"❌ I couldn't find an option with the key `{key}`.", ephemeral=True)
 
-        # --- ACTION: LIST ---
         elif action == "List":
             if not options:
                 return await interaction.response.send_message("📝 You haven't added any options yet, buggy!", ephemeral=True)
@@ -313,7 +319,7 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
             await interaction.response.send_message(content, ephemeral=True)
 
     @app_commands.command(name="bbdashboard", description="Spawn or remove the Bother Buggy Dashboard.")
-    @app_commands.rename(should_set="set") # Renaming 'should_set' to 'set' in the UI
+    @app_commands.rename(should_set="set")
     @app_commands.describe(
         should_set="True to spawn & stick here, False to remove & disable.",
         text="[Optional] Set a new title."
@@ -327,7 +333,6 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
             config['sticky_active'] = False
             self.save_config(interaction.guild_id, config)
             
-            # Find and delete existing dashboard
             dashboards = self.get_dashboards()
             target = next((d for d in dashboards if d['guild_id'] == interaction.guild_id), None)
             
@@ -339,7 +344,6 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
                         await msg.delete()
                 except: pass
                 
-                # Remove from DB
                 dashboards = [d for d in dashboards if d['guild_id'] != interaction.guild_id]
                 self.save_dashboards(dashboards)
                 
@@ -347,7 +351,6 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
             return
 
         # --- ENABLE / SPAWN ---
-        # Update settings
         config['sticky_active'] = True
         if text:
             config['title'] = text
@@ -356,7 +359,6 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
         if not config['options']:
             return await interaction.response.send_message("❌ You need to add some options first via `/bb action:Add`!", ephemeral=True)
 
-        # Handle existing dashboard (Delete old one to move it here)
         dashboards = self.get_dashboards()
         target = next((d for d in dashboards if d['guild_id'] == interaction.guild_id), None)
         
@@ -368,13 +370,11 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
                     await msg.delete()
             except: pass
 
-        # Create and Send new
         embed = self.create_dashboard_embed(interaction.guild, config['title'])
         view = BotherView(self.bot, config['options'], interaction.guild_id)
         
         msg = await interaction.channel.send(embed=embed, view=view)
         
-        # Save new location
         new_dash = {
             "guild_id": interaction.guild_id,
             "channel_id": interaction.channel_id,
@@ -382,8 +382,6 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
             "last_posted_at": datetime.datetime.now().timestamp()
         }
         
-        # Atomic Update / Save
-        # Filter out old one from list (if it existed), add new one, save.
         dashboards = [d for d in dashboards if d['guild_id'] != interaction.guild_id]
         dashboards.append(new_dash)
         self.save_dashboards(dashboards)
