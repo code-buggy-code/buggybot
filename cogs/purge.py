@@ -3,7 +3,7 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import datetime
 import asyncio
-from typing import Literal
+from typing import Literal, Optional
 
 # Function/Class List:
 # class Purge(commands.Cog)
@@ -11,14 +11,13 @@ from typing import Literal
 # - cog_unload()
 # - get_purge_config()
 # - save_purge_config(config)
-# - do_purge(channel, limit)
+# - do_purge(channel, limit, after, user_id, keep_media, keep_links)
 # - nightly_purge_task()
 # - before_nightly_purge()
 # - on_message(message) [Listener]
-# - purge(interaction, amount) [Slash]
-# - pinpurge(interaction) [Slash]
-# - purgepins(interaction, action) [Slash - Renamed from togglepins]
-# - autopurge(interaction, action) [Slash]
+# - purge(interaction, scope, since, user, keep_media, keep_links, message_id) [Slash]
+# - purgepins(interaction, action) [Slash]
+# - autopurge(interaction, action, keep_media, keep_links) [Slash]
 # setup(bot)
 
 class Purge(commands.Cog):
@@ -40,13 +39,32 @@ class Purge(commands.Cog):
         """Saves the nightly purge configuration."""
         self.bot.db.save_collection("purge_settings", config)
 
-    async def do_purge(self, channel, limit=None):
+    async def do_purge(self, channel, limit=None, after=None, user_id=None, keep_media=False, keep_links=False):
         """
-        Purges messages from a channel.
+        Purges messages from a channel with specific filters.
         ALWAYS protects pinned messages.
         """
-        # Protect pins by default
-        deleted = await channel.purge(limit=limit, check=lambda m: not m.pinned)
+        def check(m):
+            # 1. Always protect pins
+            if m.pinned: return False
+            
+            # 2. User Filter
+            if user_id and m.author.id != user_id:
+                return False
+                
+            # 3. Media Filter
+            # (Checks for attachments or embeds which usually contain media)
+            if keep_media and (m.attachments or m.embeds):
+                return False
+                
+            # 4. Link Filter
+            if keep_links and ("http://" in m.content or "https://" in m.content):
+                return False
+                
+            return True
+
+        # Perform the purge
+        deleted = await channel.purge(limit=limit, after=after, check=check, oldest_first=False)
         return len(deleted)
 
     # --- TASKS ---
@@ -55,7 +73,6 @@ class Purge(commands.Cog):
     async def nightly_purge_task(self):
         print("⏰ Starting Nightly Purge Task...")
         config = self.get_purge_config()
-        # config structure: [{"guild_id": 123, "channel_id": 456}]
         
         if not config:
             print("Nightly Purge: No channels configured.")
@@ -63,10 +80,13 @@ class Purge(commands.Cog):
 
         for entry in config:
             channel_id = entry.get('channel_id')
+            keep_media = entry.get('keep_media', False)
+            keep_links = entry.get('keep_links', False)
+            
             # Try to get from cache first
             channel = self.bot.get_channel(channel_id)
             
-            # If not in cache, try fetching it (more robust)
+            # If not in cache, try fetching it
             if not channel:
                 try:
                     channel = await self.bot.fetch_channel(channel_id)
@@ -76,13 +96,13 @@ class Purge(commands.Cog):
 
             if channel:
                 try:
-                    # 1. Perform purge (Sticky messages included! Pins protected!)
-                    count = await self.do_purge(channel, limit=None)
+                    # Perform purge with configured settings
+                    count = await self.do_purge(channel, limit=None, keep_media=keep_media, keep_links=keep_links)
                     print(f"Nightly Purge: Deleted {count} messages in {channel.name} ({channel.id}).")
                     
-                    # 2. Post Announcement
+                    # Post Announcement (Deletes after 30 seconds)
                     if count > 0:
-                        await channel.send(f"🧹 **Nightly Purge Complete.** Deleted {count} messages.", delete_after=300)
+                        await channel.send(f"🧹 **Nightly Purge Complete.** Deleted {count} messages.", delete_after=30)
                     
                 except Exception as e:
                     print(f"Failed to auto-purge {channel.name}: {e}")
@@ -97,8 +117,7 @@ class Purge(commands.Cog):
     async def on_message(self, message):
         """Listens for system 'pin' announcements and deletes them if enabled."""
         if message.type == discord.MessageType.pins_add:
-            # Check if this channel is configured for auto-deletion
-            cleaner_config = self.bot.db.get_collection("pin_cleaner_config") # List of channel IDs
+            cleaner_config = self.bot.db.get_collection("pin_cleaner_config")
             if not isinstance(cleaner_config, list): cleaner_config = []
             
             if message.channel.id in cleaner_config:
@@ -109,31 +128,97 @@ class Purge(commands.Cog):
 
     # --- COMMANDS ---
 
-    @app_commands.command(name="purge", description="Delete a number of messages (always keeps pins).")
-    @app_commands.describe(amount="Number of messages to delete")
+    @app_commands.command(name="purge", description="Delete messages with advanced filters.")
+    @app_commands.describe(
+        scope="Where to purge messages?",
+        since="Time range to purge",
+        user="Optional: Only purge this user's messages",
+        keep_media="Optional: Keep messages with attachments/embeds? (Default: False)",
+        keep_links="Optional: Keep messages with links? (Default: False)",
+        message_id="Required if 'Until Message' is chosen. Deletes up to AND including this ID."
+    )
     @app_commands.default_permissions(manage_messages=True)
-    async def purge(self, interaction: discord.Interaction, amount: int):
-        """Delete a number of messages (keeps pins)."""
-        await interaction.response.defer(ephemeral=True)
-        count = await self.do_purge(interaction.channel, limit=amount)
-        await interaction.followup.send(f"✅ Deleted {count} messages (pins preserved).", ephemeral=True)
-
-    @app_commands.command(name="pinpurge", description="Purge ALL messages in this channel (always keeps pins).")
-    @app_commands.default_permissions(administrator=True)
-    async def pinpurge(self, interaction: discord.Interaction):
-        """Purge ALL messages in this channel (keeps pins)."""
+    async def purge(self, interaction: discord.Interaction, 
+                    scope: Literal["Channel", "Category", "Server"],
+                    since: Literal["Past Hour", "Today", "Until Message"],
+                    user: Optional[discord.User] = None,
+                    keep_media: bool = False,
+                    keep_links: bool = False,
+                    message_id: str = None):
+        """Delete messages with advanced filters."""
         await interaction.response.defer(ephemeral=True)
         
+        # 1. Determine Time Cutoff (After)
+        after_date = None
+        
+        if since == "Past Hour":
+            after_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)
+            
+        elif since == "Today":
+            # Start of the current day (UTC)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            after_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            
+        elif since == "Until Message":
+            if not message_id:
+                return await interaction.followup.send("❌ You selected 'Until Message' but did not provide a `message_id`!", ephemeral=True)
+            try:
+                # Try to fetch message from current channel to get timestamp
+                # Note: If Scope is Server, we assume the ID is from the current channel for reference time
+                ref_msg = await interaction.channel.fetch_message(int(message_id))
+                # Subtract 1 microsecond to ensure the message itself is included in the "after" range check
+                # (purge deletes messages NEWER than 'after')
+                after_date = ref_msg.created_at - datetime.timedelta(microseconds=1)
+            except:
+                return await interaction.followup.send("❌ Could not find that message in this channel to calculate time.", ephemeral=True)
+
+        # 2. Determine Target Channels
+        target_channels = []
+        if scope == "Channel":
+            target_channels.append(interaction.channel)
+        elif scope == "Category":
+            if interaction.channel.category:
+                target_channels = interaction.channel.category.text_channels
+            else:
+                return await interaction.followup.send("❌ This channel is not in a category!", ephemeral=True)
+        elif scope == "Server":
+             target_channels = interaction.guild.text_channels
+
+        # 3. Safety Check
+        if len(target_channels) > 5:
+             await interaction.followup.send(f"⏳ Starting purge on {len(target_channels)} channels... This may take a while.", ephemeral=True)
+
+        total_deleted = 0
+        processed_channels = 0
+        user_id_val = user.id if user else None
+
+        # 4. Execute Purge
+        for channel in target_channels:
+            try:
+                count = await self.do_purge(
+                    channel, 
+                    limit=None, # Iterate history based on date
+                    after=after_date,
+                    user_id=user_id_val,
+                    keep_media=keep_media,
+                    keep_links=keep_links
+                )
+                total_deleted += count
+                processed_channels += 1
+                
+                if len(target_channels) > 1: await asyncio.sleep(1) 
+            except Exception as e:
+                print(f"Failed to purge {channel.name}: {e}")
+
+        # 5. Report
+        location_text = "this channel"
+        if scope == "Category": location_text = f"the **{interaction.channel.category.name}** category"
+        elif scope == "Server": location_text = "the **entire server**"
+
+        await interaction.followup.send(f"✅ Purge Complete! Deleted **{total_deleted}** messages in {location_text}.", ephemeral=True)
         try:
-            # limit=None means it will go through the entire channel history
-            count = await self.do_purge(interaction.channel, limit=None)
-            await interaction.followup.send(f"✅ Channel wiped! Deleted {count} messages (Pins preserved).", ephemeral=True)
-            
-            # Optional: Post the announcement so sticky comes back if configured
-            await interaction.channel.send(f"🧹 **Manual Purge Complete.** Deleted {count} messages.", delete_after=60)
-            
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error purging channel: {e}", ephemeral=True)
+            await interaction.channel.send(f"🧹 **Manual Purge Complete.** Deleted {total_deleted} messages in {location_text}.", delete_after=60)
+        except: pass
 
     @app_commands.command(name="purgepins", description="Toggle auto-deletion of 'XY pinned a message' announcements.")
     @app_commands.describe(action="Enable or Disable for this channel")
@@ -159,31 +244,75 @@ class Purge(commands.Cog):
                  await interaction.response.send_message("⚠️ Not enabled here.", ephemeral=True)
 
     @app_commands.command(name="autopurge", description="Manage nightly auto-purge for this channel.")
-    @app_commands.describe(action="Add or Remove this channel from nightly purge")
+    @app_commands.describe(
+        action="Add, Remove, or List channels",
+        keep_media="[Add Only] Keep attachments/embeds? (Default: False)",
+        keep_links="[Add Only] Keep links? (Default: False)"
+    )
     @app_commands.default_permissions(administrator=True)
-    async def autopurge(self, interaction: discord.Interaction, action: Literal["Add", "Remove"]):
+    async def autopurge(self, interaction: discord.Interaction, 
+                        action: Literal["Add", "Remove", "List"],
+                        keep_media: bool = False,
+                        keep_links: bool = False):
         """Manage nightly auto-purge for this channel."""
         config = self.get_purge_config()
         if not isinstance(config, list): config = []
         
-        # Check if channel is already configured
-        exists = next((c for c in config if c['channel_id'] == interaction.channel_id), None)
+        # Find existing config for this channel
+        existing_idx = next((i for i, c in enumerate(config) if c['channel_id'] == interaction.channel_id), -1)
         
         if action == "Add":
-            if exists:
-                await interaction.response.send_message("⚠️ This channel is already set for auto-purge.", ephemeral=True)
+            new_entry = {
+                "guild_id": interaction.guild_id, 
+                "channel_id": interaction.channel_id,
+                "keep_media": keep_media,
+                "keep_links": keep_links
+            }
+            
+            if existing_idx != -1:
+                config[existing_idx] = new_entry
+                msg = "✅ Updated nightly auto-purge settings for this channel."
             else:
-                config.append({"guild_id": interaction.guild_id, "channel_id": interaction.channel_id})
-                self.save_purge_config(config)
-                await interaction.response.send_message("✅ Channel added to nightly auto-purge (4 AM UTC).", ephemeral=True)
+                config.append(new_entry)
+                msg = "✅ Channel added to nightly auto-purge (4 AM UTC)."
+            
+            self.save_purge_config(config)
+            await interaction.response.send_message(msg, ephemeral=True)
                 
         elif action == "Remove":
-            if not exists:
+            if existing_idx == -1:
                 await interaction.response.send_message("⚠️ This channel is not set for auto-purge.", ephemeral=True)
             else:
-                config = [c for c in config if c['channel_id'] != interaction.channel_id]
+                config.pop(existing_idx)
                 self.save_purge_config(config)
                 await interaction.response.send_message("✅ Channel removed from nightly auto-purge.", ephemeral=True)
+
+        elif action == "List":
+            if not config:
+                return await interaction.response.send_message("📝 No auto-purge channels configured.", ephemeral=True)
+
+            # Map config by channel ID for lookup
+            config_map = {c['channel_id']: c for c in config if c.get('guild_id') == interaction.guild_id}
+            
+            # Sort by server channel order
+            sorted_entries = []
+            for channel in interaction.guild.text_channels:
+                if channel.id in config_map:
+                    sorted_entries.append((channel, config_map[channel.id]))
+
+            if not sorted_entries:
+                return await interaction.response.send_message("📝 No auto-purge channels found in this server.", ephemeral=True)
+
+            text = "**🌙 Nightly Auto-Purge Channels**\n"
+            for channel, data in sorted_entries:
+                flags = []
+                if data.get('keep_media'): flags.append("🖼️ Keep Media")
+                if data.get('keep_links'): flags.append("🔗 Keep Links")
+                
+                flag_str = f" ({', '.join(flags)})" if flags else " (Wipe All)"
+                text += f"• {channel.mention}{flag_str}\n"
+
+            await interaction.response.send_message(text, ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(Purge(bot))
