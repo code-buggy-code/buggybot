@@ -11,12 +11,14 @@ from typing import Literal, Optional
 # - cog_unload()
 # - get_purge_config()
 # - save_purge_config(config)
+# - get_pin_announcement_config(guild_id)
+# - save_pin_announcement_config(guild_id, enabled)
 # - do_purge(channel, limit, after, user_id, keep_media, keep_links)
 # - nightly_purge_task()
 # - before_nightly_purge()
 # - on_message(message) [Listener]
 # - purge(interaction, scope, since, user, keep_media, keep_links, message_id) [Slash]
-# - purgepins(interaction, action) [Slash]
+# - pinpurge(interaction) [Slash]
 # - autopurge(interaction, action, keep_media, keep_links) [Slash]
 # setup(bot)
 
@@ -38,6 +40,19 @@ class Purge(commands.Cog):
     def save_purge_config(self, config):
         """Saves the nightly purge configuration."""
         self.bot.db.save_collection("purge_settings", config)
+
+    def get_pin_announcement_config(self, guild_id):
+        """Fetches whether server-wide pin announcement purge is enabled."""
+        collection = self.bot.db.get_collection("pin_announcement_purge_config")
+        doc = next((d for d in collection if d['guild_id'] == guild_id), None)
+        return doc.get('enabled', False) if doc else False
+
+    def save_pin_announcement_config(self, guild_id, enabled):
+        """Saves the server-wide pin announcement purge setting."""
+        collection = self.bot.db.get_collection("pin_announcement_purge_config")
+        collection = [d for d in collection if d['guild_id'] != guild_id]
+        collection.append({"guild_id": guild_id, "enabled": enabled})
+        self.bot.db.save_collection("pin_announcement_purge_config", collection)
 
     async def do_purge(self, channel, limit=None, after=None, user_id=None, keep_media=False, keep_links=False):
         """
@@ -115,12 +130,11 @@ class Purge(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message):
-        """Listens for system 'pin' announcements and deletes them if enabled."""
+        """Listens for system 'pin' announcements and deletes them if configured."""
         if message.type == discord.MessageType.pins_add:
-            cleaner_config = self.bot.db.get_collection("pin_cleaner_config")
-            if not isinstance(cleaner_config, list): cleaner_config = []
+            is_enabled = self.get_pin_announcement_config(message.guild.id)
             
-            if message.channel.id in cleaner_config:
+            if is_enabled:
                 try:
                     await message.delete()
                 except:
@@ -220,28 +234,23 @@ class Purge(commands.Cog):
             await interaction.channel.send(f"🧹 **Manual Purge Complete.** Deleted {total_deleted} messages in {location_text}.", delete_after=60)
         except: pass
 
-    @app_commands.command(name="purgepins", description="Toggle auto-deletion of 'XY pinned a message' announcements.")
-    @app_commands.describe(action="Enable or Disable for this channel")
+    @app_commands.command(name="pinpurge", description="Toggle server-wide deletion of 'XY pinned a message' announcements.")
     @app_commands.default_permissions(manage_messages=True)
-    async def purgepins(self, interaction: discord.Interaction, action: Literal["Enable", "Disable"]):
-        """Toggle auto-deletion of 'XY pinned a message' announcements."""
-        config = self.bot.db.get_collection("pin_cleaner_config")
-        if not isinstance(config, list): config = []
+    async def pinpurge(self, interaction: discord.Interaction):
+        """Toggle server-wide deletion of 'XY pinned a message' announcements."""
+        current_state = self.get_pin_announcement_config(interaction.guild_id)
+        new_state = not current_state
+        self.save_pin_announcement_config(interaction.guild_id, new_state)
         
-        if action == "Enable":
-            if interaction.channel_id not in config:
-                config.append(interaction.channel_id)
-                self.bot.db.save_collection("pin_cleaner_config", config)
-                await interaction.response.send_message("✅ I will now delete pin announcements in this channel.", ephemeral=True)
-            else:
-                await interaction.response.send_message("⚠️ Already enabled here.", ephemeral=True)
+        status = "ENABLED" if new_state else "DISABLED"
+        
+        if new_state:
+            desc = "✅ Auto-deletion of pin announcements is now **ENABLED**.\n*(Note: This never deletes the actual pinned messages, only the notification)*"
         else:
-            if interaction.channel_id in config:
-                config.remove(interaction.channel_id)
-                self.bot.db.save_collection("pin_cleaner_config", config)
-                await interaction.response.send_message("✅ Stopped deleting pin announcements.", ephemeral=True)
-            else:
-                 await interaction.response.send_message("⚠️ Not enabled here.", ephemeral=True)
+            desc = "✅ Auto-deletion of pin announcements is now **DISABLED**."
+
+        embed = discord.Embed(description=desc, color=discord.Color.blue())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="autopurge", description="Manage nightly auto-purge for this channel.")
     @app_commands.describe(
