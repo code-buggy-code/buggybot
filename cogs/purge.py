@@ -18,10 +18,11 @@ from typing import Literal, Optional
 # - check_should_keep(message, keep_media, keep_links)
 # - purge_scheduler()
 # - perform_scheduled_purge()
+# - before_scheduler()
 # - on_message(message)
 # - autopurge(interaction, action, keep_media, keep_links) [Slash]
 # - pinpurge(interaction, enabled) [Slash]
-# - purge(interaction, limit_type, message_id, time_frame, user, attachments_only, non_attachments_only) [Slash]
+# - purge(interaction, limit_type, scope, message_id, time_frame, user, attachments_only, non_attachments_only) [Slash]
 # setup(bot)
 
 class Purge(commands.Cog):
@@ -230,23 +231,33 @@ class Purge(commands.Cog):
     @app_commands.command(name="purge", description="Delete messages based on conditions.")
     @app_commands.describe(
         limit_type="How to decide when to stop purging",
+        scope="Where to purge messages (Default: Channel)",
         message_id="The Message ID to stop AT (exclusive) (Required if limit_type is Message ID)",
         time_frame="The time range to delete (Required if limit_type is Time)",
         user="Only delete messages from this user",
         attachments_only="Only delete messages WITH attachments",
         non_attachments_only="Only delete messages WITHOUT attachments"
     )
-    @app_commands.choices(limit_type=[
-        app_commands.Choice(name="Until Message ID", value="msg_id"),
-        app_commands.Choice(name="Time Frame", value="time")
-    ], time_frame=[
-        app_commands.Choice(name="Past Hour", value="hour"),
-        app_commands.Choice(name="Today (Since Midnight)", value="today"),
-        app_commands.Choice(name="All History", value="all")
-    ])
+    @app_commands.choices(
+        limit_type=[
+            app_commands.Choice(name="Until Message ID", value="msg_id"),
+            app_commands.Choice(name="Time Frame", value="time")
+        ],
+        scope=[
+            app_commands.Choice(name="Current Channel", value="channel"),
+            app_commands.Choice(name="Current Category", value="category"),
+            app_commands.Choice(name="Entire Server", value="server")
+        ],
+        time_frame=[
+            app_commands.Choice(name="Past Hour", value="hour"),
+            app_commands.Choice(name="Today (Since Midnight)", value="today"),
+            app_commands.Choice(name="All History", value="all")
+        ]
+    )
     @app_commands.default_permissions(administrator=True)
     async def purge(self, interaction: discord.Interaction, 
                     limit_type: app_commands.Choice[str],
+                    scope: Optional[app_commands.Choice[str]] = None,
                     message_id: Optional[str] = None,
                     time_frame: Optional[app_commands.Choice[str]] = None,
                     user: Optional[discord.User] = None,
@@ -287,6 +298,20 @@ class Purge(commands.Cog):
             elif time_frame.value == "all":
                 after_date = None # No limit on time
 
+        # --- TARGET CHANNELS ---
+        targets = []
+        scope_val = scope.value if scope else "channel"
+
+        if scope_val == "channel":
+            targets.append(interaction.channel)
+        elif scope_val == "category":
+            if interaction.channel.category:
+                targets = interaction.channel.category.text_channels
+            else:
+                targets.append(interaction.channel) # Fallback
+        elif scope_val == "server":
+            targets = interaction.guild.text_channels
+
         # --- FILTER LOGIC ---
         def check(m):
             # 1. Pinned/Sticky safety
@@ -311,11 +336,34 @@ class Purge(commands.Cog):
             return True
 
         # --- EXECUTE ---
-        try:
-            deleted = await interaction.channel.purge(limit=None, after=after_date, check=check)
-            await interaction.followup.send(f"✅ Purged **{len(deleted)}** messages.", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Purge failed: {e}", ephemeral=True)
+        total_deleted = 0
+        failed_channels = 0
+
+        # Send initial status for large purges
+        if len(targets) > 1:
+            await interaction.followup.send(f"⏳ Starting purge on **{len(targets)}** channels... this might take a bit, buggy!", ephemeral=True)
+
+        for channel in targets:
+            try:
+                # Ensure we only purge text channels we can access
+                if isinstance(channel, discord.TextChannel):
+                    deleted = await channel.purge(limit=None, after=after_date, check=check)
+                    total_deleted += len(deleted)
+            except Exception as e:
+                failed_channels += 1
+                # print(f"Purge error in {channel.name}: {e}")
+
+        # Final Report
+        msg = f"✅ **Purge Complete!**\nDeleted **{total_deleted}** messages across **{len(targets)}** channels."
+        if failed_channels > 0:
+            msg += f"\n(Failed to access {failed_channels} channels)"
+            
+        if len(targets) > 1:
+            # Send completion message as a new followup if we started a multi-channel purge
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            # If single channel, the defer is all we had, so this is the first message
+            await interaction.followup.send(msg, ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(Purge(bot))
