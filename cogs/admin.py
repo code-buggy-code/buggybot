@@ -24,6 +24,8 @@ from typing import Literal, Optional
 # - save_vcping_config(guild_id, config)
 # - get_autoban_roles(guild_id)
 # - save_autoban_roles(guild_id, roles)
+# - get_pinpurge_config(guild_id)
+# - save_pinpurge_config(guild_id, enabled)
 # - log_to_channel(guild, embed)
 # - on_message(message)
 # - on_raw_reaction_add(payload)
@@ -46,6 +48,7 @@ from typing import Literal, Optional
 # - vcping(interaction, role, people, minutes) [Slash]
 # - vcignore(interaction, action, channel) [Slash]
 # - autoban(interaction, role) [Slash]
+# - pinpurge(interaction) [Slash]
 # - check_vcs()
 # - before_check_vcs()
 # - on_voice_state_update(member, before, after)
@@ -188,6 +191,19 @@ class Admin(commands.Cog):
         collection = [d for d in collection if d['guild_id'] != guild_id]
         collection.append({"guild_id": guild_id, "roles": roles})
         self.bot.db.save_collection("autoban_configs", collection)
+
+    def get_pinpurge_config(self, guild_id):
+        """Fetches pin purge setting for a guild."""
+        collection = self.bot.db.get_collection("pinpurge_config")
+        doc = next((d for d in collection if d['guild_id'] == guild_id), None)
+        return doc.get('enabled', False) if doc else False
+
+    def save_pinpurge_config(self, guild_id, enabled):
+        """Saves pin purge setting."""
+        collection = self.bot.db.get_collection("pinpurge_config")
+        collection = [d for d in collection if d['guild_id'] != guild_id]
+        collection.append({"guild_id": guild_id, "enabled": enabled})
+        self.bot.db.save_collection("pinpurge_config", collection)
 
     async def log_to_channel(self, guild, embed):
         """Helper to send logs to the configured channel."""
@@ -968,6 +984,20 @@ class Admin(commands.Cog):
                     failed += 1
             
             await interaction.followup.send(f"✅ Initial scan complete. Banned **{count}** users. Failed to ban **{failed}**.", ephemeral=True)
+
+    @app_commands.command(name="pinpurge", description="Toggle whether pinned messages are purged (Server-wide).")
+    @app_commands.default_permissions(administrator=True)
+    async def pinpurge(self, interaction: discord.Interaction):
+        """Toggle whether pinned messages are purged (Server-wide)."""
+        current_state = self.get_pinpurge_config(interaction.guild_id)
+        new_state = not current_state
+        self.save_pinpurge_config(interaction.guild_id, new_state)
+        
+        status = "ENABLED (Pins will be deleted)" if new_state else "DISABLED (Pins are protected)"
+        color = discord.Color.red() if new_state else discord.Color.green()
+        
+        embed = discord.Embed(description=f"📌 **Pin Purge {status}**", color=color)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @tasks.loop(seconds=60)
     async def check_vcs(self):
