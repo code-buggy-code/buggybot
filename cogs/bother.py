@@ -4,7 +4,6 @@ from discord import app_commands
 import asyncio
 import datetime
 from typing import Literal
-import secrets
 
 # Function/Class List:
 # class BotherButton(discord.ui.Button)
@@ -25,6 +24,8 @@ import secrets
 # - on_message(message)
 # - bb(interaction, action, label, key, ping_text) [Slash Command]
 # - bbdashboard(interaction, text) [Slash Command]
+# - bbset(interaction, active) [Slash Command]
+# - bbtime(interaction, timing, number, unit) [Slash Command]
 # setup(bot)
 
 BUGGY_ID = 1433003746719170560
@@ -100,7 +101,7 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
     def get_config(self, guild_id):
         """Returns the full config dict for a guild."""
         collection = self.bot.db.get_collection("bb_options")
-        # Structure: [{"guild_id": 123, "options": [...], "title": "...", "hash": "..."}]
+        # Structure: [{"guild_id": 123, "options": [...], "title": "...", "sticky_active": bool, ...}]
         doc = next((d for d in collection if d['guild_id'] == guild_id), None)
         
         # Default structure
@@ -109,25 +110,24 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
                 "guild_id": guild_id, 
                 "options": [], 
                 "title": "🔔 Bother Buggy",
-                "hash": secrets.token_hex(16)
+                "sticky_active": False,
+                "sticky_mode": "after",
+                "sticky_delay": 0
             }
         
         # Ensure fields exist (migration safe)
-        if "title" not in doc:
-            doc["title"] = "🔔 Bother Buggy"
-        if "hash" not in doc:
-            doc["hash"] = secrets.token_hex(16)
+        if "title" not in doc: doc["title"] = "🔔 Bother Buggy"
+        if "sticky_active" not in doc: doc["sticky_active"] = False
+        if "sticky_mode" not in doc: doc["sticky_mode"] = "after"
+        if "sticky_delay" not in doc: doc["sticky_delay"] = 0
             
         return doc
 
     def save_config(self, guild_id, config):
         """Saves the config for a guild using update_doc to prevent race conditions."""
-        # Using update_doc with 'upsert' logic is safer than overwriting the whole list
-        # We try to update, if it fails (doesn't exist), we append.
         updated = self.bot.db.update_doc("bb_options", "guild_id", guild_id, config)
         if not updated:
             collection = self.bot.db.get_collection("bb_options")
-            # Double check it's not there to avoid dups on race
             if not any(d['guild_id'] == guild_id for d in collection):
                 collection.append(config)
                 self.bot.db.save_collection("bb_options", collection)
@@ -153,7 +153,7 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
 
     async def repost_dashboard(self, channel):
         """Deletes the old dashboard and posts a new one at the bottom."""
-        # 1. Fetch CURRENT data fresh from DB to minimize race condition window
+        # 1. Fetch CURRENT data fresh from DB
         dashboards = self.get_dashboards()
         dashboard_data = next((d for d in dashboards if d['guild_id'] == channel.guild.id), None)
         
@@ -175,20 +175,21 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
         try:
             new_msg = await channel.send(embed=embed, view=view)
             
-            # 4. Prepare data for update and pass FULL object to avoid data loss
+            # 4. Prepare data for update
+            now = datetime.datetime.now().timestamp()
+            
             if dashboard_data:
                 dashboard_data['message_id'] = new_msg.id
                 dashboard_data['channel_id'] = channel.id
+                dashboard_data['last_posted_at'] = now
                 self.bot.db.update_doc("bb_dashboards", "guild_id", channel.guild.id, dashboard_data)
             else:
                  new_dash = {
                      "guild_id": channel.guild.id,
                      "channel_id": channel.id,
-                     "message_id": new_msg.id
+                     "message_id": new_msg.id,
+                     "last_posted_at": now
                  }
-                 # If it doesn't exist, we must use update_doc carefully or append.
-                 # Assuming update_doc handles upsert if not found, or we rely on append logic elsewhere.
-                 # But sticking to consistent method:
                  updated = self.bot.db.update_doc("bb_dashboards", "guild_id", channel.guild.id, new_dash)
                  if not updated:
                      dashboards = self.get_dashboards()
@@ -200,27 +201,44 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
 
     @commands.Cog.listener()
     async def on_message(self, message):
-        """Checks for the specific sticky HASH to trigger a dashboard repost."""
-        # Note: We do NOT check for bot authors here, because the sticky bot is likely a bot.
-        if not message.guild: return
+        """Handles the sticky dashboard logic."""
+        if not message.guild or message.author.id == self.bot.user.id:
+            return
         
-        config = self.get_config(message.guild.id)
-        target_hash = config.get('hash')
+        # 1. Check if this channel has a dashboard
+        dashboards = self.get_dashboards()
+        dashboard = next((d for d in dashboards if d['channel_id'] == message.channel.id), None)
         
-        if not target_hash: return
+        if not dashboard:
+            return
 
-        # Check if the message IS the hash
-        if message.content.strip() == target_hash:
-            # 1. Delete the hash trigger immediately
-            try:
-                await message.delete()
-            except (discord.Forbidden, discord.NotFound):
-                pass
-            
-            # 2. Trigger repost
-            # We don't manually mess with the DB list here anymore to avoid race conditions.
-            # repost_dashboard handles the atomic update.
-            await self.repost_dashboard(message.channel)
+        # 2. Check if Sticky Mode is Enabled
+        config = self.get_config(message.guild.id)
+        if not config.get('sticky_active', False):
+            return
+
+        # 3. Check Timing Logic
+        delay = config.get('sticky_delay', 0)
+        mode = config.get('sticky_mode', 'after')
+        now = datetime.datetime.now().timestamp()
+        
+        # Mode: Before (Cooldown)
+        if mode == 'before' and delay > 0:
+            last_posted = dashboard.get('last_posted_at', 0)
+            if (now - last_posted) < delay:
+                return
+
+        # Mode: After (Delay)
+        if mode == 'after' and delay > 0:
+            await asyncio.sleep(delay)
+            # Re-fetch active dashboard status to ensure it wasn't disabled during sleep
+            # (We rely on `repost_dashboard` to handle fresh DB state, but we can do a quick check)
+            current_config = self.get_config(message.guild.id)
+            if not current_config.get('sticky_active', False):
+                return
+
+        # 4. Trigger Repost
+        await self.repost_dashboard(message.channel)
 
     # --- SLASH COMMANDS ---
 
@@ -281,7 +299,8 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
             if not options:
                 return await interaction.response.send_message("📝 You haven't added any options yet, buggy!", ephemeral=True)
             
-            content = f"**Title:** {config['title']}\n**Sticky Hash:** `{config['hash']}`\n**📋 Options:**\n"
+            status = "Active" if config.get('sticky_active') else "Inactive"
+            content = f"**Title:** {config['title']}\n**Sticky:** {status}\n**📋 Options:**\n"
             for o in options:
                 content += f"• `{o['key']}`: **{o['label']}** (Ping: {o['ping_text']})\n"
             await interaction.response.send_message(content, ephemeral=True)
@@ -292,11 +311,6 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
     async def bbdashboard(self, interaction: discord.Interaction, text: str = None):
         config = self.get_config(interaction.guild_id)
         
-        # Ensure hash is saved/generated
-        if 'hash' not in config:
-            config['hash'] = secrets.token_hex(16)
-            self.save_config(interaction.guild_id, config)
-
         # Update title if provided
         if text:
             config['title'] = text
@@ -308,25 +322,16 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
         embed = self.create_dashboard_embed(interaction.guild, config['title'])
         view = BotherView(self.bot, config['options'], interaction.guild_id)
         
-        # 1. Send Ephemeral Response with the Hash
-        # This allows the user to copy the hash for their sticky bot
-        await interaction.response.send_message(
-            f"✅ **Dashboard Spawned!**\n\n"
-            f"👇 **Sticky Bot Configuration** 👇\n"
-            f"Copy this hash and set it up in your sticky message bot:\n"
-            f"```\n{config['hash']}\n```\n"
-            f"When your sticky bot posts this exact code, I will automatically delete it and repost the dashboard in its place!",
-            ephemeral=True
-        )
-        
-        # 2. Send the dashboard message initially
+        # Send the dashboard message initially
         msg = await interaction.channel.send(embed=embed, view=view)
+        await interaction.response.send_message("✅ Dashboard spawned! Use `/bbset true` to make it sticky.", ephemeral=True)
 
-        # 3. Save using atomic update with full object
+        # Save using atomic update
         new_dash = {
             "guild_id": interaction.guild_id,
             "channel_id": interaction.channel_id,
-            "message_id": msg.id
+            "message_id": msg.id,
+            "last_posted_at": datetime.datetime.now().timestamp()
         }
         
         updated = self.bot.db.update_doc("bb_dashboards", "guild_id", interaction.guild_id, new_dash)
@@ -335,6 +340,44 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
             dashboards = self.get_dashboards()
             dashboards.append(new_dash)
             self.save_dashboards(dashboards)
+
+    @app_commands.command(name="bbset", description="Turn the dashboard sticky mode on or off.")
+    @app_commands.describe(active="Should the dashboard stick to the bottom?")
+    @app_commands.default_permissions(administrator=True)
+    async def bbset(self, interaction: discord.Interaction, active: bool):
+        """Turn the dashboard sticky mode on or off."""
+        config = self.get_config(interaction.guild_id)
+        config['sticky_active'] = active
+        self.save_config(interaction.guild_id, config)
+        
+        state = "Enabled" if active else "Disabled"
+        await interaction.response.send_message(f"✅ Bother Buggy Dashboard Sticky is now **{state}**.", ephemeral=True)
+        
+        # If enabled, force a repost now
+        if active:
+            await self.repost_dashboard(interaction.channel)
+
+    @app_commands.command(name="bbtime", description="Configure dashboard sticky timing.")
+    @app_commands.describe(timing="Mode: 'before' (Cooldown) or 'after' (Delay)", number="Time amount", unit="Time unit")
+    @app_commands.choices(
+        timing=[app_commands.Choice(name="Before (Cooldown)", value="before"), app_commands.Choice(name="After (Delay)", value="after")],
+        unit=[app_commands.Choice(name="Seconds", value="seconds"), app_commands.Choice(name="Minutes", value="minutes")]
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def bbtime(self, interaction: discord.Interaction, timing: app_commands.Choice[str], number: int, unit: app_commands.Choice[str]):
+        """Configure dashboard sticky timing."""
+        multiplier = 60 if unit.value == 'minutes' else 1
+        total_seconds = number * multiplier
+        
+        config = self.get_config(interaction.guild_id)
+        config['sticky_mode'] = timing.value
+        config['sticky_delay'] = total_seconds
+        self.save_config(interaction.guild_id, config)
+        
+        delay_text = "Instant (0s)" if total_seconds == 0 else f"{total_seconds} seconds"
+        mode_text = "Cooldown (Before)" if timing.value == "before" else "Delay (After)"
+        
+        await interaction.response.send_message(f"✅ Dashboard sticky settings updated.\nMode: **{mode_text}**\nTime: **{delay_text}**", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(BotherBuggy(bot))
