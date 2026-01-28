@@ -1,304 +1,653 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import asyncio
 import datetime
-from typing import Literal
+import re
+from typing import Literal, Optional
 
 # Function/Class List:
 # class Admin(commands.Cog)
 # - __init__(bot)
-# - get_sticky(channel_id)
-# - save_sticky(data)
-# - delete_sticky(channel_id)
-# - get_dm_settings()
-# - save_dm_settings(data)
-# - delayed_repost(channel, delay)
-# - repost_sticky(channel)
-# - on_message(message) [Handles Sticky & DM Req validation]
-# - on_reaction_add(reaction, user) [Handles DM Req interaction]
-# - sticky(interaction, message, set) [Slash Command]
-# - stickytime(interaction, timing, number, unit) [Slash Command]
-# - stickylist(interaction) [Slash Command]
-# - dmconfig(interaction, ...) [Slash Command - NEW]
-# - dmchannel(interaction, action, channel) [Slash Command - NEW]
-# - kick(interaction, user, reason) [Slash Command]
-# - ban(interaction, user, reason) [Slash Command]
-# - unban(interaction, user_id) [Slash Command]
-# - dm(interaction, user, message) [Slash Command]
+# - cog_unload()
+# - get_stickies()
+# - save_stickies(stickies)
+# - get_sticky_settings()
+# - save_sticky_settings(settings)
+# - get_log_settings()
+# - save_log_settings(settings)
+# - get_dm_settings(guild_id)
+# - save_dm_settings(guild_id, data)
+# - get_vote_data(guild_id)
+# - save_vote_data(guild_id, data)
+# - get_vcping_config(guild_id)
+# - save_vcping_config(guild_id, config)
+# - get_autoban_roles(guild_id)
+# - save_autoban_roles(guild_id, roles)
+# - log_to_channel(guild, embed)
+# - on_message(message)
+# - on_raw_reaction_add(payload)
+# - on_message_delete(message)
+# - on_message_edit(before, after)
+# - on_member_remove(member)
+# - on_member_update(before, after)
+# - handle_sticky(message)
+# - handle_dm_request(message)
+# - sticky(interaction, action, message) [Slash - Consolidated]
+# - stickytime(interaction, timing, number, unit) [Slash - Server Wide]
+# - setlogchannel(interaction, channel) [Slash]
+# - dmconfig(interaction, role1, role2, role3, emoji1, emoji2, message1...) [Slash - Old Style]
+# - dmchannel(interaction, action, channel) [Slash - Old Style]
+# - vote(interaction, member) [Slash]
+# - voteset(interaction, channel) [Slash]
+# - voterole(interaction, role) [Slash]
+# - voteremove(interaction, member) [Slash]
+# - vote_list(interaction) [Slash]
+# - vcping(interaction, role, people, minutes) [Slash]
+# - vcignore(interaction, action, channel) [Slash]
+# - autoban(interaction, role) [Slash]
+# - check_vcs()
+# - before_check_vcs()
+# - on_voice_state_update(member, before, after)
 # setup(bot)
 
-DM_MSG_0 = "⚠️ **Message 0:** You must include a message content along with your mention to make a DM request."
+BUGGY_ID = 1433003746719170560
 
 class Admin(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # Task manager for debounce logic (cancelling timers on new messages)
-        self.sticky_tasks = {} # {channel_id: asyncio.Task}
+        self.description = "logging, dm requests, stickies, vc pings, and kick voting"
+        
+        self.vc_state = {}
+        self.check_vcs.start()
+        
+        # Cache to prevent the bot from triggering stickies on its own sticky posts
+        self.ignore_ids = set()
 
-    # --- DB HELPERS ---
+        # Vote Kick Constants
+        self.VOTE_THRESHOLD = 3 
 
-    def get_sticky(self, channel_id):
-        """Fetches sticky config for a channel."""
-        collection = self.bot.db.get_collection("sticky_messages")
-        return next((s for s in collection if s['channel_id'] == channel_id), None)
+        # DM Request Defaults
+        self.DEFAULT_DM_MESSAGES = {
+            "0": "{mention} Please include text with your mention to make a request.",
+            "1": "Request Accepted!",
+            "2": "Request Denied.",
+            "3": "DM Request (Role 2) sent to {requested}.",
+            "4": "DM Request (Role 3) sent to {requested}.",
+            "5": "sorry they dont have dm roles yet :sob:, buggy's working on this"
+        }
+        self.DEFAULT_DM_REACTS = ["👍", "👎"]
 
-    def save_sticky(self, data):
-        """Saves/Updates sticky config."""
-        updated = self.bot.db.update_doc("sticky_messages", "channel_id", data['channel_id'], data)
-        if not updated:
-            collection = self.bot.db.get_collection("sticky_messages")
-            if not any(s['channel_id'] == data['channel_id'] for s in collection):
-                collection.append(data)
-                self.bot.db.save_collection("sticky_messages", collection)
+    def cog_unload(self):
+        self.check_vcs.cancel()
 
-    def delete_sticky(self, channel_id):
-        """Removes sticky config."""
-        collection = self.bot.db.get_collection("sticky_messages")
-        collection = [s for s in collection if s['channel_id'] != channel_id]
-        self.bot.db.save_collection("sticky_messages", collection)
+    # --- HELPERS ---
 
-    def get_dm_settings(self):
-        """Fetches DM Request configuration."""
-        # We store this as a single document/dict in a collection, or just use a dedicated collection.
-        # Assuming a 'dm_settings' collection with one main config doc.
-        config = self.bot.db.get_collection("dm_settings")
-        if not config: return {}
-        return config[0] if isinstance(config, list) and config else config
+    def get_stickies(self):
+        """Returns active sticky messages."""
+        return self.bot.db.get_collection("sticky_messages")
 
-    def save_dm_settings(self, data):
-        """Saves DM Request configuration."""
-        self.bot.db.save_collection("dm_settings", [data])
+    def save_stickies(self, stickies):
+        """Saves sticky messages."""
+        self.bot.db.save_collection("sticky_messages", stickies)
 
-    # --- STICKY LOGIC ---
+    def get_sticky_settings(self):
+        """Returns server-specific sticky settings (timings)."""
+        return self.bot.db.get_collection("sticky_settings")
 
-    async def delayed_repost(self, channel, delay):
-        """Waits for the delay to pass. If not cancelled, reposts the sticky."""
+    def save_sticky_settings(self, settings):
+        """Saves sticky settings."""
+        self.bot.db.save_collection("sticky_settings", settings)
+
+    def get_log_settings(self):
+        """Returns server-specific logging settings."""
+        return self.bot.db.get_collection("log_settings")
+
+    def save_log_settings(self, settings):
+        """Saves logging settings."""
+        self.bot.db.save_collection("log_settings", settings)
+
+    def get_dm_settings(self, guild_id):
+        """Fetches DM settings for a specific guild."""
+        collection = self.bot.db.get_collection("dm_settings")
+        for doc in collection:
+            if doc['guild_id'] == guild_id:
+                # Ensure defaults exist if partial data is found
+                if "messages" not in doc: doc["messages"] = self.DEFAULT_DM_MESSAGES.copy()
+                if "reacts" not in doc: doc["reacts"] = self.DEFAULT_DM_REACTS.copy()
+                if "roles" not in doc: doc["roles"] = [0, 0, 0]
+                if "channels" not in doc: doc["channels"] = []
+                return doc
+        
+        # Return default structure if not found
+        return {
+            "guild_id": guild_id,
+            "channels": [],
+            "roles": [0, 0, 0],
+            "reacts": self.DEFAULT_DM_REACTS.copy(),
+            "messages": self.DEFAULT_DM_MESSAGES.copy()
+        }
+
+    def save_dm_settings(self, guild_id, data):
+        """Saves DM settings for a guild."""
+        collection = self.bot.db.get_collection("dm_settings")
+        # Remove old entry
+        collection = [d for d in collection if d['guild_id'] != guild_id]
+        collection.append(data)
+        self.bot.db.save_collection("dm_settings", collection)
+
+    def get_vote_data(self, guild_id):
+        """Fetches voting configuration and active votes for a guild."""
+        collection = self.bot.db.get_collection("vote_data")
+        for doc in collection:
+            if doc['guild_id'] == guild_id:
+                # Ensure structure
+                if 'active_votes' not in doc: doc['active_votes'] = {} # {target_id_str: [voters_list]}
+                if 'voting_role_id' not in doc: doc['voting_role_id'] = None
+                if 'voting_channel_id' not in doc: doc['voting_channel_id'] = None
+                return doc
+        
+        return {
+            "guild_id": guild_id,
+            "voting_role_id": None,
+            "voting_channel_id": None,
+            "active_votes": {}
+        }
+
+    def save_vote_data(self, guild_id, data):
+        """Saves vote data for a guild."""
+        collection = self.bot.db.get_collection("vote_data")
+        collection = [d for d in collection if d['guild_id'] != guild_id]
+        collection.append(data)
+        self.bot.db.save_collection("vote_data", collection)
+
+    def get_vcping_config(self):
+        """Fetches VC Ping config for all guilds."""
+        # Stored as a dict {guild_id: settings}
+        data = self.bot.db.get_collection("vcping_config")
+        if isinstance(data, list): return {} # Migration safety
+        return data
+
+    def save_vcping_config(self, config):
+        """Saves VC Ping config."""
+        self.bot.db.save_collection("vcping_config", config)
+
+    def get_autoban_roles(self, guild_id):
+        """Fetches list of autoban role IDs for a guild."""
+        collection = self.bot.db.get_collection("autoban_configs")
+        # Format: [{"guild_id": 123, "roles": [1, 2, 3]}]
+        doc = next((d for d in collection if d['guild_id'] == guild_id), None)
+        if doc:
+            return doc.get('roles', [])
+        return []
+
+    def save_autoban_roles(self, guild_id, roles):
+        """Saves autoban roles."""
+        collection = self.bot.db.get_collection("autoban_configs")
+        # Remove old
+        collection = [d for d in collection if d['guild_id'] != guild_id]
+        collection.append({"guild_id": guild_id, "roles": roles})
+        self.bot.db.save_collection("autoban_configs", collection)
+
+    async def log_to_channel(self, guild, embed):
+        """Helper to send logs to the configured channel."""
+        settings = self.get_log_settings()
+        guild_setting = next((s for s in settings if s['guild_id'] == guild.id), None)
+        
+        if not guild_setting: return
+
+        log_channel = self.bot.get_channel(guild_setting['log_channel_id'])
+        if not log_channel: return
+
         try:
-            await asyncio.sleep(delay)
-            await self.repost_sticky(channel)
-        except asyncio.CancelledError:
-            # Task was cancelled because a new message appeared
+            await log_channel.send(embed=embed)
+        except:
             pass
-        finally:
-            # Cleanup task reference
-            if channel.id in self.sticky_tasks:
-                if self.sticky_tasks[channel.id] == asyncio.current_task():
-                    del self.sticky_tasks[channel.id]
-
-    async def repost_sticky(self, channel):
-        """Deletes old sticky and sends new one."""
-        data = self.get_sticky(channel.id)
-        if not data: return
-
-        # Delete old message
-        try:
-            if data.get('last_message_id'):
-                old_msg = await channel.fetch_message(data['last_message_id'])
-                await old_msg.delete()
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            pass
-
-        # Send new message
-        try:
-            # Updated color to #ff90aa
-            embed = discord.Embed(description=data['content'], color=discord.Color(0xff90aa))
-            
-            new_msg = await channel.send(embed=embed)
-            
-            # Update DB
-            data['last_message_id'] = new_msg.id
-            data['last_posted_at'] = datetime.datetime.now().timestamp()
-            self.save_sticky(data)
-            
-        except Exception as e:
-            print(f"Failed to repost sticky in {channel.id}: {e}")
 
     # --- EVENTS ---
 
     @commands.Cog.listener()
     async def on_message(self, message):
-        """Handles both Sticky Messages and DM Request validation."""
-        if message.author.bot:
+        """Handles sticky message logic and DM Request logic."""
+        if not message.guild:
             return
 
-        # ---------------------------------------------------------
-        # 1. DM REQUEST LOGIC
-        # ---------------------------------------------------------
-        dm_config = self.get_dm_settings()
-        dm_channels = dm_config.get('channels', [])
+        # 1. DM Request Logic (Ignore Bots)
+        if not message.author.bot:
+            await self.handle_dm_request(message)
+
+        # 2. Sticky Logic 
+        stickies = self.get_stickies()
+        sticky_data = next((s for s in stickies if s['channel_id'] == message.channel.id), None)
         
-        if message.channel.id in dm_channels:
-            # Rule: Must have mention AND text.
-            has_mention = len(message.mentions) > 0
-            has_text = len(message.content.strip()) > 0
-            
-            # If no mention, delete (as per "deletes any messages... that do not contain a mention and text")
-            if not has_mention:
-                try:
-                    await message.delete()
-                    # Optional: We could tell them why, but prompt only specified message 0 for mention-only case
-                except: pass
-                return # Stop processing
-            
-            # If mention but no text (effectively empty message besides mention), send Message 0
-            # Discord mentions are part of content, so we check if content is JUST the mention
-            clean_content = message.content
-            for user in message.mentions:
-                clean_content = clean_content.replace(user.mention, "").replace(f"<@!{user.id}>", "").replace(f"<@{user.id}>", "")
-            
-            if not clean_content.strip():
-                try:
-                    await message.delete()
-                    await message.channel.send(f"{message.author.mention} {DM_MSG_0}", delete_after=10)
-                except: pass
-                return # Stop processing
-
-            # Valid DM Request (Mention + Text) - Process Roles
-            target = message.mentions[0] # Take the first mentioned user
-            # We need the Member object to check roles
-            if isinstance(target, discord.User):
-                try:
-                    target = await message.guild.fetch_member(target.id)
-                except:
-                    pass # Can't fetch member, maybe left?
-            
-            if isinstance(target, discord.Member):
-                role_ids = [r.id for r in target.roles]
-                
-                r1_id = dm_config.get('role1_id')
-                r2_id = dm_config.get('role2_id')
-                r3_id = dm_config.get('role3_id')
-
-                # Logic 2a-2f
-                if r1_id and r1_id in role_ids:
-                    # 2a: React with emoji 1 and 2
-                    e1 = dm_config.get('emoji1')
-                    e2 = dm_config.get('emoji2')
-                    try:
-                        if e1: await message.add_reaction(e1)
-                        if e2: await message.add_reaction(e2)
-                    except Exception as e:
-                        print(f"Failed to react in DM req: {e}")
-
-                elif r2_id and r2_id in role_ids:
-                    # 2d: Send message 3
-                    msg3 = dm_config.get('message3')
-                    if msg3: await message.reply(msg3)
-
-                elif r3_id and r3_id in role_ids:
-                    # 2e: Send message 4
-                    msg4 = dm_config.get('message4')
-                    if msg4: await message.reply(msg4)
-
-                else:
-                    # 2f: No roles - Send fallback message (Message 5)
-                    # "sorry they dont have dm roles yet :sob:, buggy's working on this"
-                    msg5 = dm_config.get('message5', "Sorry they don't have dm roles yet 😭, buggy's working on this")
-                    await message.reply(msg5)
-
-        # ---------------------------------------------------------
-        # 2. STICKY MESSAGE LOGIC
-        # ---------------------------------------------------------
-        sticky_data = self.get_sticky(message.channel.id)
         if sticky_data:
-            # Timing Logic
-            mode = sticky_data.get('mode', 'after')
-            delay = sticky_data.get('delay', 0)
-            now = datetime.datetime.now().timestamp()
+            # Check if active (default True if missing)
+            if not sticky_data.get('active', True):
+                return
 
-            if mode == 'after':
-                if delay > 0:
-                    if message.channel.id in self.sticky_tasks:
-                        self.sticky_tasks[message.channel.id].cancel()
-                    self.sticky_tasks[message.channel.id] = asyncio.create_task(
-                        self.delayed_repost(message.channel, delay)
-                    )
-                    return # Task started, exit
-                # If delay 0, fall through
+            # LOOP PREVENTION:
+            # 1. Check if this message IS the sticky message we just posted (via cache)
+            if message.id in self.ignore_ids:
+                self.ignore_ids.discard(message.id)
+                return
 
-            elif mode == 'before':
-                last_posted = sticky_data.get('last_posted_at', 0)
-                if (now - last_posted) < delay:
-                    return
+            # 2. Check via DB ID (fallback)
+            if sticky_data.get('last_message_id') == message.id:
+                return
 
-            await self.repost_sticky(message.channel)
+            # 3. Ignore other bots (BUT allow myself if it wasn't the sticky message itself)
+            # This allows /anon messages (sent by bot) or other cogs to trigger stickies
+            is_me = (message.author.id == self.bot.user.id)
+            
+            if message.author.bot and not is_me:
+                return
+
+            await self.handle_sticky(message)
 
     @commands.Cog.listener()
-    async def on_reaction_add(self, reaction, user):
-        """Handles interactions for DM Requests (Role 1 logic)."""
-        if user.bot: return
+    async def on_raw_reaction_add(self, payload):
+        """Handles DM Request reactions."""
+        if payload.user_id == self.bot.user.id: return
+        if not payload.guild_id: return
 
-        dm_config = self.get_dm_settings()
-        if not dm_config: return
-        
-        # Check if channel is a DM Req channel
-        if reaction.message.channel.id not in dm_config.get('channels', []):
+        settings = self.get_dm_settings(payload.guild_id)
+
+        # Check if channel is tracked
+        if payload.channel_id not in settings['channels']:
             return
 
-        # Check if the message has mentions
-        if not reaction.message.mentions:
+        # Check if emoji is a configured DM react
+        if str(payload.emoji) not in settings['reacts']:
             return
 
-        # Check if the reactor is the person mentioned (Logic 2b/2c)
-        mentioned_user = reaction.message.mentions[0]
-        if user.id != mentioned_user.id:
+        channel = self.bot.get_channel(payload.channel_id)
+        if not channel: return
+
+        try:
+            message = await channel.fetch_message(payload.message_id)
+            # Find the user mentioned in the message (The DM Receiver)
+            if not message.mentions: return
+            
+            target_member = message.mentions[0] # The person who was asked
+            
+            # Verify the person reacting is the person who was asked
+            if payload.user_id != target_member.id:
+                return 
+
+            # Determine Accepted (0) or Denied (1)
+            msg_index = -1
+            if str(payload.emoji) == settings['reacts'][0]: msg_index = "1"
+            elif str(payload.emoji) == settings['reacts'][1]: msg_index = "2"
+            
+            if msg_index != -1:
+                raw_msg = settings['messages'].get(msg_index, "")
+                
+                # Format message
+                formatted_msg = raw_msg.replace("{mention}", message.author.mention)\
+                                       .replace("{requester}", message.author.mention)\
+                                       .replace("{requested}", f"**{target_member.display_name}**")\
+                                       .replace("{requested_nickname}", target_member.display_name)
+                
+                await channel.send(formatted_msg)
+                
+                # Cleanup reactions
+                try:
+                    for e in settings['reacts']:
+                        await message.remove_reaction(e, self.bot.user) # Remove bot's reacts
+                except: pass
+
+        except Exception as e:
+            print(f"DM Req Reaction Error: {e}")
+
+    @commands.Cog.listener()
+    async def on_message_delete(self, message):
+        """Logs deleted messages."""
+        # 1. SPECIAL CHECK: If this was a sticky message, IGNORE IT.
+        # This prevents log spam AND ensures we don't accidentally think a user deleted it.
+        # The sticky system handles deletions in `handle_sticky`.
+        stickies = self.get_stickies()
+        if any(s.get('last_message_id') == message.id for s in stickies):
             return
 
-        # Check Emojis
-        emoji_str = str(reaction.emoji)
+        # Ignored if bot OR if author is buggy
+        if message.author.bot or message.author.id == BUGGY_ID or not message.guild:
+            return
+
+        embed = discord.Embed(
+            title="🗑️ Message Deleted",
+            description=f"**Author:** {message.author.mention} ({message.author.id})\n**Channel:** {message.channel.mention}",
+            color=discord.Color.red(),
+            timestamp=datetime.datetime.now()
+        )
+        if message.content:
+            embed.add_field(name="Content", value=message.content[:1024], inline=False)
         
-        if emoji_str == dm_config.get('emoji1'):
-            # 2b: Send Message 1
-            msg1 = dm_config.get('message1')
-            if msg1: await reaction.message.channel.send(f"{user.mention} responded: {msg1}")
+        if message.attachments:
+            embed.add_field(name="Attachments", value=f"{len(message.attachments)} file(s)", inline=False)
+
+        await self.log_to_channel(message.guild, embed)
+
+    @commands.Cog.listener()
+    async def on_message_edit(self, before, after):
+        """Logs edited messages."""
+        # Ignored if bot OR if author is buggy
+        if before.author.bot or before.author.id == BUGGY_ID or not before.guild:
+            return
         
-        elif emoji_str == dm_config.get('emoji2'):
-            # 2c: Send Message 2
-            msg2 = dm_config.get('message2')
-            if msg2: await reaction.message.channel.send(f"{user.mention} responded: {msg2}")
+        # Ignore checks if content is the same (e.g. embed update)
+        if before.content == after.content:
+            return
 
+        embed = discord.Embed(
+            title="✏️ Message Edited",
+            description=f"**Author:** {before.author.mention} ({before.author.id})\n**Channel:** {before.channel.mention}\n**Jump:** [Link]({before.jump_url})",
+            color=discord.Color.orange(),
+            timestamp=datetime.datetime.now()
+        )
+        embed.add_field(name="Before", value=before.content[:1024] or "[No Content]", inline=False)
+        embed.add_field(name="After", value=after.content[:1024] or "[No Content]", inline=False)
 
-    # --- COMMANDS ---
+        await self.log_to_channel(before.guild, embed)
 
-    @app_commands.command(name="sticky", description="Set or remove a sticky message in this channel.")
-    @app_commands.rename(should_set="set")
+    @commands.Cog.listener()
+    async def on_member_remove(self, member):
+        """Logs when a member leaves."""
+        embed = discord.Embed(
+            title="👋 Member Left",
+            description=f"{member.mention} has left the server.",
+            color=discord.Color.dark_grey(),
+            timestamp=datetime.datetime.now()
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="User ID", value=member.id, inline=True)
+        embed.add_field(name="Joined At", value=discord.utils.format_dt(member.joined_at, "R") if member.joined_at else "Unknown", inline=True)
+
+        await self.log_to_channel(member.guild, embed)
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before, after):
+        """Checks for persistent autoban roles."""
+        autoban_roles = self.get_autoban_roles(after.guild.id)
+        if autoban_roles:
+            banned_role_found = False
+            for role in after.roles:
+                if role.id in autoban_roles:
+                    banned_role_found = True
+                    break
+            
+            if banned_role_found:
+                if after.id == after.guild.owner_id or after == self.bot.user or after.top_role >= after.guild.me.top_role:
+                    return
+
+                try:
+                    await after.ban(reason="Autoban: User acquired a blacklisted role.")
+                    embed = discord.Embed(
+                        title="🔨 Auto-Banned User",
+                        description=f"{after.mention} was banned for having a blacklisted role.",
+                        color=discord.Color.red(),
+                        timestamp=datetime.datetime.now()
+                    )
+                    await self.log_to_channel(after.guild, embed)
+                except discord.Forbidden:
+                    pass
+
+    async def handle_sticky(self, message):
+        """Resends the sticky message to the bottom."""
+        # Refresh stickies from DB to ensure we have the latest last_posted_at
+        stickies = self.get_stickies()
+        sticky_data = next((s for s in stickies if s['channel_id'] == message.channel.id), None)
+        
+        if not sticky_data: return
+
+        # Get Settings for delay
+        settings = self.get_sticky_settings()
+        guild_setting = next((s for s in settings if s['guild_id'] == message.guild.id), None)
+        
+        delay = 0
+        mode = "after" # Default behavior
+        if guild_setting:
+            delay = guild_setting.get('delay', 0)
+            mode = guild_setting.get('mode', 'after')
+
+        now = datetime.datetime.now().timestamp()
+
+        # LOGIC 1: BEFORE (Cooldown)
+        if mode == "before" and delay > 0:
+            last_posted = sticky_data.get('last_posted_at', 0)
+            if (now - last_posted) < delay:
+                return
+
+        # LOGIC 2: AFTER (Delay)
+        if mode == "after" and delay > 0:
+            await asyncio.sleep(delay)
+            # Re-fetch stickies to ensure it wasn't deleted during the sleep
+            # Because we sleep, the 'stickies' var is stale.
+            current_stickies = self.get_stickies()
+            sticky_data = next((s for s in current_stickies if s['channel_id'] == message.channel.id), None)
+            if not sticky_data: return
+            
+            # IMPORTANT: Do not check 'active' here strictly, as we want to revive it if it was deleted
+            # if not sticky_data.get('active', True): return
+
+        # Delete old sticky
+        if sticky_data.get('last_message_id'):
+            try:
+                old_msg = await message.channel.fetch_message(sticky_data['last_message_id'])
+                await old_msg.delete()
+            except (discord.NotFound, discord.HTTPException):
+                # Message is gone. We continue to post the new one anyway.
+                pass
+        
+        # Send new sticky
+        try:
+            # Modified to use Embed as requested
+            embed = discord.Embed(description=sticky_data['content'], color=discord.Color(0xff90aa))
+            new_msg = await message.channel.send(embed=embed)
+            
+            # Add to ignore list so we don't trigger ourselves
+            self.ignore_ids.add(new_msg.id)
+
+            # Update local object
+            sticky_data['last_message_id'] = new_msg.id
+            sticky_data['last_posted_at'] = datetime.datetime.now().timestamp()
+            sticky_data['active'] = True
+
+            # Use atomic update to avoid overwriting other channels' data
+            # CRITICAL FIX: Pass the FULL sticky_data object to avoid replacing it with a partial dict
+            self.bot.db.update_doc("sticky_messages", "channel_id", message.channel.id, sticky_data)
+
+        except Exception as e:
+            print(f"Failed to send sticky: {e}")
+
+    async def handle_dm_request(self, message):
+        settings = self.get_dm_settings(message.guild.id)
+        
+        # Check if channel is a DM Request channel
+        if message.channel.id not in settings['channels']:
+            return
+
+        # Check for admin Privileges (Bypass deletion)
+        is_admin = message.author.guild_permissions.administrator
+
+        # 1. STRICT PARSING
+        cleaned_content = message.content.strip()
+        match = re.match(r'^<@!?(\d+)>\s+(.+)', cleaned_content, re.DOTALL)
+        
+        valid_request = False
+        target_member = None
+        
+        if match:
+            user_id = int(match.group(1))
+            target_member = message.guild.get_member(user_id)
+            if target_member and not target_member.bot:
+                valid_request = True
+        
+        # 2. ENFORCE RESTRICTIONS (Delete if bad)
+        if not is_admin:
+            if not valid_request:
+                try:
+                    await message.delete()
+                    raw_msg = settings['messages'].get("0", "Error: No text.")
+                    formatted_msg = raw_msg.replace("{mention}", message.author.mention).replace("{requester}", message.author.mention)
+                    await message.channel.send(formatted_msg, delete_after=5)
+                except: pass
+                return
+        
+        # 3. FEATURE LOGIC
+        if valid_request and target_member:
+            target = target_member
+            roles = settings['roles'] # [Role 1 ID, Role 2 ID, Role 3 ID]
+            
+            has_role_1 = any(r.id == roles[0] for r in target.roles)
+            has_role_2 = any(r.id == roles[1] for r in target.roles)
+            has_role_3 = any(r.id == roles[2] for r in target.roles)
+            
+            raw_msg = ""
+            if has_role_1:
+                # Role 1: Add Reactions (DMs Open)
+                try:
+                    for e in settings['reacts']:
+                        await message.add_reaction(e)
+                except: pass
+            
+            elif has_role_2:
+                # Role 2: Send Message 3
+                raw_msg = settings['messages'].get("3", "")
+            elif has_role_3:
+                # Role 3: Send Message 4
+                raw_msg = settings['messages'].get("4", "")
+            else:
+                # No Roles: Send Message 5
+                raw_msg = settings['messages'].get("5", "")
+            
+            if raw_msg:
+                formatted_msg = raw_msg.replace("{mention}", message.author.mention)\
+                                       .replace("{requester}", message.author.mention)\
+                                       .replace("{requested}", f"**{target.display_name}**")\
+                                       .replace("{requested_nickname}", target.display_name)
+                await message.channel.send(formatted_msg)
+
+    # --- SLASH COMMANDS ---
+
+    # --- STICKIES (Consolidated) ---
+    @app_commands.command(name="sticky", description="Manage sticky messages.")
     @app_commands.describe(
-        message="The message to stick (Required if set is True)",
-        should_set="True to set/update, False to remove"
+        action="Choose an action",
+        message="The message content (Required for Add/Edit)"
     )
     @app_commands.default_permissions(administrator=True)
-    async def sticky(self, interaction: discord.Interaction, should_set: bool, message: str = None):
-        if should_set:
-            if not message:
-                return await interaction.response.send_message("❌ You must provide a message to set a sticky!", ephemeral=True)
+    async def sticky(self, interaction: discord.Interaction, action: Literal["Add", "Edit", "List", "Remove"], message: str = None):
+        """Manage sticky messages."""
+        
+        if action == "List":
+            # Logic from stickylist
+            stickies = self.get_stickies()
+            current_guild_stickies = [s for s in stickies if s.get('guild_id') == interaction.guild_id]
+
+            if not current_guild_stickies:
+                return await interaction.response.send_message("📝 No sticky messages found for this server.", ephemeral=True)
+
+            # Sort by channel position
+            def get_sort_key(s):
+                channel = interaction.guild.get_channel(s['channel_id'])
+                return channel.position if channel else float('inf')
+
+            current_guild_stickies.sort(key=get_sort_key)
+
+            text = "**📌 Active Sticky Messages:**\n"
+            for s in current_guild_stickies:
+                channel = interaction.guild.get_channel(s['channel_id'])
+                chan_mention = channel.mention if channel else f"ID:{s['channel_id']} (Deleted)"
+                content_preview = s['content'].replace("\n", " ")
+                status = " (Paused)" if not s.get('active', True) else ""
+                if len(content_preview) > 50: content_preview = content_preview[:47] + "..."
+                text += f"• {chan_mention}{status}: {content_preview}\n"
             
-            existing = self.get_sticky(interaction.channel_id)
-            new_data = {
-                "channel_id": interaction.channel_id,
-                "content": message,
-                "mode": existing.get('mode', 'after') if existing else 'after',
-                "delay": existing.get('delay', 0) if existing else 0,
-                "last_message_id": None,
-                "last_posted_at": 0
-            }
-            self.save_sticky(new_data)
-            await self.repost_sticky(interaction.channel)
-            await interaction.response.send_message("✅ Sticky message set!", ephemeral=True)
-        else:
-            existing = self.get_sticky(interaction.channel_id)
-            if existing:
-                try:
-                    if existing.get('last_message_id'):
-                        msg = await interaction.channel.fetch_message(existing['last_message_id'])
-                        await msg.delete()
-                except: pass
-                self.delete_sticky(interaction.channel_id)
+            return await interaction.response.send_message(text, ephemeral=True)
+
+        # Logic for Add/Edit/Remove
+        
+        if action == "Remove":
+            stickies = self.get_stickies()
+            target = next((s for s in stickies if s['channel_id'] == interaction.channel_id), None)
+            
+            if target:
+                if target.get('last_message_id'):
+                    try:
+                        old_msg = await interaction.channel.fetch_message(target['last_message_id'])
+                        await old_msg.delete()
+                    except: pass
+                
+                # Filter out
+                stickies = [s for s in stickies if s['channel_id'] != interaction.channel_id]
+                self.save_stickies(stickies)
                 await interaction.response.send_message("✅ Sticky message removed.", ephemeral=True)
             else:
                 await interaction.response.send_message("❌ No sticky message found in this channel.", ephemeral=True)
+            return
 
-    @app_commands.command(name="stickytime", description="Configure sticky message timing.")
+        # Add or Edit requires message
+        if not message:
+            return await interaction.response.send_message(f"❌ You must provide a message to {action} a sticky!", ephemeral=True)
+
+        content = message.replace("\\n", "\n")
+        existing = next((s for s in self.get_stickies() if s['channel_id'] == interaction.channel_id), None)
+
+        if action == "Add":
+            if existing:
+                return await interaction.response.send_message("⚠️ A sticky message already exists in this channel. Use `Edit` to change it.", ephemeral=True)
+            
+            # Create new
+            new_sticky = {
+                "channel_id": interaction.channel_id,
+                "guild_id": interaction.guild_id,
+                "content": content,
+                "last_message_id": None,
+                "last_posted_at": datetime.datetime.now().timestamp(),
+                "active": True
+            }
+            
+            stickies = self.get_stickies()
+            stickies.append(new_sticky)
+            self.save_stickies(stickies)
+
+            # Post it
+            try:
+                embed = discord.Embed(description=content, color=discord.Color(0xff90aa))
+                msg = await interaction.channel.send(embed=embed)
+                new_sticky['last_message_id'] = msg.id
+                # Save again with ID
+                self.bot.db.update_doc("sticky_messages", "channel_id", interaction.channel_id, new_sticky)
+                await interaction.response.send_message("✅ Sticky message added!", ephemeral=True)
+            except Exception as e:
+                await interaction.response.send_message(f"❌ Failed to send sticky: {e}", ephemeral=True)
+
+        elif action == "Edit":
+            if not existing:
+                return await interaction.response.send_message("❌ No sticky message found in this channel to edit. Use `Add`.", ephemeral=True)
+            
+            # Update existing
+            existing['content'] = content
+            # Delete old if exists
+            if existing.get('last_message_id'):
+                try:
+                    old_msg = await interaction.channel.fetch_message(existing['last_message_id'])
+                    await old_msg.delete()
+                except: pass
+            
+            # Send new
+            try:
+                embed = discord.Embed(description=content, color=discord.Color(0xff90aa))
+                msg = await interaction.channel.send(embed=embed)
+                existing['last_message_id'] = msg.id
+                existing['last_posted_at'] = datetime.datetime.now().timestamp()
+                
+                self.bot.db.update_doc("sticky_messages", "channel_id", interaction.channel_id, existing)
+                await interaction.response.send_message("✅ Sticky message updated!", ephemeral=True)
+            except Exception as e:
+                await interaction.response.send_message(f"❌ Failed to repost sticky: {e}", ephemeral=True)
+
+    @app_commands.command(name="stickytime", description="Configure server-wide sticky message timing.")
     @app_commands.describe(timing="Mode: 'before' (Cooldown) or 'after' (Delay)", number="Time amount", unit="Time unit")
     @app_commands.choices(
         timing=[app_commands.Choice(name="Before (Cooldown)", value="before"), app_commands.Choice(name="After (Delay)", value="after")],
@@ -306,48 +655,33 @@ class Admin(commands.Cog):
     )
     @app_commands.default_permissions(administrator=True)
     async def stickytime(self, interaction: discord.Interaction, timing: app_commands.Choice[str], number: int, unit: app_commands.Choice[str]):
-        data = self.get_sticky(interaction.channel_id)
-        if not data:
-            return await interaction.response.send_message("❌ You need to set a sticky message first with `/sticky`!", ephemeral=True)
-
+        """Configure server-wide sticky message timing."""
         multiplier = 60 if unit.value == 'minutes' else 1
         total_seconds = number * multiplier
         
-        data['mode'] = timing.value
-        data['delay'] = total_seconds
-        self.save_sticky(data)
+        settings = self.get_sticky_settings()
+        settings = [s for s in settings if s['guild_id'] != interaction.guild_id]
+        settings.append({"guild_id": interaction.guild_id, "delay": total_seconds, "mode": timing.value})
+        self.save_sticky_settings(settings)
         
         delay_text = "Instant (0s)" if total_seconds == 0 else f"{total_seconds} seconds"
         mode_text = "Cooldown (Before)" if timing.value == "before" else "Delay (After)"
-        
-        await interaction.response.send_message(f"✅ Sticky timing updated.\nMode: **{mode_text}**\nTime: **{delay_text}**", ephemeral=True)
+        await interaction.response.send_message(f"✅ Sticky settings updated.\nMode: **{mode_text}**\nTime: **{delay_text}**", ephemeral=True)
 
-    @app_commands.command(name="stickylist", description="List all sticky messages in the server.")
+    @app_commands.command(name="setlogchannel", description="Set the channel where server logs will be sent.")
+    @app_commands.describe(channel="The channel for logs")
     @app_commands.default_permissions(administrator=True)
-    async def stickylist(self, interaction: discord.Interaction):
-        collection = self.bot.db.get_collection("sticky_messages")
-        sticky_map = {s['channel_id']: s for s in collection}
+    async def setlogchannel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        """Set the channel where server logs will be sent."""
+        settings = self.get_log_settings()
+        settings = [s for s in settings if s['guild_id'] != interaction.guild_id]
         
-        sorted_stickies = []
-        for channel in interaction.guild.text_channels:
-            if channel.id in sticky_map:
-                sorted_stickies.append((channel, sticky_map[channel.id]))
-        
-        if not sorted_stickies:
-            return await interaction.response.send_message("📝 No active sticky messages found in this server.", ephemeral=True)
-        
-        description = ""
-        for channel, data in sorted_stickies:
-            mode = data.get('mode', 'after').title()
-            delay = data.get('delay', 0)
-            short_content = (data['content'][:60] + "...") if len(data['content']) > 60 else data['content']
-            description += f"{channel.mention} • **{mode}** ({delay}s)\n`{short_content}`\n\n"
-            
-        embed = discord.Embed(title="📌 Sticky Messages", description=description, color=discord.Color(0xff90aa))
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        settings.append({"guild_id": interaction.guild_id, "log_channel_id": channel.id})
+        self.save_log_settings(settings)
+        await interaction.response.send_message(f"✅ Logging channel set to {channel.mention}.", ephemeral=True)
 
-    # --- DM REQUEST COMMANDS ---
-
+    # --- DM REQUEST COMMANDS (Old Interface) ---
+    
     @app_commands.command(name="dmconfig", description="Configure DM Request settings (Roles, Emojis, Messages).")
     @app_commands.describe(
         role1="Role 1 (Triggers Reactions)",
@@ -367,21 +701,19 @@ class Admin(commands.Cog):
                        emoji1: str, emoji2: str,
                        message1: str, message2: str, message3: str, message4: str, message5: str):
         
-        config = self.get_dm_settings()
+        settings = self.get_dm_settings(interaction.guild_id)
         
-        # Update config
-        config['role1_id'] = role1.id
-        config['role2_id'] = role2.id
-        config['role3_id'] = role3.id
-        config['emoji1'] = emoji1
-        config['emoji2'] = emoji2
-        config['message1'] = message1
-        config['message2'] = message2
-        config['message3'] = message3
-        config['message4'] = message4
-        config['message5'] = message5
+        # Map Old Args to New DB Structure
+        settings['roles'] = [role1.id, role2.id, role3.id]
+        settings['reacts'] = [emoji1, emoji2]
         
-        self.save_dm_settings(config)
+        settings['messages']['1'] = message1
+        settings['messages']['2'] = message2
+        settings['messages']['3'] = message3
+        settings['messages']['4'] = message4
+        settings['messages']['5'] = message5
+        
+        self.save_dm_settings(interaction.guild_id, settings)
         
         embed = discord.Embed(title="✅ DM Request Config Updated", color=discord.Color(0xff90aa))
         embed.add_field(name="Roles", value=f"1: {role1.mention}\n2: {role2.mention}\n3: {role3.mention}", inline=False)
@@ -394,14 +726,14 @@ class Admin(commands.Cog):
     @app_commands.describe(action="Add, Remove, or List", channel="Channel to configure")
     @app_commands.default_permissions(administrator=True)
     async def dmchannel(self, interaction: discord.Interaction, action: Literal["Add", "Remove", "List"], channel: discord.TextChannel = None):
-        config = self.get_dm_settings()
-        channels = config.get('channels', [])
+        """Manage channels where DM Requests are active."""
+        settings = self.get_dm_settings(interaction.guild_id)
+        channels = settings.get('channels', [])
         
         if action == "List":
             if not channels:
                 return await interaction.response.send_message("📝 No DM Request channels configured.", ephemeral=True)
             
-            # Show list
             mentions = [f"<#{c_id}>" for c_id in channels]
             await interaction.response.send_message(f"**DM Request Channels:**\n" + ", ".join(mentions), ephemeral=True)
             return
@@ -411,66 +743,303 @@ class Admin(commands.Cog):
 
         if action == "Add":
             if channel.id not in channels:
-                channels.append(channel.id)
-                config['channels'] = channels
-                self.save_dm_settings(config)
+                settings['channels'].append(channel.id)
+                self.save_dm_settings(interaction.guild_id, settings)
                 await interaction.response.send_message(f"✅ Added {channel.mention} to DM Request channels.", ephemeral=True)
             else:
                 await interaction.response.send_message(f"⚠️ {channel.mention} is already in the list.", ephemeral=True)
         
         elif action == "Remove":
             if channel.id in channels:
-                channels.remove(channel.id)
-                config['channels'] = channels
-                self.save_dm_settings(config)
+                settings['channels'].remove(channel.id)
+                self.save_dm_settings(interaction.guild_id, settings)
                 await interaction.response.send_message(f"✅ Removed {channel.mention} from DM Request channels.", ephemeral=True)
             else:
                 await interaction.response.send_message(f"⚠️ {channel.mention} was not in the list.", ephemeral=True)
 
-    @app_commands.command(name="kick", description="Kick a user from the server.")
-    @app_commands.default_permissions(kick_members=True)
-    async def kick(self, interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided"):
-        if user.top_role >= interaction.user.top_role:
-            return await interaction.response.send_message("❌ You cannot kick this user.", ephemeral=True)
-        try:
-            await user.kick(reason=reason)
-            await interaction.response.send_message(f"👞 **{user}** has been kicked. Reason: {reason}")
-        except discord.Forbidden:
-            await interaction.response.send_message("❌ I don't have permission to kick that user.", ephemeral=True)
-
-    @app_commands.command(name="ban", description="Ban a user from the server.")
-    @app_commands.default_permissions(ban_members=True)
-    async def ban(self, interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided"):
-        if user.top_role >= interaction.user.top_role:
-            return await interaction.response.send_message("❌ You cannot ban this user.", ephemeral=True)
-        try:
-            await user.ban(reason=reason)
-            await interaction.response.send_message(f"🔨 **{user}** has been banned. Reason: {reason}")
-        except discord.Forbidden:
-            await interaction.response.send_message("❌ I don't have permission to ban that user.", ephemeral=True)
-
-    @app_commands.command(name="unban", description="Unban a user ID.")
-    @app_commands.default_permissions(ban_members=True)
-    async def unban(self, interaction: discord.Interaction, user_id: str):
-        try:
-            user = await self.bot.fetch_user(int(user_id))
-            await interaction.guild.unban(user)
-            await interaction.response.send_message(f"✅ **{user}** has been unbanned.")
-        except:
-            await interaction.response.send_message("❌ Could not unban user. Are they banned? Is the ID correct?", ephemeral=True)
-
-    @app_commands.command(name="dm", description="Send a direct message to a user.")
-    @app_commands.describe(user="The user to DM", message="The message content")
+    # --- VOTE KICK COMMANDS ---
+    
+    @app_commands.command(name="voteset", description="Set the channel where /vote can be used.")
+    @app_commands.describe(channel="The channel for voting")
     @app_commands.default_permissions(administrator=True)
-    async def dm(self, interaction: discord.Interaction, user: discord.User, message: str):
-        """Sends a direct message to a user."""
-        try:
-            await user.send(message)
-            await interaction.response.send_message(f"✅ Sent DM to **{user.name}**: {message}", ephemeral=True)
-        except discord.Forbidden:
-            await interaction.response.send_message(f"❌ Could not DM **{user.name}**. They may have DMs closed or blocked the bot.", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Failed to send DM: {e}", ephemeral=True)
+    async def voteset(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        """Set the channel where /vote can be used."""
+        data = self.get_vote_data(interaction.guild.id)
+        data['voting_channel_id'] = channel.id
+        self.save_vote_data(interaction.guild_id, data)
+        await interaction.response.send_message(f"✅ /vote is now restricted to {channel.mention}.", ephemeral=True)
+
+    @app_commands.command(name="vote", description="Vote to kick a user", extras={'public': True})
+    @app_commands.describe(member="The member to vote kick")
+    async def vote(self, interaction: discord.Interaction, member: discord.Member):
+        data = self.get_vote_data(interaction.guild.id)
+        voting_role_id = data['voting_role_id']
+        active_votes = data['active_votes'] # {target_id_str: [list of voters]}
+        voting_channel_id = data.get('voting_channel_id')
+
+        # Channel Check
+        if voting_channel_id and interaction.channel_id != voting_channel_id:
+            return await interaction.response.send_message(f"❌ You can only use /vote in <#{voting_channel_id}>.", ephemeral=True)
+
+        if voting_role_id is None:
+            return await interaction.response.send_message("❌ The voting role has not been set yet. An admin must use `/voterole` first.", ephemeral=True)
+
+        user_role_ids = [r.id for r in interaction.user.roles]
+        if voting_role_id not in user_role_ids and not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ You do not have the required role to vote.", ephemeral=True)
+
+        if member == interaction.user: return await interaction.response.send_message("❌ You cannot vote to kick yourself.", ephemeral=True)
+        if member.bot: return await interaction.response.send_message("❌ You cannot vote to kick a bot.", ephemeral=True)
+
+        target_id_str = str(member.id)
+        
+        if target_id_str not in active_votes: 
+            active_votes[target_id_str] = []
+        
+        if interaction.user.id in active_votes[target_id_str]:
+            return await interaction.response.send_message(f"⚠️ You have already voted to kick {member.display_name}.", ephemeral=True)
+
+        active_votes[target_id_str].append(interaction.user.id)
+        data['active_votes'] = active_votes
+        self.save_vote_data(interaction.guild.id, data)
+        
+        current_votes = len(active_votes[target_id_str])
+        
+        embed = discord.Embed(description=f"🗳️ **Vote Cast**\n{interaction.user.mention} voted to kick {member.mention}.\nCurrent Votes: **{current_votes}/{self.VOTE_THRESHOLD}**", color=discord.Color.yellow(), timestamp=datetime.datetime.now())
+        await self.log_to_channel(interaction.guild, embed)
+
+        if current_votes >= self.VOTE_THRESHOLD:
+            try:
+                await member.kick(reason=f"Votekicked by {current_votes} users.")
+                embed = discord.Embed(description=f"✅ **VOTEKICK SUCCESS**\n{member.mention} was kicked.\nTotal Votes: {current_votes}", color=discord.Color.green(), timestamp=datetime.datetime.now())
+                await self.log_to_channel(interaction.guild, embed)
+                await interaction.response.send_message(f"✅ {member.mention} has been kicked by vote.", ephemeral=False) 
+                
+                # Cleanup and Save
+                if target_id_str in active_votes: del active_votes[target_id_str]
+                data['active_votes'] = active_votes
+                self.save_vote_data(interaction.guild.id, data)
+
+            except discord.Forbidden:
+                await interaction.response.send_message("⚠️ Vote threshold reached, but I do not have permission to kick this user.", ephemeral=True)
+                embed = discord.Embed(description=f"❌ **VOTEKICK FAILED**\nTried to kick {member.mention} but lacked permissions.", color=discord.Color.red(), timestamp=datetime.datetime.now())
+                await self.log_to_channel(interaction.guild, embed)
+        else:
+            await interaction.response.send_message(f"✅ Vote cast! {member.display_name} has {current_votes}/{self.VOTE_THRESHOLD} votes.", ephemeral=True)
+
+    @app_commands.command(name="voterole", description="Set the role allowed to vote.")
+    @app_commands.describe(role="The role to allow voting")
+    @app_commands.default_permissions(administrator=True)
+    async def voterole(self, interaction: discord.Interaction, role: discord.Role):
+        """Set the role allowed to vote."""
+        data = self.get_vote_data(interaction.guild_id)
+        data['voting_role_id'] = role.id
+        self.save_vote_data(interaction.guild_id, data)
+
+        embed = discord.Embed(description=f"**Vote Role Updated**\nNew Role: {role.mention}\nSet By: {interaction.user.mention}", color=discord.Color.blue(), timestamp=datetime.datetime.now())
+        await self.log_to_channel(interaction.guild, embed)
+        await interaction.response.send_message(f"✅ Voting role set to {role.mention}.", ephemeral=True)
+
+    @app_commands.command(name="voteremove", description="Remove an active vote against a user.")
+    @app_commands.describe(member="The member to clear votes for")
+    @app_commands.default_permissions(administrator=True)
+    async def voteremove(self, interaction: discord.Interaction, member: discord.Member):
+        """Remove an active vote against a user (buggy only)."""
+        data = self.get_vote_data(interaction.guild.id)
+        target_id_str = str(member.id)
+        
+        if target_id_str in data['active_votes']:
+            del data['active_votes'][target_id_str]
+            self.save_vote_data(interaction.guild.id, data)
+            
+            embed = discord.Embed(description=f"**Vote Cancelled**\nVotes against {member.mention} were cleared by {interaction.user.mention}.", color=discord.Color.orange(), timestamp=datetime.datetime.now())
+            await self.log_to_channel(interaction.guild, embed)
+            await interaction.response.send_message(f"✅ Cleared all votes against {member.display_name}.", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"⚠️ There are no active votes against {member.display_name}.", ephemeral=True)
+
+    @app_commands.command(name="vote-list", description="List active vote kicks")
+    async def vote_list(self, interaction: discord.Interaction):
+        # BUGGY ONLY CHECK
+        if interaction.user.id != BUGGY_ID:
+            return await interaction.response.send_message("❌ You are not authorized to use this command.", ephemeral=True)
+
+        data = self.get_vote_data(interaction.guild.id)
+        active_votes = data.get('active_votes', {})
+
+        if not active_votes: 
+            return await interaction.response.send_message("No active votes.", ephemeral=True)
+
+        description = ""
+        for target_id_str, voters in active_votes.items():
+            try: target_id = int(target_id_str)
+            except: continue
+            
+            member = interaction.guild.get_member(target_id)
+            name = member.display_name if member else f"ID: {target_id}"
+            description += f"**{name}**: {len(voters)}/{self.VOTE_THRESHOLD} votes\n"
+
+        embed = discord.Embed(title="🗳️ Active Vote Kicks", description=description, color=discord.Color.blue())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # --- VC PING (Slash Command) ---
+
+    @app_commands.command(name="vcignore", description="Manage ignored VCs for ping system.")
+    @app_commands.describe(
+        action="Add, Remove, or List",
+        channel="The voice channel (required for Add/Remove)"
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def vcignore(self, interaction: discord.Interaction, 
+                       action: Literal["Add", "Remove", "List"], 
+                       channel: Optional[discord.VoiceChannel] = None):
+        """Manage ignored VCs for ping system."""
+        guild_id = str(interaction.guild_id)
+        config = self.get_vcping_config()
+        if guild_id not in config: config[guild_id] = {'ignored': [], 'role': None, 'people': 2, 'minutes': 5}
+        
+        # --- ADD ---
+        if action == "Add":
+            if not channel: return await interaction.response.send_message("❌ Error: `channel` is required to Add.", ephemeral=True)
+            if channel.id in config[guild_id]['ignored']:
+                return await interaction.response.send_message(f"⚠️ {channel.mention} is already ignored.", ephemeral=True)
+            config[guild_id]['ignored'].append(channel.id)
+            self.save_vcping_config(config)
+            await interaction.response.send_message(f"✅ Added {channel.mention} to the ignore list.", ephemeral=True)
+
+        # --- REMOVE ---
+        elif action == "Remove":
+            if not channel: return await interaction.response.send_message("❌ Error: `channel` is required to Remove.", ephemeral=True)
+            if channel.id not in config[guild_id]['ignored']:
+                return await interaction.response.send_message(f"⚠️ {channel.mention} is not in the ignore list.", ephemeral=True)
+            config[guild_id]['ignored'].remove(channel.id)
+            self.save_vcping_config(config)
+            await interaction.response.send_message(f"✅ Removed {channel.mention} from the ignore list.", ephemeral=True)
+
+        # --- LIST ---
+        elif action == "List":
+            if not config[guild_id]['ignored']:
+                return await interaction.response.send_message("No VCs are currently ignored.", ephemeral=True)
+            channels = [f"<#{cid}>" for cid in config[guild_id]['ignored']]
+            await interaction.response.send_message(f"Ignored VCs: {', '.join(channels)}", ephemeral=True)
+
+    @app_commands.command(name="vcping", description="Configure VC Ping settings.")
+    @app_commands.describe(role="The role to ping", people="Minimum people required", minutes="Minutes active before ping")
+    @app_commands.default_permissions(administrator=True)
+    async def vcping_set(self, interaction: discord.Interaction, role: discord.Role, people: int, minutes: int):
+        """Configure VC Ping settings."""
+        guild_id = str(interaction.guild_id)
+        config = self.get_vcping_config()
+        if guild_id not in config: config[guild_id] = {'ignored': []}
+        config[guild_id].update({'role': role.id, 'people': people, 'minutes': minutes})
+        self.save_vcping_config(config)
+        await interaction.response.send_message(f"✅ Settings updated: Ping {role.mention} when {people} people are in a VC for {minutes} minutes.", ephemeral=True)
+
+    # --- AUTOBAN ---
+    @app_commands.command(name="autoban", description="Toggle persistent autoban for a role.")
+    @app_commands.describe(role="The role to autoban")
+    @app_commands.default_permissions(administrator=True)
+    async def autoban(self, interaction: discord.Interaction, role: discord.Role):
+        """Toggles persistent autoban for a role."""
+        roles = self.get_autoban_roles(interaction.guild_id)
+        
+        if role.id in roles:
+            roles.remove(role.id)
+            self.save_autoban_roles(interaction.guild_id, roles)
+            await interaction.response.send_message(f"✅ Stopped autobanning for **{role.name}**.", ephemeral=True)
+        else:
+            roles.append(role.id)
+            self.save_autoban_roles(interaction.guild_id, roles)
+            await interaction.response.send_message(f"🚨 **Autoban ENABLED** for **{role.name}**. I will ban anyone who has this role now and in the future.", ephemeral=True)
+            
+            # Run the immediate purge
+            count = 0
+            failed = 0
+            msg = await interaction.followup.send(f"⏳ Scanning for existing members with {role.mention}...", ephemeral=True)
+            
+            for member in role.members:
+                if member == interaction.guild.owner or member == self.bot.user or member.top_role >= interaction.guild.me.top_role:
+                    failed += 1
+                    continue
+                try:
+                    await member.ban(reason=f"Autoban command by {interaction.user} (Role: {role.name})")
+                    count += 1
+                except:
+                    failed += 1
+            
+            await interaction.followup.send(f"✅ Initial scan complete. Banned **{count}** users. Failed to ban **{failed}**.", ephemeral=True)
+
+    @tasks.loop(seconds=60)
+    async def check_vcs(self):
+        config = self.get_vcping_config()
+        for guild_id, state_data in self.vc_state.items():
+            if guild_id not in config: continue
+            
+            settings = config[guild_id]
+            threshold_minutes = settings.get('minutes', 5)
+            ping_role_id = settings.get('role')
+
+            if not ping_role_id: continue
+
+            guild = self.bot.get_guild(int(guild_id))
+            if not guild: continue
+
+            role = guild.get_role(ping_role_id)
+            if not role: continue
+
+            for channel_id, data in state_data.items():
+                if data.get('pinged'): continue
+
+                start_time_iso = data.get('start_time')
+                if not start_time_iso: continue
+
+                start_time = datetime.datetime.fromisoformat(start_time_iso)
+                if datetime.datetime.now() - start_time >= datetime.timedelta(minutes=threshold_minutes):
+                    channel = guild.get_channel(int(channel_id))
+                    if channel:
+                        try:
+                            await channel.send(f"{role.mention} The VC has been active for {threshold_minutes} minutes!")
+                            self.vc_state[guild_id][channel_id]['pinged'] = True
+                        except Exception as e: print(f"Failed to send VC ping in {channel.name}: {e}")
+
+    @check_vcs.before_loop
+    async def before_check_vcs(self):
+        await self.bot.wait_until_ready()
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member, before, after):
+        if member.bot: return
+
+        guild_id = str(member.guild.id)
+        config = self.get_vcping_config()
+        if guild_id not in config: return
+
+        settings = config[guild_id]
+        threshold_people = settings.get('people', 2)
+        ignored_vcs = settings.get('ignored', [])
+
+        def update_channel_state(channel):
+            if not channel or channel.id in ignored_vcs: return
+
+            cid = str(channel.id)
+            if guild_id not in self.vc_state: self.vc_state[guild_id] = {}
+
+            current_members = len(channel.members)
+
+            if current_members == 0:
+                if cid in self.vc_state[guild_id]: del self.vc_state[guild_id][cid]
+                return
+
+            if current_members >= threshold_people:
+                if cid not in self.vc_state[guild_id]:
+                    self.vc_state[guild_id][cid] = {'start_time': datetime.datetime.now().isoformat(), 'pinged': False}
+            else:
+                if cid in self.vc_state[guild_id]:
+                    if not self.vc_state[guild_id][cid]['pinged']:
+                         del self.vc_state[guild_id][cid]
+
+        if before.channel: update_channel_state(before.channel)
+        if after.channel and (not before.channel or before.channel.id != after.channel.id): update_channel_state(after.channel)
 
 async def setup(bot):
     await bot.add_cog(Admin(bot))
