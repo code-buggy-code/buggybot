@@ -23,7 +23,7 @@ from typing import Literal
 # - repost_dashboard(channel)
 # - on_message(message)
 # - bb(interaction, action, label, key, ping_text) [Slash Command]
-# - bbdashboard(interaction, active, text) [Slash Command]
+# - bbdashboard(interaction, set, text) [Slash Command]
 # - bbtime(interaction, timing, number, unit) [Slash Command]
 # setup(bot)
 
@@ -304,35 +304,69 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
                 content += f"• `{o['key']}`: **{o['label']}** (Ping: {o['ping_text']})\n"
             await interaction.response.send_message(content, ephemeral=True)
 
-    @app_commands.command(name="bbdashboard", description="Spawn the Bother Buggy Dashboard in this channel.")
+    @app_commands.command(name="bbdashboard", description="Spawn or remove the Bother Buggy Dashboard.")
+    @app_commands.rename(should_set="set") # Renaming 'should_set' to 'set' in the UI
     @app_commands.describe(
-        active="Should the dashboard stick to the bottom?",
-        text="[Optional] Set a new title for the dashboard before spawning."
+        should_set="True to spawn & stick here, False to remove & disable.",
+        text="[Optional] Set a new title."
     )
     @app_commands.default_permissions(administrator=True)
-    async def bbdashboard(self, interaction: discord.Interaction, active: bool, text: str = None):
+    async def bbdashboard(self, interaction: discord.Interaction, should_set: bool, text: str = None):
         config = self.get_config(interaction.guild_id)
         
-        # Update settings immediately
-        config['sticky_active'] = active
+        # --- DISABLE / REMOVE ---
+        if not should_set:
+            config['sticky_active'] = False
+            self.save_config(interaction.guild_id, config)
+            
+            # Find and delete existing dashboard
+            dashboards = self.get_dashboards()
+            target = next((d for d in dashboards if d['guild_id'] == interaction.guild_id), None)
+            
+            if target:
+                try:
+                    chan = interaction.guild.get_channel(target['channel_id'])
+                    if chan:
+                        msg = await chan.fetch_message(target['message_id'])
+                        await msg.delete()
+                except: pass
+                
+                # Remove from DB
+                dashboards = [d for d in dashboards if d['guild_id'] != interaction.guild_id]
+                self.save_dashboards(dashboards)
+                
+            await interaction.response.send_message("✅ Dashboard removed and sticky mode disabled.", ephemeral=True)
+            return
+
+        # --- ENABLE / SPAWN ---
+        # Update settings
+        config['sticky_active'] = True
         if text:
             config['title'] = text
-        
         self.save_config(interaction.guild_id, config)
-            
+
         if not config['options']:
             return await interaction.response.send_message("❌ You need to add some options first via `/bb action:Add`!", ephemeral=True)
 
+        # Handle existing dashboard (Delete old one to move it here)
+        dashboards = self.get_dashboards()
+        target = next((d for d in dashboards if d['guild_id'] == interaction.guild_id), None)
+        
+        if target:
+            try:
+                chan = interaction.guild.get_channel(target['channel_id'])
+                if chan:
+                    msg = await chan.fetch_message(target['message_id'])
+                    await msg.delete()
+            except: pass
+
+        # Create and Send new
         embed = self.create_dashboard_embed(interaction.guild, config['title'])
         view = BotherView(self.bot, config['options'], interaction.guild_id)
         
-        # Send the dashboard message initially
         msg = await interaction.channel.send(embed=embed, view=view)
         
-        status_text = "Enabled" if active else "Disabled"
-        await interaction.response.send_message(f"✅ Dashboard spawned! Sticky mode is **{status_text}**.", ephemeral=True)
-
-        # Save using atomic update
+        # Save new location
         new_dash = {
             "guild_id": interaction.guild_id,
             "channel_id": interaction.channel_id,
@@ -340,12 +374,13 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
             "last_posted_at": datetime.datetime.now().timestamp()
         }
         
-        updated = self.bot.db.update_doc("bb_dashboards", "guild_id", interaction.guild_id, new_dash)
+        # Atomic Update / Save
+        # Filter out old one from list (if it existed), add new one, save.
+        dashboards = [d for d in dashboards if d['guild_id'] != interaction.guild_id]
+        dashboards.append(new_dash)
+        self.save_dashboards(dashboards)
         
-        if not updated:
-            dashboards = self.get_dashboards()
-            dashboards.append(new_dash)
-            self.save_dashboards(dashboards)
+        await interaction.response.send_message("✅ Dashboard spawned! It is now **Sticky** in this channel.", ephemeral=True)
 
     @app_commands.command(name="bbtime", description="Configure dashboard sticky timing.")
     @app_commands.describe(timing="Mode: 'before' (Cooldown) or 'after' (Delay)", number="Time amount", unit="Time unit")
