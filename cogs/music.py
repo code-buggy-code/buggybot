@@ -128,7 +128,7 @@ class MusicControls(discord.ui.View):
 # - process_spotify_link(url, guild_id)
 # - check_and_convert_cookies()
 # - get_ytdl_opts()
-# - download_track(track_data, interaction=None) [Updated with 3-Stage Retry]
+# - download_track(track_data, interaction=None) [Updated with 4-Stage Retry]
 # - manage_downloads(guild_id)
 # - cleanup_files(guild_id)
 # - cleanup_all_files(guild_id)
@@ -276,10 +276,10 @@ class Music(commands.Cog):
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             },
-            # Default to iOS for stability on cloud IPs
+            # Default to Android (More stable than iOS currently)
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['ios', 'android', 'web']
+                    'player_client': ['android', 'web']
                 }
             }
         }
@@ -482,16 +482,19 @@ class Music(commands.Cog):
                             asyncio.run_coroutine_threadsafe(status_message.edit(content=msg), loop)
                     except: pass
 
-        # Define 3 Retry Stages
+        # Define 4 Retry Stages
         attempts = [
-            # 1. Best Audio / High Quality (Default)
-            {'format': 'bestaudio/best', 'desc': 'High Quality', 'client': 'ios'},
+            # 1. Best Audio / High Quality (Default) - Android
+            {'format': 'bestaudio/best', 'desc': 'High Quality', 'client': 'android'},
             
-            # 2. Broad "Best" (Fixes 'Requested format not available')
-            {'format': 'best', 'desc': 'Standard Quality', 'client': 'ios'},
+            # 2. Broad "Best" (Android)
+            {'format': 'best', 'desc': 'Standard Quality', 'client': 'android'},
             
-            # 3. TV Client + Broad Format (Fixes Sign-in issues)
-            {'format': 'best', 'desc': 'Fallback Mode', 'client': 'tv'}
+            # 3. Broad "Best" (Web - fallback for client specific blocks)
+            {'format': 'best', 'desc': 'Web Fallback', 'client': 'web'},
+
+            # 4. "Worst" (Just give me anything)
+            {'format': 'worst', 'desc': 'Emergency Low Quality', 'client': 'android'}
         ]
         
         final_filename = None
