@@ -129,9 +129,9 @@ class MusicControls(discord.ui.View):
 # - download_track(track_data) [Helper]
 # - manage_downloads(guild_id) [Helper]
 # - cleanup_files(guild_id) [Helper]
-# - cleanup_all_files(guild_id) [Helper - New]
+# - cleanup_all_files(guild_id) [Helper]
 # - play_next_song(guild)
-# - stop_playback(interaction) [Helper - New]
+# - stop_playback(interaction) [Helper]
 # - check_token_validity_task()
 # - play(interaction, query) [Slash]
 # - pause(interaction) [Slash]
@@ -182,7 +182,11 @@ class Music(commands.Cog):
             except Exception as e:
                 print(f"❌ Failed to initialize yt_dlp: {e}")
 
-        self.ffmpeg_options = {'options': '-vn'}
+        # Add reconnect options to handle network blips
+        self.ffmpeg_options = {
+            'options': '-vn',
+            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
+        }
 
         # Playback State
         self.music_queues = {} # {guild_id: [track_data, ...]}
