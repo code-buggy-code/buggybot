@@ -367,33 +367,76 @@ class Music(commands.Cog):
         if track_data.get('filename') and os.path.exists(track_data['filename']):
             return track_data['filename']
 
-        try:
-            # Send/Edit message if interaction provided (for immediate feedback)
-            if interaction:
-                try:
-                    await interaction.followup.send(f"⬇️ Downloading: **{track_data['title']}**...", ephemeral=True)
-                except: pass
+        loop = asyncio.get_running_loop()
+        
+        # We need a reference to the status message to update it
+        status_message = None
+        last_update_time = 0
 
-            loop = asyncio.get_running_loop()
+        if interaction:
+            try:
+                # Send initial message and store it (followup.send returns a message object if wait=True usually, but for ephemeral we rely on edit_original_response if it was the original interaction, or just send a new one)
+                # Since we might be deep in a call stack, let's just send a new ephemeral message we can edit
+                status_message = await interaction.followup.send(f"⬇️ Downloading: **{track_data['title']}**... [Starting]", ephemeral=True, wait=True)
+            except: pass
+
+        def progress_hook(d):
+            nonlocal last_update_time
+            if d['status'] == 'downloading':
+                # Throttle updates to every 2 seconds to avoid rate limits
+                current_time = time.time()
+                if current_time - last_update_time > 2:
+                    last_update_time = current_time
+                    percent = d.get('_percent_str', '0%').replace('\x1b[0;94m', '').replace('\x1b[0m', '') # Strip colors if present
+                    
+                    # Create simple progress bar
+                    try:
+                        p = float(percent.strip('%'))
+                        bar_len = 10
+                        filled = int(bar_len * p / 100)
+                        bar = '▓' * filled + '░' * (bar_len - filled)
+                        msg = f"⬇️ Downloading: **{track_data['title']}**\n`[{bar}] {percent}`"
+                        
+                        if status_message:
+                            asyncio.run_coroutine_threadsafe(status_message.edit(content=msg), loop)
+                    except: pass
+
+        try:
             print(f"⬇️ Downloading: {track_data['title']}...")
             
-            # Use self.ytdl here
-            data = await loop.run_in_executor(None, lambda: self.ytdl.extract_info(track_data['url'], download=True))
+            # Create a copy of options to add the hook without messing up global options
+            opts = self.ytdl_format_options.copy()
+            opts['progress_hooks'] = [progress_hook]
+            
+            # Use a new YTDL instance for this specific download to use the hook
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                data = await loop.run_in_executor(None, lambda: ydl.extract_info(track_data['url'], download=True))
             
             if 'entries' in data:
                 data = data['entries'][0]
 
             filename = self.ytdl.prepare_filename(data)
-            track_data['filename'] = filename # Update the dict ref
+            track_data['filename'] = filename 
             
-            # Verify file exists
+            # Final update
+            if status_message:
+                try:
+                    await status_message.edit(content=f"✅ Ready to Play: **{track_data['title']}**")
+                except: pass
+
             if os.path.exists(filename):
                 print(f"✅ Downloaded: {filename}")
                 return filename
             else:
+                if status_message:
+                    await status_message.edit(content=f"❌ Failed: File not found for **{track_data['title']}**")
                 print(f"❌ Error: File not found after download: {filename}")
                 return None
         except Exception as e:
+            if status_message:
+                try:
+                    await status_message.edit(content=f"❌ Download Error: {e}")
+                except: pass
             print(f"❌ Download Error: {e}")
             return None
 
@@ -611,6 +654,8 @@ class Music(commands.Cog):
 
             if self.youtube:
                 try:
+                    # Removed progress messages
+                    
                     next_page_token = None
                     total_items = []
                     
