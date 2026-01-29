@@ -128,7 +128,7 @@ class MusicControls(discord.ui.View):
 # - process_spotify_link(url, guild_id)
 # - check_and_convert_cookies()
 # - get_ytdl_opts()
-# - download_track(track_data, interaction=None) [Updated with 4-Stage Retry]
+# - download_track(track_data, interaction=None) [Updated with 5-Stage Retry]
 # - manage_downloads(guild_id)
 # - cleanup_files(guild_id)
 # - cleanup_all_files(guild_id)
@@ -482,19 +482,22 @@ class Music(commands.Cog):
                             asyncio.run_coroutine_threadsafe(status_message.edit(content=msg), loop)
                     except: pass
 
-        # Define 4 Retry Stages
+        # Define 5 Retry Stages (Enhanced Desperation)
         attempts = [
-            # 1. Best Audio / High Quality (Default) - Android
-            {'format': 'bestaudio/best', 'desc': 'High Quality', 'client': 'android'},
+            # 1. High Quality (Android) - Standard attempt
+            {'format': 'bestaudio/best', 'desc': 'High Quality (Android)', 'client': 'android'},
             
-            # 2. Broad "Best" (Android)
-            {'format': 'best', 'desc': 'Standard Quality', 'client': 'android'},
+            # 2. High Quality (iOS) - iOS often sees formats Android doesn't on datacenter IPs
+            {'format': 'bestaudio/best', 'desc': 'High Quality (iOS)', 'client': 'ios'},
             
-            # 3. Broad "Best" (Web - fallback for client specific blocks)
-            {'format': 'best', 'desc': 'Web Fallback', 'client': 'web'},
-
-            # 4. "Worst" (Just give me anything)
-            {'format': 'worst', 'desc': 'Emergency Low Quality', 'client': 'android'}
+            # 3. Standard (TV) - Very robust API against blocks
+            {'format': 'best', 'desc': 'Standard (TV)', 'client': 'tv'},
+            
+            # 4. Web Client - Fallback
+            {'format': 'best', 'desc': 'Web Client', 'client': 'web'},
+            
+            # 5. Last Resort (No specific client args, just 'best')
+            {'format': 'best', 'desc': 'Default/Native', 'client': None}
         ]
         
         final_filename = None
@@ -507,7 +510,13 @@ class Music(commands.Cog):
                 opts = self.get_ytdl_opts()
                 opts['format'] = attempt['format']
                 opts['progress_hooks'] = [progress_hook]
-                opts['extractor_args'] = {'youtube': {'player_client': [attempt['client']]}}
+                
+                # Handle client args
+                if attempt['client']:
+                    opts['extractor_args'] = {'youtube': {'player_client': [attempt['client']]}}
+                else:
+                    # Remove extractor args if None (use defaults)
+                    opts.pop('extractor_args', None)
 
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     data = await loop.run_in_executor(None, lambda: ydl.extract_info(track_data['url'], download=True))
@@ -517,7 +526,7 @@ class Music(commands.Cog):
                 with yt_dlp.YoutubeDL(opts) as ydl:
                      temp_filename = ydl.prepare_filename(data)
                 
-                # Force MP3 Extension logic
+                # Force MP3 Extension logic (assuming postprocessor worked)
                 base_name, _ = os.path.splitext(temp_filename)
                 final_filename = base_name + ".mp3"
                 track_data['filename'] = final_filename
@@ -528,6 +537,15 @@ class Music(commands.Cog):
                          try: await status_message.edit(content=f"✅ Ready to Play: **{track_data['title']}**")
                          except: pass
                     return final_filename
+                
+                # Fallback: Check if file exists with original extension (if MP3 conversion failed)
+                if os.path.exists(temp_filename):
+                     print(f"⚠️ Conversion failed, playing original: {temp_filename}")
+                     track_data['filename'] = temp_filename
+                     if status_message:
+                         try: await status_message.edit(content=f"✅ Ready to Play (Raw): **{track_data['title']}**")
+                         except: pass
+                     return temp_filename
             
             except Exception as e:
                 last_error = e
