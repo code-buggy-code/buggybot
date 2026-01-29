@@ -12,7 +12,7 @@ from typing import Literal
 # - handle_dm_request(message)
 # - on_message(message)
 # - on_raw_reaction_add(payload)
-# - dmconfig(interaction, role1, role2, role3, emoji1, emoji2, message1...) [Slash]
+# - dmconfig(interaction, role1, role2, role3, emoji1, emoji2) [Slash]
 # - dmchannel(interaction, action, channel) [Slash]
 # setup(bot)
 
@@ -20,15 +20,6 @@ class DMRequests(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.description = "DM Request system."
-        
-        self.DEFAULT_DM_MESSAGES = {
-            "0": "{mention} Please include text with your mention to make a request.",
-            "1": "Request Accepted!",
-            "2": "Request Denied.",
-            "3": "DM Request (Role 2) sent to {requested}.",
-            "4": "DM Request (Role 3) sent to {requested}.",
-            "5": "sorry they dont have dm roles yet :sob:, buggy's working on this"
-        }
         self.DEFAULT_DM_REACTS = ["👍", "👎"]
 
     # --- HELPERS ---
@@ -38,7 +29,6 @@ class DMRequests(commands.Cog):
         collection = self.bot.db.get_collection("dm_settings")
         for doc in collection:
             if doc['guild_id'] == guild_id:
-                if "messages" not in doc: doc["messages"] = self.DEFAULT_DM_MESSAGES.copy()
                 if "reacts" not in doc: doc["reacts"] = self.DEFAULT_DM_REACTS.copy()
                 if "roles" not in doc: doc["roles"] = [0, 0, 0]
                 if "channels" not in doc: doc["channels"] = []
@@ -48,8 +38,7 @@ class DMRequests(commands.Cog):
             "guild_id": guild_id,
             "channels": [],
             "roles": [0, 0, 0],
-            "reacts": self.DEFAULT_DM_REACTS.copy(),
-            "messages": self.DEFAULT_DM_MESSAGES.copy()
+            "reacts": self.DEFAULT_DM_REACTS.copy()
         }
 
     def save_dm_settings(self, guild_id, data):
@@ -82,9 +71,8 @@ class DMRequests(commands.Cog):
             if not valid_request:
                 try:
                     await message.delete()
-                    raw_msg = settings['messages'].get("0", "Error: No text.")
-                    formatted_msg = raw_msg.replace("{mention}", message.author.mention).replace("{requester}", message.author.mention)
-                    await message.channel.send(formatted_msg, delete_after=5)
+                    msg = f"{message.author.mention} Please include text with your mention to make a request."
+                    await message.channel.send(msg, delete_after=5)
                 except: pass
                 return
         
@@ -92,30 +80,30 @@ class DMRequests(commands.Cog):
             target = target_member
             roles = settings['roles']
             
+            # Roles Config: [Role1_Trigger, Role2_Msg3, Role3_Msg4]
             has_role_1 = any(r.id == roles[0] for r in target.roles)
             has_role_2 = any(r.id == roles[1] for r in target.roles)
             has_role_3 = any(r.id == roles[2] for r in target.roles)
             
-            raw_msg = ""
             if has_role_1:
+                # 1. Add reactions for manual accept/deny
                 try:
                     for e in settings['reacts']:
                         await message.add_reaction(e)
                 except: pass
+                
+                # 2. Send instruction message (No requester ping)
+                await message.channel.send(f"**{target.display_name}**, please react with the relevant emoji to accept or reject the request.")
             
             elif has_role_2:
-                raw_msg = settings['messages'].get("3", "")
+                # Auto-response 1 (No requester ping)
+                await message.channel.send(f"DM Request sent to **{target.display_name}**.")
             elif has_role_3:
-                raw_msg = settings['messages'].get("4", "")
+                # Auto-response 2 (No requester ping)
+                await message.channel.send(f"DM Request sent to **{target.display_name}**.")
             else:
-                raw_msg = settings['messages'].get("5", "")
-            
-            if raw_msg:
-                formatted_msg = raw_msg.replace("{mention}", message.author.mention)\
-                                       .replace("{requester}", message.author.mention)\
-                                       .replace("{requested}", f"**{target.display_name}**")\
-                                       .replace("{requested_nickname}", target.display_name)
-                await message.channel.send(formatted_msg)
+                # No roles found
+                await message.channel.send(f"Sorry, **{target.display_name}** doesn't have DM roles set up yet. Buggy's working on this!")
 
     # --- EVENTS ---
 
@@ -145,24 +133,36 @@ class DMRequests(commands.Cog):
             if not message.mentions: return
             target_member = message.mentions[0] 
             
+            # Only the requested user can react to accept/deny
             if payload.user_id != target_member.id: return 
 
-            msg_index = -1
-            if str(payload.emoji) == settings['reacts'][0]: msg_index = "1"
-            elif str(payload.emoji) == settings['reacts'][1]: msg_index = "2"
+            msg_type = -1
+            if str(payload.emoji) == settings['reacts'][0]: msg_type = 1 # Accept
+            elif str(payload.emoji) == settings['reacts'][1]: msg_type = 2 # Deny
             
-            if msg_index != -1:
-                raw_msg = settings['messages'].get(msg_index, "")
-                formatted_msg = raw_msg.replace("{mention}", message.author.mention)\
-                                       .replace("{requester}", message.author.mention)\
-                                       .replace("{requested}", f"**{target_member.display_name}**")\
-                                       .replace("{requested_nickname}", target_member.display_name)
+            if msg_type != -1:
+                requester = message.author
+                requested_name = target_member.display_name
                 
-                await channel.send(formatted_msg)
+                sent_msg = None
+                if msg_type == 1:
+                    # Accepted
+                    sent_msg = await channel.send(f"{requester.mention} Request Accepted by **{requested_name}**!")
+                else:
+                    # Denied
+                    sent_msg = await channel.send(f"{requester.mention} Request Denied by **{requested_name}**.")
                 
+                # Pin the log message
+                if sent_msg:
+                    try:
+                        await sent_msg.pin()
+                    except: pass
+                
+                # Clean up reactions
                 try:
                     for e in settings['reacts']:
                         await message.remove_reaction(e, self.bot.user)
+                        await message.remove_reaction(e, target_member)
                 except: pass
 
         except Exception as e:
@@ -170,41 +170,31 @@ class DMRequests(commands.Cog):
 
     # --- SLASH COMMANDS ---
     
-    @app_commands.command(name="dmconfig", description="Configure DM Request settings (Roles, Emojis, Messages).")
+    @app_commands.command(name="dmconfig", description="Configure DM Request settings (Roles & Emojis).")
     @app_commands.describe(
         role1="Role 1 (Triggers Reactions)",
-        role2="Role 2 (Triggers Message 3)",
-        role3="Role 3 (Triggers Message 4)",
-        emoji1="Emoji 1 (For Role 1 reaction)",
-        emoji2="Emoji 2 (For Role 1 reaction)",
-        message1="Sent when user clicks Emoji 1",
-        message2="Sent when user clicks Emoji 2",
-        message3="Sent if user has Role 2",
-        message4="Sent if user has Role 3",
-        message5="Sent if user has NO roles (Fallback)"
+        role2="Role 2 (Auto Response 1)",
+        role3="Role 3 (Auto Response 2)",
+        emoji1="Emoji 1 (Accept)",
+        emoji2="Emoji 2 (Deny)"
     )
     @app_commands.default_permissions(administrator=True)
     async def dmconfig(self, interaction: discord.Interaction, 
                        role1: discord.Role, role2: discord.Role, role3: discord.Role,
-                       emoji1: str, emoji2: str,
-                       message1: str, message2: str, message3: str, message4: str, message5: str):
+                       emoji1: str, emoji2: str):
         
         settings = self.get_dm_settings(interaction.guild_id)
         
         settings['roles'] = [role1.id, role2.id, role3.id]
         settings['reacts'] = [emoji1, emoji2]
-        settings['messages']['1'] = message1
-        settings['messages']['2'] = message2
-        settings['messages']['3'] = message3
-        settings['messages']['4'] = message4
-        settings['messages']['5'] = message5
+        # We no longer save custom messages
+        if 'messages' in settings: del settings['messages']
         
         self.save_dm_settings(interaction.guild_id, settings)
         
         embed = discord.Embed(title="✅ DM Request Config Updated", color=discord.Color(0xff90aa))
-        embed.add_field(name="Roles", value=f"1: {role1.mention}\n2: {role2.mention}\n3: {role3.mention}", inline=False)
-        embed.add_field(name="Reactions", value=f"1: {emoji1} -> {message1}\n2: {emoji2} -> {message2}", inline=False)
-        embed.add_field(name="Auto Responses", value=f"Role 2: {message3}\nRole 3: {message4}\nNone: {message5}", inline=False)
+        embed.add_field(name="Roles", value=f"1 (Reactions): {role1.mention}\n2 (Auto): {role2.mention}\n3 (Auto): {role3.mention}", inline=False)
+        embed.add_field(name="Reactions", value=f"Accept: {emoji1}\nDeny: {emoji2}", inline=False)
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
