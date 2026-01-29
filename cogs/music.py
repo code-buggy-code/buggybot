@@ -163,7 +163,9 @@ class Music(commands.Cog):
         # Initialize YTDL Here for Safety
         self.ytdl = None
         if yt_dlp:
-            yt_dlp.utils.bug_reports_message = lambda: ''
+            # Fix: Accept args/kwargs to prevent "unexpected keyword argument" errors
+            yt_dlp.utils.bug_reports_message = lambda *args, **kwargs: ''
+            
             self.ytdl_format_options = {
                 'format': 'bestaudio/best',
                 'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
