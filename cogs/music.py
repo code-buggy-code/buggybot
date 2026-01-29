@@ -9,38 +9,29 @@ import datetime
 import sys
 import time
 import random
-import yt_dlp
 
-# music APIs
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-from google.auth.transport.requests import Request
-from google_auth_oauthlib.flow import Flow
-from spotipy import Spotify
-from spotipy.oauth2 import SpotifyClientCredentials
+# Safe Imports for External Libraries
+try:
+    import yt_dlp
+except ImportError:
+    yt_dlp = None
+    print("❌ Critical: 'yt_dlp' is not installed. Music will not work.")
 
-# --- YTDL & FFMPEG CONFIG ---
-yt_dlp.utils.bug_reports_message = lambda: ''
+try:
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+    from google.auth.transport.requests import Request
+    from google_auth_oauthlib.flow import Flow
+except ImportError:
+    print("⚠️ Warning: Google Auth libraries not found. YouTube API features will fail.")
 
-ytdl_format_options = {
-    'format': 'bestaudio/best',
-    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-    'restrictfilenames': True,
-    'noplaylist': True,
-    'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'logtostderr': False,
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'auto',
-    'source_address': '0.0.0.0',
-}
-
-ffmpeg_options = {
-    'options': '-vn',
-}
-
-ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
+try:
+    from spotipy import Spotify
+    from spotipy.oauth2 import SpotifyClientCredentials
+except ImportError:
+    Spotify = None
+    SpotifyClientCredentials = None
+    print("⚠️ Warning: 'spotipy' not found. Spotify links will fail.")
 
 # --- UI VIEW FOR CONTROLS ---
 
@@ -123,7 +114,6 @@ class MusicControls(discord.ui.View):
             await vc.disconnect()
         await interaction.response.send_message("🛑 Stopped", ephemeral=True)
 
-
 # Function/Class List:
 # class Music(commands.Cog)
 # - __init__(bot)
@@ -145,7 +135,7 @@ class MusicControls(discord.ui.View):
 # - skip(interaction) [Slash]
 # - stop(interaction) [Slash]
 # - queue(interaction) [Slash]
-# - shuffle(interaction) [Slash - New]
+# - shuffle(interaction) [Slash]
 # - checkmusic(interaction) [Slash]
 # - ytauth(interaction) [Slash]
 # - ytcode(interaction, code) [Slash]
@@ -162,6 +152,30 @@ class Music(commands.Cog):
         self.spotify = None
         self.auth_flow = None
         
+        # Initialize YTDL Here for Safety
+        self.ytdl = None
+        if yt_dlp:
+            yt_dlp.utils.bug_reports_message = lambda: ''
+            self.ytdl_format_options = {
+                'format': 'bestaudio/best',
+                'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+                'restrictfilenames': True,
+                'noplaylist': True,
+                'nocheckcertificate': True,
+                'ignoreerrors': False,
+                'logtostderr': False,
+                'quiet': True,
+                'no_warnings': True,
+                'default_search': 'auto',
+                'source_address': '0.0.0.0',
+            }
+            try:
+                self.ytdl = yt_dlp.YoutubeDL(self.ytdl_format_options)
+            except Exception as e:
+                print(f"❌ Failed to initialize yt_dlp: {e}")
+
+        self.ffmpeg_options = {'options': '-vn'}
+
         # Playback State
         self.music_queues = {} # {guild_id: [track_data, ...]}
         self.current_song = {} # {guild_id: track_data}
@@ -169,7 +183,9 @@ class Music(commands.Cog):
         
         # Start services
         self.load_music_services()
-        self.bot.loop.create_task(self.load_youtube_service())
+        if hasattr(self.bot, 'db'):
+            self.bot.loop.create_task(self.load_youtube_service())
+        
         self.check_token_validity_task.start()
 
     def cog_unload(self):
@@ -177,6 +193,8 @@ class Music(commands.Cog):
 
     def load_config(self, guild_id):
         """Loads music config for a specific guild from DB."""
+        if not hasattr(self.bot, 'db'): return {}
+        
         data = self.bot.db.get_collection("music_config")
         if isinstance(data, list): data = {} 
         
@@ -188,6 +206,8 @@ class Music(commands.Cog):
 
     def save_config(self, guild_id, config):
         """Saves guild config to DB."""
+        if not hasattr(self.bot, 'db'): return
+
         data = self.bot.db.get_collection("music_config")
         if isinstance(data, list): data = {}
         
@@ -197,6 +217,7 @@ class Music(commands.Cog):
     async def load_youtube_service(self):
         """Loads the YouTube API service from stored token."""
         self.youtube = None
+        if not hasattr(self.bot, 'db'): return False
         
         global_config = self.bot.db.get_collection("global_music_settings")
         if isinstance(global_config, list): 
@@ -233,6 +254,8 @@ class Music(commands.Cog):
 
     def load_music_services(self):
         """Loads Spotify service."""
+        if not Spotify or not SpotifyClientCredentials: return
+
         spotify_id = None
         spotify_secret = None
         
@@ -328,17 +351,19 @@ class Music(commands.Cog):
 
     async def download_track(self, track_data):
         """Helper: Downloads a track and returns filename."""
+        if not self.ytdl: return None
         if track_data.get('filename') and os.path.exists(track_data['filename']):
             return track_data['filename']
 
         try:
             loop = asyncio.get_running_loop()
-            data = await loop.run_in_executor(None, lambda: ytdl.extract_info(track_data['url'], download=True))
+            # Use self.ytdl here
+            data = await loop.run_in_executor(None, lambda: self.ytdl.extract_info(track_data['url'], download=True))
             
             if 'entries' in data:
                 data = data['entries'][0]
 
-            filename = ytdl.prepare_filename(data)
+            filename = self.ytdl.prepare_filename(data)
             track_data['filename'] = filename # Update the dict ref
             return filename
         except Exception as e:
@@ -356,8 +381,6 @@ class Music(commands.Cog):
         """Deletes old files but keeps the last played song (for back button)."""
         if guild_id not in self.history: return
         
-        # We want to keep the most recent item in history (the previous song)
-        # So we delete everything except the last item
         while len(self.history[guild_id]) > 1:
             old_track = self.history[guild_id].pop(0) # Remove oldest
             fname = old_track.get('filename')
@@ -391,7 +414,7 @@ class Music(commands.Cog):
                 return
 
             try:
-                source = discord.FFmpegPCMAudio(filename, **ffmpeg_options)
+                source = discord.FFmpegPCMAudio(filename, **self.ffmpeg_options)
             except Exception as e:
                 print(f"Source Error: {e}")
                 self.play_next_song(guild)
@@ -460,6 +483,9 @@ class Music(commands.Cog):
         if not interaction.user.voice:
             return await interaction.response.send_message("❌ You are not in a voice channel, buggy!", ephemeral=True)
 
+        if not self.ytdl:
+            return await interaction.response.send_message("❌ Music is disabled because 'yt_dlp' is missing.", ephemeral=True)
+
         await interaction.response.defer()
 
         # Join VC if needed
@@ -479,8 +505,7 @@ class Music(commands.Cog):
         songs_added = 0
         
         # Determine insertion point (Next in queue vs End of queue)
-        # If playing, insert at 0. If not, append (which is also effectively 0)
-        is_playing = interaction.guild.voice_client.is_playing()
+        is_playing = interaction.guild.voice_client and interaction.guild.voice_client.is_playing()
         insert_index = 0 if is_playing else len(self.music_queues[guild_id])
 
         # --- MODE 1: DEFAULT SERVER PLAYLIST (No Query) ---
@@ -502,8 +527,6 @@ class Music(commands.Cog):
                     if not items:
                         return await interaction.followup.send("⚠️ Server playlist seems empty.")
 
-                    # If inserting at front, we need to add them in order so [1,2,3] -> [1,2,3, Old...]
-                    # So we insert at (index + current_iteration)
                     for i, item in enumerate(items):
                         vid = item['snippet']['resourceId']['videoId']
                         title = item['snippet']['title']
@@ -528,7 +551,7 @@ class Music(commands.Cog):
                 if not query.startswith("http"):
                     query = f"ytsearch:{query}"
 
-                data = await self.bot.loop.run_in_executor(None, lambda: ytdl.extract_info(query, download=False))
+                data = await self.bot.loop.run_in_executor(None, lambda: self.ytdl.extract_info(query, download=False))
                 
                 if 'entries' in data:
                     data = data['entries'][0]
@@ -546,12 +569,12 @@ class Music(commands.Cog):
             except Exception as e:
                 return await interaction.followup.send(f"❌ Error fetching song: {e}")
 
-        # If we inserted at the front (and something is playing), we should double check preloading
+        # Trigger preload if we inserted at front and playing
         if is_playing and songs_added > 0:
             self.bot.loop.create_task(self.preload_next_song(interaction.guild))
 
         # Start Playback if Idle
-        if not interaction.guild.voice_client.is_playing() and songs_added > 0:
+        if interaction.guild.voice_client and not interaction.guild.voice_client.is_playing() and songs_added > 0:
             self.play_next_song(interaction.guild)
 
     @app_commands.command(name="pause", description="Pause the current song.")
@@ -629,7 +652,6 @@ class Music(commands.Cog):
             if len(self.music_queues[interaction.guild_id]) > 0:
                 random.shuffle(self.music_queues[interaction.guild_id])
                 msg += " Queue shuffled!"
-                # Trigger preload in case the 'next' song changed
                 self.bot.loop.create_task(self.preload_next_song(interaction.guild))
         
         await interaction.response.send_message(msg, ephemeral=False)
