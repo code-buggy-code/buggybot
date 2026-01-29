@@ -224,13 +224,13 @@ class Music(commands.Cog):
                 'source_address': '0.0.0.0',
                 # NEW: Disable cache to prevent persisting bad tokens
                 'cachedir': False,
-                # NEW: Add sleep to prevent rate limiting
-                'sleep_interval': 3,
-                'max_sleep_interval': 10,
-                # NEW: Force Android client to bypass sign-in checks on cloud IPs
+                # NEW: Add sleep to prevent rate limiting (Increased to 5)
+                'sleep_interval': 5,
+                'max_sleep_interval': 15,
+                # NEW: Force iOS client (more robust than Android for music on cloud IPs)
                 'extractor_args': {
                     'youtube': {
-                        'player_client': ['android', 'web']
+                        'player_client': ['ios']
                     }
                 }
             }
@@ -503,17 +503,17 @@ class Music(commands.Cog):
             print(f"❌ First attempt failed: {e}")
             err_str = str(e).lower()
             if "sign in" in err_str or "cookie" in err_str or "rate-limit" in err_str or "unavailable" in err_str:
-                print("🔄 Retrying with fallback settings (iOS/No Cookies)...")
+                print("🔄 Retrying with fallback settings (TV/No Cookies)...")
                 try:
                     retry_opts = self.ytdl_format_options.copy()
                     # Remove cookies for fallback as they might be flagged
                     if 'cookiefile' in retry_opts:
                         del retry_opts['cookiefile']
                     
-                    # Switch to iOS client which often bypasses rate limits/blocks
+                    # Switch to TV client which often bypasses rate limits/blocks differently
                     retry_opts['extractor_args'] = {
                         'youtube': {
-                            'player_client': ['ios']
+                            'player_client': ['tv']
                         }
                     }
                     
