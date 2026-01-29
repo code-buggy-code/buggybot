@@ -224,11 +224,11 @@ class Music(commands.Cog):
                 'source_address': '0.0.0.0',
                 # NEW: Disable cache to prevent persisting bad tokens
                 'cachedir': False,
-                # NEW: Add headers to look like a real browser
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'en-us,en;q=0.5'
+                # NEW: Force Android client to bypass sign-in checks on cloud IPs
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android', 'web']
+                    }
                 }
             }
             
@@ -496,11 +496,45 @@ class Music(commands.Cog):
                 print(f"❌ Error: File not found after download: {filename}")
                 return None
         except Exception as e:
+            # Fallback logic: retry without cookies if they were the cause
+            print(f"❌ First attempt failed: {e}")
+            if "Sign in" in str(e) or "cookie" in str(e).lower():
+                print("🔄 Retrying without cookies/auth...")
+                try:
+                    retry_opts = self.ytdl_format_options.copy()
+                    if 'cookiefile' in retry_opts:
+                        del retry_opts['cookiefile']
+                    
+                    # Ensure android client is set for fallback
+                    retry_opts['extractor_args'] = {
+                        'youtube': {
+                            'player_client': ['android']
+                        }
+                    }
+                    
+                    with yt_dlp.YoutubeDL(retry_opts) as ydl:
+                        data = await loop.run_in_executor(None, lambda: ydl.extract_info(track_data['url'], download=True))
+                    
+                    if 'entries' in data:
+                        data = data['entries'][0]
+                    
+                    filename = self.ytdl.prepare_filename(data)
+                    track_data['filename'] = filename
+                    
+                    if os.path.exists(filename):
+                        print(f"✅ Downloaded (Fallback): {filename}")
+                        if status_message:
+                            try:
+                                await status_message.edit(content=f"✅ Ready to Play (Fallback): **{track_data['title']}**")
+                            except: pass
+                        return filename
+                except Exception as e2:
+                    print(f"❌ Fallback failed too: {e2}")
+
             if status_message:
                 try:
                     await status_message.edit(content=f"❌ Download Error: {e}")
                 except: pass
-            print(f"❌ Download Error: {e}")
             return None
 
     async def manage_downloads(self, guild_id):
