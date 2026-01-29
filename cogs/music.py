@@ -39,6 +39,41 @@ except ImportError:
     SpotifyClientCredentials = None
     print("⚠️ Warning: 'spotipy' not found. Run: pip install spotipy")
 
+# --- CUSTOM LOGGER FOR OAUTH ---
+class YTDLLogger:
+    def __init__(self, interaction, bot):
+        self.interaction = interaction
+        self.bot = bot
+
+    def debug(self, msg):
+        self.check_auth(msg)
+
+    def warning(self, msg):
+        self.check_auth(msg)
+        print(f"[yt-dlp warning] {msg}")
+
+    def error(self, msg):
+        self.check_auth(msg)
+        print(f"[yt-dlp error] {msg}")
+
+    def check_auth(self, msg):
+        # Catch the OAuth message and send it to Discord so the user sees it
+        if "google.com/device" in msg:
+            clean_msg = msg.replace("WARNING:", "").strip()
+            print(f"\n\n!!! YOUTUBE AUTH REQUIRED !!!\n{msg}\n\n")
+            
+            if self.interaction:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self.interaction.followup.send(
+                            f"🔐 **Action Required** (First Run Only):\n\n{clean_msg}\n\n*Please go to the link and enter the code to authorize the bot on this server!*", 
+                            ephemeral=False
+                        ),
+                        self.bot.loop
+                    )
+                except Exception as e:
+                    print(f"Could not send auth msg to discord: {e}")
+
 # --- UI VIEW FOR CONTROLS ---
 
 class MusicControls(discord.ui.View):
@@ -124,6 +159,7 @@ class MusicControls(discord.ui.View):
 # - save_config(guild_id, config)
 # - load_youtube_service()
 # - load_music_services()
+# - get_ytdl(interaction) [Helper]
 # - search_youtube_official(query)
 # - process_spotify_link(url, guild_id)
 # - download_track(track_data, interaction=None) [Helper]
@@ -160,8 +196,7 @@ class Music(commands.Cog):
         if not shutil.which("ffmpeg"):
             print("❌ Critical: 'ffmpeg' is missing from system PATH. Music will not play.")
 
-        # Initialize YTDL Here for Safety
-        self.ytdl = None
+        # Initialize YTDL Options
         if yt_dlp:
             # Fix: Accept args/kwargs to prevent "unexpected keyword argument" errors
             yt_dlp.utils.bug_reports_message = lambda *args, **kwargs: ''
@@ -174,15 +209,21 @@ class Music(commands.Cog):
                 'nocheckcertificate': True,
                 'ignoreerrors': False,
                 'logtostderr': False,
-                'quiet': True,
+                'quiet': True, # Keep quiet so logger handles output
                 'no_warnings': True,
                 'default_search': 'auto',
                 'source_address': '0.0.0.0',
+                # --- OAUTH AUTHENTICATION ---
+                'username': 'oauth',
+                'password': '',
             }
-            try:
-                self.ytdl = yt_dlp.YoutubeDL(self.ytdl_format_options)
-            except Exception as e:
-                print(f"❌ Failed to initialize yt_dlp: {e}")
+            
+            # If cookies exist, use them too (optional)
+            if os.path.exists('cookies.txt'):
+                self.ytdl_format_options['cookiefile'] = 'cookies.txt'
+                print("✅ Found cookies.txt! Using it.")
+            else:
+                print("ℹ️ No cookies.txt found. Using OAuth mode.")
 
         # Add reconnect options to handle network blips
         self.ffmpeg_options = {
@@ -292,6 +333,15 @@ class Music(commands.Cog):
         else:
              print("⚠️ Spotify credentials not found in spotify.json.")
 
+    def get_ytdl(self, interaction=None):
+        """Creates a YTDL instance with the custom logger attached."""
+        if not yt_dlp: return None
+        opts = self.ytdl_format_options.copy()
+        
+        # Attach custom logger to capture OAuth messages
+        opts['logger'] = YTDLLogger(interaction, self.bot)
+        return yt_dlp.YoutubeDL(opts)
+
     async def search_youtube_official(self, query):
         """Uses the Official YouTube Data API to find a video ID."""
         if not self.youtube: return None
@@ -365,7 +415,7 @@ class Music(commands.Cog):
 
     async def download_track(self, track_data, interaction=None):
         """Helper: Downloads a track and returns filename. Blocks until ready."""
-        if not self.ytdl: return None
+        if not yt_dlp: return None
         if track_data.get('filename') and os.path.exists(track_data['filename']):
             return track_data['filename']
 
@@ -405,18 +455,23 @@ class Music(commands.Cog):
         try:
             print(f"⬇️ Downloading: {track_data['title']}...")
             
-            # Create a copy of options to add the hook without messing up global options
+            # Use our custom helper to get YTDL with the logger!
             opts = self.ytdl_format_options.copy()
             opts['progress_hooks'] = [progress_hook]
+            opts['logger'] = YTDLLogger(interaction, self.bot) # Inject Logger
             
-            # Use a new YTDL instance for this specific download to use the hook
             with yt_dlp.YoutubeDL(opts) as ydl:
                 data = await loop.run_in_executor(None, lambda: ydl.extract_info(track_data['url'], download=True))
             
             if 'entries' in data:
                 data = data['entries'][0]
 
-            filename = self.ytdl.prepare_filename(data)
+            # Re-init plain YTDL just for filename prep if needed, or use the one we had
+            # Actually ydl is closed now, but prepare_filename is a method.
+            # simpler to just use a temporary instance for filename string gen
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                filename = ydl.prepare_filename(data)
+            
             track_data['filename'] = filename 
             
             # Final update
@@ -620,7 +675,7 @@ class Music(commands.Cog):
         if not interaction.user.voice:
             return await interaction.response.send_message("❌ You are not in a voice channel, buggy!", ephemeral=True)
 
-        if not self.ytdl:
+        if not yt_dlp:
             return await interaction.response.send_message("❌ Music is disabled because 'yt_dlp' is missing.", ephemeral=True)
 
         await interaction.response.defer()
@@ -715,7 +770,9 @@ class Music(commands.Cog):
                 if not query.startswith("http"):
                     query = f"ytsearch:{query}"
 
-                data = await self.bot.loop.run_in_executor(None, lambda: self.ytdl.extract_info(query, download=False))
+                # Use local YTDL instance with logger for search
+                ydl = self.get_ytdl(interaction)
+                data = await self.bot.loop.run_in_executor(None, lambda: ydl.extract_info(query, download=False))
                 
                 if 'entries' in data:
                     data = data['entries'][0]
