@@ -126,11 +126,11 @@ class MusicControls(discord.ui.View):
 # - load_music_services()
 # - search_youtube_official(query)
 # - process_spotify_link(url, guild_id)
-# - download_track(track_data) [Helper]
+# - download_track(track_data, interaction=None) [Helper]
 # - manage_downloads(guild_id) [Helper]
 # - cleanup_files(guild_id) [Helper]
 # - cleanup_all_files(guild_id) [Helper]
-# - play_next_song(guild)
+# - play_next_song(guild, interaction=None)
 # - stop_playback(interaction) [Helper]
 # - check_token_validity_task()
 # - play(interaction, query) [Slash]
@@ -361,13 +361,19 @@ class Music(commands.Cog):
 
     # --- ADVANCED PLAYBACK LOGIC ---
 
-    async def download_track(self, track_data):
+    async def download_track(self, track_data, interaction=None):
         """Helper: Downloads a track and returns filename. Blocks until ready."""
         if not self.ytdl: return None
         if track_data.get('filename') and os.path.exists(track_data['filename']):
             return track_data['filename']
 
         try:
+            # Send/Edit message if interaction provided (for immediate feedback)
+            if interaction:
+                try:
+                    await interaction.followup.send(f"⬇️ Downloading: **{track_data['title']}**...", ephemeral=True)
+                except: pass
+
             loop = asyncio.get_running_loop()
             print(f"⬇️ Downloading: {track_data['title']}...")
             
@@ -446,7 +452,7 @@ class Music(commands.Cog):
                 try: os.remove(fname)
                 except: pass
 
-    def play_next_song(self, guild):
+    def play_next_song(self, guild, interaction=None):
         """Plays next song, triggers preload, and handles cleanup."""
         # Check if already playing to avoid double-call race conditions
         if guild.voice_client and guild.voice_client.is_playing():
@@ -466,7 +472,8 @@ class Music(commands.Cog):
 
             # If not preloaded, download now (Blocking)
             if not filename or not os.path.exists(filename):
-                filename = await self.download_track(track_data)
+                # Pass interaction here to send the "Downloading..." update!
+                filename = await self.download_track(track_data, interaction)
             
             if not filename:
                 print(f"⚠️ Skip: Could not download {track_data['title']}")
@@ -604,8 +611,6 @@ class Music(commands.Cog):
 
             if self.youtube:
                 try:
-                    await interaction.followup.send("⏳ Loading playlist from YouTube...", ephemeral=True)
-                    
                     next_page_token = None
                     total_items = []
                     
@@ -648,6 +653,7 @@ class Music(commands.Cog):
                     self.music_queues[guild_id][insert_index:insert_index] = new_songs
                     songs_added = len(new_songs)
 
+                    # Only show final success message now
                     await interaction.followup.send(f"✅ Queued **{songs_added}** tracks from the Server Playlist, mrow!")
 
                 except Exception as e:
@@ -658,7 +664,7 @@ class Music(commands.Cog):
         # --- MODE 2: SEARCH / URL ---
         else:
             try:
-                await interaction.followup.send("🔎 Searching...", ephemeral=True)
+                # Removed progress message
                 
                 if not query.startswith("http"):
                     query = f"ytsearch:{query}"
@@ -683,7 +689,7 @@ class Music(commands.Cog):
 
         # Start Playback if Idle (this will trigger the download of the first song)
         if interaction.guild.voice_client and not interaction.guild.voice_client.is_playing() and songs_added > 0:
-            self.play_next_song(interaction.guild)
+            self.play_next_song(interaction.guild, interaction) # Pass interaction for updates
         # If already playing, ensure the next few are downloaded in background
         elif is_playing:
              self.bot.loop.create_task(self.manage_downloads(interaction.guild_id))
