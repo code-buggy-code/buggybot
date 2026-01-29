@@ -224,6 +224,9 @@ class Music(commands.Cog):
                 'source_address': '0.0.0.0',
                 # NEW: Disable cache to prevent persisting bad tokens
                 'cachedir': False,
+                # NEW: Add sleep to prevent rate limiting
+                'sleep_interval': 3,
+                'max_sleep_interval': 10,
                 # NEW: Force Android client to bypass sign-in checks on cloud IPs
                 'extractor_args': {
                     'youtube': {
@@ -496,19 +499,21 @@ class Music(commands.Cog):
                 print(f"❌ Error: File not found after download: {filename}")
                 return None
         except Exception as e:
-            # Fallback logic: retry without cookies if they were the cause
+            # Fallback logic: retry without cookies if they were the cause, OR if rate-limited
             print(f"❌ First attempt failed: {e}")
-            if "Sign in" in str(e) or "cookie" in str(e).lower():
-                print("🔄 Retrying without cookies/auth...")
+            err_str = str(e).lower()
+            if "sign in" in err_str or "cookie" in err_str or "rate-limit" in err_str or "unavailable" in err_str:
+                print("🔄 Retrying with fallback settings (iOS/No Cookies)...")
                 try:
                     retry_opts = self.ytdl_format_options.copy()
+                    # Remove cookies for fallback as they might be flagged
                     if 'cookiefile' in retry_opts:
                         del retry_opts['cookiefile']
                     
-                    # Ensure android client is set for fallback
+                    # Switch to iOS client which often bypasses rate limits/blocks
                     retry_opts['extractor_args'] = {
                         'youtube': {
-                            'player_client': ['android']
+                            'player_client': ['ios']
                         }
                     }
                     
