@@ -84,9 +84,10 @@ class Purge(commands.Cog):
 
     # --- TASKS ---
 
-    @tasks.loop(time=datetime.time(hour=4, minute=0, tzinfo=datetime.timezone.utc)) # Runs at 4 AM UTC
+    # EST is UTC-5
+    @tasks.loop(time=datetime.time(hour=4, minute=0, tzinfo=datetime.timezone(datetime.timedelta(hours=-5)))) 
     async def nightly_purge_task(self):
-        print("⏰ Starting Nightly Purge Task...")
+        print("⏰ Starting Nightly Purge Task (4 AM EST)...")
         config = self.get_purge_config()
         
         if not config:
@@ -283,7 +284,7 @@ class Purge(commands.Cog):
                 msg = "✅ Updated nightly auto-purge settings for this channel."
             else:
                 config.append(new_entry)
-                msg = "✅ Channel added to nightly auto-purge (4 AM UTC)."
+                msg = "✅ Channel added to nightly auto-purge (4 AM EST)."
             
             self.save_purge_config(config)
             await interaction.response.send_message(msg, ephemeral=True)
