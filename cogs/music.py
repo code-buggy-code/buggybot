@@ -375,8 +375,7 @@ class Music(commands.Cog):
 
         if interaction:
             try:
-                # Send initial message and store it (followup.send returns a message object if wait=True usually, but for ephemeral we rely on edit_original_response if it was the original interaction, or just send a new one)
-                # Since we might be deep in a call stack, let's just send a new ephemeral message we can edit
+                # Send initial message and store it
                 status_message = await interaction.followup.send(f"⬇️ Downloading: **{track_data['title']}**... [Starting]", ephemeral=True, wait=True)
             except: pass
 
