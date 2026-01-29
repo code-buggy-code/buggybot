@@ -9,13 +9,19 @@ import datetime
 import sys
 import time
 import random
+import shutil
 
 # Safe Imports for External Libraries
 try:
     import yt_dlp
 except ImportError:
     yt_dlp = None
-    print("❌ Critical: 'yt_dlp' is not installed. Music will not work.")
+    print("❌ Critical: 'yt_dlp' is not installed. Music will not work. Run: pip install yt-dlp")
+
+try:
+    import nacl
+except ImportError:
+    print("❌ Critical: 'PyNaCl' is not installed. Voice will crash. Run: pip install PyNaCl")
 
 try:
     from google.oauth2.credentials import Credentials
@@ -23,7 +29,7 @@ try:
     from google.auth.transport.requests import Request
     from google_auth_oauthlib.flow import Flow
 except ImportError:
-    print("⚠️ Warning: Google Auth libraries not found. YouTube API features will fail.")
+    print("⚠️ Warning: Google Auth libraries not found. Run: pip install google-api-python-client google-auth-oauthlib")
 
 try:
     from spotipy import Spotify
@@ -31,7 +37,7 @@ try:
 except ImportError:
     Spotify = None
     SpotifyClientCredentials = None
-    print("⚠️ Warning: 'spotipy' not found. Spotify links will fail.")
+    print("⚠️ Warning: 'spotipy' not found. Run: pip install spotipy")
 
 # --- UI VIEW FOR CONTROLS ---
 
@@ -152,6 +158,10 @@ class Music(commands.Cog):
         self.spotify = None
         self.auth_flow = None
         
+        # Check for FFMPEG
+        if not shutil.which("ffmpeg"):
+            print("❌ Critical: 'ffmpeg' is missing from system PATH. Music will not play.")
+
         # Initialize YTDL Here for Safety
         self.ytdl = None
         if yt_dlp:
@@ -410,18 +420,19 @@ class Music(commands.Cog):
                 filename = await self.download_track(track_data)
             
             if not filename:
+                print(f"⚠️ Skip: Could not download {track_data['title']}")
                 self.play_next_song(guild)
                 return
 
             try:
                 source = discord.FFmpegPCMAudio(filename, **self.ffmpeg_options)
             except Exception as e:
-                print(f"Source Error: {e}")
+                print(f"❌ Source Error (FFmpeg): {e}")
                 self.play_next_song(guild)
                 return
 
             def after_playing(error):
-                if error: print(f"Player Error: {error}")
+                if error: print(f"❌ Player Error: {error}")
                 
                 # Move finished song to History
                 if guild.id not in self.history: self.history[guild.id] = []
@@ -435,6 +446,7 @@ class Music(commands.Cog):
 
             if guild.voice_client:
                 guild.voice_client.play(source, after=after_playing)
+                print(f"▶️ Now Playing: {track_data['title']}")
 
                 # --- SEND NOW PLAYING EMBED ---
                 try:
@@ -518,16 +530,29 @@ class Music(commands.Cog):
 
             if self.youtube:
                 try:
-                    request = self.youtube.playlistItems().list(
-                        part="snippet", playlistId=pid, maxResults=50
-                    )
-                    response = await self.bot.loop.run_in_executor(None, request.execute)
+                    next_page_token = None
+                    total_items = []
                     
-                    items = response.get('items', [])
-                    if not items:
+                    while True:
+                        request = self.youtube.playlistItems().list(
+                            part="snippet", 
+                            playlistId=pid, 
+                            maxResults=50,
+                            pageToken=next_page_token
+                        )
+                        response = await self.bot.loop.run_in_executor(None, request.execute)
+                        
+                        items = response.get('items', [])
+                        total_items.extend(items)
+                        
+                        next_page_token = response.get('nextPageToken')
+                        if not next_page_token:
+                            break
+
+                    if not total_items:
                         return await interaction.followup.send("⚠️ Server playlist seems empty.")
 
-                    for i, item in enumerate(items):
+                    for i, item in enumerate(total_items):
                         vid = item['snippet']['resourceId']['videoId']
                         title = item['snippet']['title']
                         if title in ["Private video", "Deleted video"]: continue
