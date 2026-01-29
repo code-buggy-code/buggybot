@@ -563,7 +563,7 @@ class Music(commands.Cog):
                         self.music_queues[guild_id].insert(insert_index + i, song_data)
                         songs_added += 1
 
-                    await interaction.followup.send(f"✅ Queued **{songs_added}** tracks from the Server Playlist, you genius!")
+                    await interaction.followup.send(f"✅ Queued **{songs_added}** tracks from the Server Playlist, mrow!")
 
                 except Exception as e:
                     return await interaction.followup.send(f"❌ Failed to fetch playlist via API: {e}")
