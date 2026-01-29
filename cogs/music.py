@@ -250,9 +250,9 @@ class Music(commands.Cog):
         opts = {
             # Robust Format Selection:
             # 1. Best Audio Only
-            # 2. OR Best Video (max 720p to save bandwidth) + Audio extraction
-            # 3. OR Best Anything
-            'format': 'bestaudio/best[height<=720]/best',
+            # 2. OR Best Video + Audio extraction
+            # 3. Fallback to 'best' handled in logic
+            'format': 'bestaudio/best', 
             
             'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
             'restrictfilenames': True,
@@ -551,6 +551,10 @@ class Music(commands.Cog):
                             'player_client': ['tv'] # TV client is more robust
                         }
                     }
+                    
+                    # Force broad format if it was a format error
+                    if "format" in err_str:
+                        retry_opts['format'] = 'best'
                     
                     with yt_dlp.YoutubeDL(retry_opts) as ydl:
                         data = await loop.run_in_executor(None, lambda: ydl.extract_info(track_data['url'], download=True))
