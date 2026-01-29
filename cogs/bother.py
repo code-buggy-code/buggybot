@@ -72,6 +72,7 @@ class BotherView(discord.ui.View):
         self.bot = bot
         
         # Options: List of {"label": str, "key": str, "ping_text": str}
+        # We add items sequentially so Discord handles the wrapping naturally (5 per row)
         for opt in options:
             custom_id = f"bb_{guild_id}_{opt['key']}"
             self.add_item(BotherButton(label=opt['label'], custom_id=custom_id, ping_text=opt['ping_text']))
@@ -82,6 +83,7 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
         self.description = "Bother Buggy: A dashboard system for users to send private alerts to buggy."
         # Keep track of active tasks to cancel them if a new message comes in (Debounce logic)
         self.sticky_tasks = {} # {channel_id: asyncio.Task}
+        self.reposting = set() # {channel_id} - Safety lock to prevent infinite loops
 
     async def cog_load(self):
         """Restore persistent views when the cog loads."""
@@ -181,60 +183,81 @@ class BotherBuggy(commands.Cog, name="Bother Buggy"):
 
     async def repost_dashboard(self, channel):
         """Deletes the old dashboard and posts a new one at the bottom."""
-        dashboards = self.get_dashboards()
-        dashboard_data = next((d for d in dashboards if d['guild_id'] == channel.guild.id), None)
-        
-        # Delete old message safely
-        try:
-            if dashboard_data and dashboard_data.get('message_id'):
-                old_msg = await channel.fetch_message(dashboard_data['message_id'])
-                await old_msg.delete()
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            pass 
+        # Safety Lock: If we are already reposting for this channel, stop.
+        if channel.id in self.reposting:
+            return
 
-        config = self.get_config(channel.guild.id)
-        if not config['options']: return 
-        
-        embed = self.create_dashboard_embed(channel.guild, config['title'])
-        view = BotherView(self.bot, config['options'], channel.guild.id)
-        
+        self.reposting.add(channel.id)
         try:
-            new_msg = await channel.send(embed=embed, view=view)
+            dashboards = self.get_dashboards()
+            dashboard_data = next((d for d in dashboards if d['guild_id'] == channel.guild.id), None)
             
-            now = datetime.datetime.now().timestamp()
+            # Delete old message safely
+            try:
+                if dashboard_data and dashboard_data.get('message_id'):
+                    old_msg = await channel.fetch_message(dashboard_data['message_id'])
+                    await old_msg.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass 
+
+            config = self.get_config(channel.guild.id)
+            if not config['options']: return 
             
-            if dashboard_data:
-                dashboard_data['message_id'] = new_msg.id
-                dashboard_data['channel_id'] = channel.id
-                dashboard_data['last_posted_at'] = now
-                self.bot.db.update_doc("bb_dashboards", "guild_id", channel.guild.id, dashboard_data)
-            else:
-                 new_dash = {
-                     "guild_id": channel.guild.id,
-                     "channel_id": channel.id,
-                     "message_id": new_msg.id,
-                     "last_posted_at": now
-                 }
-                 updated = self.bot.db.update_doc("bb_dashboards", "guild_id", channel.guild.id, new_dash)
-                 if not updated:
-                     dashboards = self.get_dashboards()
-                     dashboards.append(new_dash)
-                     self.save_dashboards(dashboards)
-                 
-        except Exception as e:
-            print(f"Failed to repost Bother Buggy dashboard: {e}")
+            embed = self.create_dashboard_embed(channel.guild, config['title'])
+            view = BotherView(self.bot, config['options'], channel.guild.id)
+            
+            try:
+                new_msg = await channel.send(embed=embed, view=view)
+                
+                now = datetime.datetime.now().timestamp()
+                
+                if dashboard_data:
+                    dashboard_data['message_id'] = new_msg.id
+                    dashboard_data['channel_id'] = channel.id
+                    dashboard_data['last_posted_at'] = now
+                    self.bot.db.update_doc("bb_dashboards", "guild_id", channel.guild.id, dashboard_data)
+                else:
+                     new_dash = {
+                         "guild_id": channel.guild.id,
+                         "channel_id": channel.id,
+                         "message_id": new_msg.id,
+                         "last_posted_at": now
+                     }
+                     updated = self.bot.db.update_doc("bb_dashboards", "guild_id", channel.guild.id, new_dash)
+                     if not updated:
+                         dashboards = self.get_dashboards()
+                         dashboards.append(new_dash)
+                         self.save_dashboards(dashboards)
+                     
+            except Exception as e:
+                print(f"Failed to repost Bother Buggy dashboard: {e}")
+        finally:
+            # Always release the lock, even if error
+            if channel.id in self.reposting:
+                self.reposting.remove(channel.id)
 
     @commands.Cog.listener()
     async def on_message(self, message):
         """Handles the sticky dashboard logic."""
-        if not message.guild or message.author.id == self.bot.user.id:
+        if not message.guild:
             return
         
+        # Safety Lock Check:
+        # If this message was sent by the bot WHILE reposting the dashboard (i.e. it IS the dashboard),
+        # ignore it so we don't trigger an infinite loop of reposts.
+        if message.channel.id in self.reposting:
+            return
+
         # 1. Check if this channel has a dashboard
         dashboards = self.get_dashboards()
         dashboard = next((d for d in dashboards if d['channel_id'] == message.channel.id), None)
         
         if not dashboard:
+            return
+
+        # Extra Check: If the message matches the current known dashboard ID, ignore it.
+        # (This handles the case where the bot restarts and sees its own dashboard)
+        if message.id == dashboard.get('message_id'):
             return
 
         # 2. Check if Sticky Mode is Enabled
