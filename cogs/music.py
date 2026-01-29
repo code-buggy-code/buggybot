@@ -127,8 +127,8 @@ class MusicControls(discord.ui.View):
 # - search_youtube_official(query)
 # - process_spotify_link(url, guild_id)
 # - check_and_convert_cookies()
-# - get_ytdl_opts() [Updated for Best Quality MP3]
-# - download_track(track_data, interaction=None) [Updated for MP3 Filenames]
+# - get_ytdl_opts()
+# - download_track(track_data, interaction=None) [Updated with 3-Stage Retry]
 # - manage_downloads(guild_id)
 # - cleanup_files(guild_id)
 # - cleanup_all_files(guild_id)
@@ -248,10 +248,7 @@ class Music(commands.Cog):
         cookie_path = self.check_and_convert_cookies()
         
         opts = {
-            # Robust Format Selection:
-            # 1. Best Audio Only
-            # 2. OR Best Video + Audio extraction
-            # 3. Fallback to 'best' handled in logic
+            # Default to High Quality Audio Only, or Best Available
             'format': 'bestaudio/best', 
             
             'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
@@ -451,141 +448,94 @@ class Music(commands.Cog):
     # --- ADVANCED PLAYBACK LOGIC ---
 
     async def download_track(self, track_data, interaction=None):
-        """Helper: Downloads a track and returns filename. Blocks until ready."""
-        # Refresh options to catch new cookies
+        """Helper: Downloads a track with retry logic. Returns filename."""
         if not yt_dlp: return None
         
-        # Check if file exists (checking MP3 version since we convert now)
+        # Check if file exists (checking MP3 version)
         if track_data.get('filename') and os.path.exists(track_data['filename']):
             return track_data['filename']
 
         loop = asyncio.get_running_loop()
-        
-        # We need a reference to the status message to update it
         status_message = None
         last_update_time = 0
 
         if interaction:
             try:
-                # Send initial message and store it
                 status_message = await interaction.followup.send(f"⬇️ Downloading: **{track_data['title']}**... [Starting]", ephemeral=True, wait=True)
             except: pass
 
         def progress_hook(d):
             nonlocal last_update_time
             if d['status'] == 'downloading':
-                # Throttle updates to every 2 seconds to avoid rate limits
+                # Throttle updates to every 2 seconds
                 current_time = time.time()
                 if current_time - last_update_time > 2:
                     last_update_time = current_time
-                    percent = d.get('_percent_str', '0%').replace('\x1b[0;94m', '').replace('\x1b[0m', '') # Strip colors if present
-                    
-                    # Create simple progress bar
+                    percent = d.get('_percent_str', '0%').replace('\x1b[0;94m', '').replace('\x1b[0m', '') 
                     try:
                         p = float(percent.strip('%'))
                         bar_len = 10
                         filled = int(bar_len * p / 100)
                         bar = '▓' * filled + '░' * (bar_len - filled)
                         msg = f"⬇️ Downloading: **{track_data['title']}**\n`[{bar}] {percent}`"
-                        
                         if status_message:
                             asyncio.run_coroutine_threadsafe(status_message.edit(content=msg), loop)
                     except: pass
 
-        try:
-            print(f"⬇️ Downloading: {track_data['title']}...")
+        # Define 3 Retry Stages
+        attempts = [
+            # 1. Best Audio / High Quality (Default)
+            {'format': 'bestaudio/best', 'desc': 'High Quality', 'client': 'ios'},
             
-            # Get fresh options (checks for cookies.txt)
-            opts = self.get_ytdl_opts()
-            opts['progress_hooks'] = [progress_hook]
+            # 2. Broad "Best" (Fixes 'Requested format not available')
+            {'format': 'best', 'desc': 'Standard Quality', 'client': 'ios'},
             
-            # Use a new YTDL instance for this specific download
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                data = await loop.run_in_executor(None, lambda: ydl.extract_info(track_data['url'], download=True))
-            
-            if 'entries' in data:
-                data = data['entries'][0]
+            # 3. TV Client + Broad Format (Fixes Sign-in issues)
+            {'format': 'best', 'desc': 'Fallback Mode', 'client': 'tv'}
+        ]
+        
+        final_filename = None
+        last_error = None
 
-            # PREPARE FILENAME
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                 temp_filename = ydl.prepare_filename(data)
+        for attempt in attempts:
+            try:
+                print(f"⬇️ Attempting download ({attempt['desc']}): {track_data['title']}")
+                
+                opts = self.get_ytdl_opts()
+                opts['format'] = attempt['format']
+                opts['progress_hooks'] = [progress_hook]
+                opts['extractor_args'] = {'youtube': {'player_client': [attempt['client']]}}
+
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    data = await loop.run_in_executor(None, lambda: ydl.extract_info(track_data['url'], download=True))
+                
+                if 'entries' in data: data = data['entries'][0]
+                
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                     temp_filename = ydl.prepare_filename(data)
+                
+                # Force MP3 Extension logic
+                base_name, _ = os.path.splitext(temp_filename)
+                final_filename = base_name + ".mp3"
+                track_data['filename'] = final_filename
+
+                if os.path.exists(final_filename):
+                    print(f"✅ Downloaded ({attempt['desc']}): {final_filename}")
+                    if status_message:
+                         try: await status_message.edit(content=f"✅ Ready to Play: **{track_data['title']}**")
+                         except: pass
+                    return final_filename
             
-            # FORCE MP3 EXTENSION (Because of Post-Processor)
-            base_name, _ = os.path.splitext(temp_filename)
-            filename = base_name + ".mp3"
+            except Exception as e:
+                last_error = e
+                print(f"❌ Attempt ({attempt['desc']}) failed: {e}")
+                # Loop continues to next attempt...
 
-            track_data['filename'] = filename 
-            
-            # Final update
-            if status_message:
-                try:
-                    await status_message.edit(content=f"✅ Ready to Play: **{track_data['title']}**")
-                except: pass
-
-            if os.path.exists(filename):
-                print(f"✅ Downloaded: {filename}")
-                return filename
-            else:
-                if status_message:
-                    await status_message.edit(content=f"❌ Failed: File not found for **{track_data['title']}**")
-                print(f"❌ Error: File not found after download: {filename}")
-                return None
-        except Exception as e:
-            # Fallback logic: retry without cookies if they were the cause, OR if rate-limited
-            print(f"❌ First attempt failed: {e}")
-            err_str = str(e).lower()
-            
-            # NOTE: If the error is 'Sign in to confirm', removing cookies usually HURTS, not helps.
-            # But we'll try the TV client fallback just in case.
-            if "sign in" in err_str or "cookie" in err_str or "rate-limit" in err_str or "unavailable" in err_str or "format" in err_str:
-                print("🔄 Retrying with fallback settings (TV Client)...")
-                try:
-                    retry_opts = self.get_ytdl_opts() # Get base opts
-                    
-                    # We do NOT remove cookies if the error was 'sign in', because we need them.
-                    # Only remove if specifically a cookie error, otherwise Keep them.
-                    # Actually, let's keep cookies but switch clients.
-                    
-                    retry_opts['extractor_args'] = {
-                        'youtube': {
-                            'player_client': ['tv'] # TV client is more robust
-                        }
-                    }
-                    
-                    # Force broad format if it was a format error
-                    if "format" in err_str:
-                        retry_opts['format'] = 'best'
-                    
-                    with yt_dlp.YoutubeDL(retry_opts) as ydl:
-                        data = await loop.run_in_executor(None, lambda: ydl.extract_info(track_data['url'], download=True))
-                    
-                    if 'entries' in data:
-                        data = data['entries'][0]
-                    
-                    with yt_dlp.YoutubeDL(retry_opts) as ydl:
-                         temp_filename = ydl.prepare_filename(data)
-                    
-                    # Force MP3 ext for fallback too
-                    base_name, _ = os.path.splitext(temp_filename)
-                    filename = base_name + ".mp3"
-
-                    track_data['filename'] = filename
-                    
-                    if os.path.exists(filename):
-                        print(f"✅ Downloaded (Fallback): {filename}")
-                        if status_message:
-                            try:
-                                await status_message.edit(content=f"✅ Ready to Play (Fallback): **{track_data['title']}**")
-                            except: pass
-                        return filename
-                except Exception as e2:
-                    print(f"❌ Fallback failed too: {e2}")
-
-            if status_message:
-                try:
-                    await status_message.edit(content=f"❌ Download Error: {e}")
-                except: pass
-            return None
+        # If we exit the loop, all failed
+        if status_message:
+             try: await status_message.edit(content=f"❌ Download Failed: {last_error}")
+             except: pass
+        return None
 
     async def manage_downloads(self, guild_id):
         """Helper: Ensures current + next 3 are downloaded."""
