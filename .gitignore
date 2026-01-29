@@ -3,5 +3,6 @@ manager.py
 database.json
 client_secret.json
 browser.json
+*.txt
 *.json
 *.log
