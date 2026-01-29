@@ -7,6 +7,9 @@ import asyncio
 import re
 import datetime
 import sys
+import time
+import random
+import yt_dlp
 
 # music APIs
 from google.oauth2.credentials import Credentials
@@ -16,6 +19,111 @@ from google_auth_oauthlib.flow import Flow
 from spotipy import Spotify
 from spotipy.oauth2 import SpotifyClientCredentials
 
+# --- YTDL & FFMPEG CONFIG ---
+yt_dlp.utils.bug_reports_message = lambda: ''
+
+ytdl_format_options = {
+    'format': 'bestaudio/best',
+    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+    'restrictfilenames': True,
+    'noplaylist': True,
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
+    'logtostderr': False,
+    'quiet': True,
+    'no_warnings': True,
+    'default_search': 'auto',
+    'source_address': '0.0.0.0',
+}
+
+ffmpeg_options = {
+    'options': '-vn',
+}
+
+ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
+
+# --- UI VIEW FOR CONTROLS ---
+
+class MusicControls(discord.ui.View):
+    def __init__(self, cog, guild):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.guild = guild
+
+    @discord.ui.button(emoji="⬅️", style=discord.ButtonStyle.secondary)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        current = self.cog.current_song.get(self.guild.id)
+        if not current: return
+
+        elapsed = time.time() - current.get('start_time', 0)
+        
+        # Logic: If > 10s, Restart. If < 10s, Go Previous.
+        if elapsed > 10:
+            # Restart: Add current song to front of queue
+            if self.guild.id not in self.cog.music_queues: self.cog.music_queues[self.guild.id] = []
+            self.cog.music_queues[self.guild.id].insert(0, current)
+            if self.guild.voice_client: self.guild.voice_client.stop()
+        else:
+            # Back: Get previous from history
+            history = self.cog.history.get(self.guild.id, [])
+            if history:
+                prev_song = history.pop() # Remove from history to play it
+                if self.guild.id not in self.cog.music_queues: self.cog.music_queues[self.guild.id] = []
+                self.cog.music_queues[self.guild.id].insert(0, prev_song)
+                if self.guild.voice_client: self.guild.voice_client.stop()
+            else:
+                # No history, just restart
+                if self.guild.id not in self.cog.music_queues: self.cog.music_queues[self.guild.id] = []
+                self.cog.music_queues[self.guild.id].insert(0, current)
+                if self.guild.voice_client: self.guild.voice_client.stop()
+
+    @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.secondary)
+    async def pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = self.guild.voice_client
+        if vc:
+            if vc.is_playing():
+                vc.pause()
+                await interaction.response.send_message("⏸️ Paused", ephemeral=True)
+            elif vc.is_paused():
+                vc.resume()
+                await interaction.response.send_message("▶️ Resumed", ephemeral=True)
+        else:
+             await interaction.response.defer()
+
+    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary)
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = self.guild.voice_client
+        if vc:
+            vc.stop()
+            await interaction.response.send_message("⏭️ Skipped", ephemeral=True)
+        else:
+            await interaction.response.defer()
+
+    @discord.ui.button(emoji="🍔", style=discord.ButtonStyle.secondary)
+    async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Call the existing queue logic
+        q = self.cog.music_queues.get(self.guild.id, [])
+        now_playing = self.cog.current_song.get(self.guild.id, {}).get('title', "Nothing")
+
+        desc = f"**Now Playing:** {now_playing}\n\n**Up Next:**\n"
+        for i, song in enumerate(q[:10], 1):
+            desc += f"`{i}.` {song['title']} ({song['user']})\n"
+        if len(q) > 10: desc += f"\n*...and {len(q)-10} more.*"
+
+        embed = discord.Embed(title="🎵 Music Queue", description=desc, color=discord.Color(0xff90aa))
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger)
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.cog.music_queues[self.guild.id] = []
+        vc = self.guild.voice_client
+        if vc:
+            vc.stop()
+            await vc.disconnect()
+        await interaction.response.send_message("🛑 Stopped", ephemeral=True)
+
+
 # Function/Class List:
 # class Music(commands.Cog)
 # - __init__(bot)
@@ -24,9 +132,20 @@ from spotipy.oauth2 import SpotifyClientCredentials
 # - save_config(guild_id, config)
 # - load_youtube_service()
 # - load_music_services()
-# - process_spotify_link(url, guild_id)
 # - search_youtube_official(query)
+# - process_spotify_link(url, guild_id)
+# - download_track(track_data) [Helper]
+# - preload_next_song(guild) [Helper]
+# - cleanup_files(guild_id) [Helper]
+# - play_next_song(guild)
 # - check_token_validity_task()
+# - play(interaction, query) [Slash]
+# - pause(interaction) [Slash]
+# - resume(interaction) [Slash]
+# - skip(interaction) [Slash]
+# - stop(interaction) [Slash]
+# - queue(interaction) [Slash]
+# - shuffle(interaction) [Slash - New]
 # - checkmusic(interaction) [Slash]
 # - ytauth(interaction) [Slash]
 # - ytcode(interaction, code) [Slash]
@@ -43,6 +162,11 @@ class Music(commands.Cog):
         self.spotify = None
         self.auth_flow = None
         
+        # Playback State
+        self.music_queues = {} # {guild_id: [track_data, ...]}
+        self.current_song = {} # {guild_id: track_data}
+        self.history = {} # {guild_id: [track_data, ...]}
+        
         # Start services
         self.load_music_services()
         self.bot.loop.create_task(self.load_youtube_service())
@@ -53,13 +177,13 @@ class Music(commands.Cog):
 
     def load_config(self, guild_id):
         """Loads music config for a specific guild from DB."""
-        # Using "music_config" collection (Dict of {guild_id: config})
         data = self.bot.db.get_collection("music_config")
-        if isinstance(data, list): data = {} # Migration safety
+        if isinstance(data, list): data = {} 
         
         return data.get(str(guild_id), {
             "playlist_id": "",
-            "music_channel_id": 0
+            "music_channel_id": 0,
+            "shuffle": False
         })
 
     def save_config(self, guild_id, config):
@@ -74,16 +198,13 @@ class Music(commands.Cog):
         """Loads the YouTube API service from stored token."""
         self.youtube = None
         
-        # Token is global, not per-server
         global_config = self.bot.db.get_collection("global_music_settings")
-        # If it returns a list (default empty), make it a dict
         if isinstance(global_config, list): 
             if global_config: global_config = global_config[0]
             else: global_config = {}
 
         token_json = global_config.get('youtube_token_json')
         
-        # Fallback to local file if DB is empty
         if not token_json and os.path.exists('token.json'):
             try:
                 with open('token.json', 'r') as f:
@@ -99,7 +220,6 @@ class Music(commands.Cog):
                     try:
                         creds.refresh(Request())
                         global_config['youtube_token_json'] = creds.to_json()
-                        # Save Global settings
                         self.bot.db.save_collection("global_music_settings", global_config)
                     except: 
                         return False
@@ -112,9 +232,7 @@ class Music(commands.Cog):
         return False
 
     def load_music_services(self):
-        """Loads Spotify service only (YTM removed)."""
-        # 1. Spotify
-        # Load from spotify.json
+        """Loads Spotify service."""
         spotify_id = None
         spotify_secret = None
         
@@ -143,7 +261,6 @@ class Music(commands.Cog):
 
         try:
             loop = asyncio.get_running_loop()
-            # Perform a standard YouTube Search
             request = self.youtube.search().list(
                 part="snippet",
                 maxResults=1,
@@ -153,7 +270,6 @@ class Music(commands.Cog):
             response = await loop.run_in_executor(None, request.execute)
             
             if response.get('items'):
-                # Return the video ID of the first result
                 return response['items'][0]['id']['videoId']
         except Exception as e:
             print(f"YouTube Search Error: {e}")
@@ -172,29 +288,21 @@ class Music(commands.Cog):
         if errors:
             return "Setup Errors:\n" + "\n".join([f"- {e}" for e in errors])
 
-        # Logic: Link is already regex-verified by on_message, so we can trust it.
-        # We strip query parameters just to be safe.
         clean_url = url.split("?")[0]
-        
         loop = asyncio.get_running_loop()
 
         try:
-            # 1. Get Track Info from Spotify
             try:
                 track = await loop.run_in_executor(None, self.spotify.track, clean_url)
             except Exception as e:
                 return f"Spotify Error: {e}"
 
-            # Make search query
             search_query = f"{track['artists'][0]['name']} - {track['name']}"
-
-            # 2. Search on YouTube (Official API)
             video_id = await self.search_youtube_official(search_query)
 
             if not video_id: 
                 return f"Could not find '{search_query}' on YouTube."
 
-            # 3. Add to YouTube Playlist
             try:
                 req = self.youtube.playlistItems().insert(
                     part="snippet",
@@ -216,6 +324,120 @@ class Music(commands.Cog):
         except Exception as e:
             return f"Unknown Error: {e}"
 
+    # --- ADVANCED PLAYBACK LOGIC ---
+
+    async def download_track(self, track_data):
+        """Helper: Downloads a track and returns filename."""
+        if track_data.get('filename') and os.path.exists(track_data['filename']):
+            return track_data['filename']
+
+        try:
+            loop = asyncio.get_running_loop()
+            data = await loop.run_in_executor(None, lambda: ytdl.extract_info(track_data['url'], download=True))
+            
+            if 'entries' in data:
+                data = data['entries'][0]
+
+            filename = ytdl.prepare_filename(data)
+            track_data['filename'] = filename # Update the dict ref
+            return filename
+        except Exception as e:
+            print(f"Download Error: {e}")
+            return None
+
+    async def preload_next_song(self, guild):
+        """Helper: Checks queue and downloads the next song if needed."""
+        if guild.id in self.music_queues and self.music_queues[guild.id]:
+            next_track = self.music_queues[guild.id][0]
+            if not next_track.get('filename'):
+                await self.download_track(next_track)
+
+    def cleanup_files(self, guild_id):
+        """Deletes old files but keeps the last played song (for back button)."""
+        if guild_id not in self.history: return
+        
+        # We want to keep the most recent item in history (the previous song)
+        # So we delete everything except the last item
+        while len(self.history[guild_id]) > 1:
+            old_track = self.history[guild_id].pop(0) # Remove oldest
+            fname = old_track.get('filename')
+            if fname and os.path.exists(fname):
+                try:
+                    os.remove(fname)
+                    print(f"Deleted old track: {fname}")
+                except Exception as e:
+                    print(f"Cleanup Error: {e}")
+
+    def play_next_song(self, guild):
+        """Plays next song, triggers preload, and handles cleanup."""
+        if guild.id not in self.music_queues or not self.music_queues[guild.id]:
+            self.current_song.pop(guild.id, None)
+            return
+
+        # Pop next song
+        track_data = self.music_queues[guild.id].pop(0)
+        track_data['start_time'] = time.time() # Mark start time
+        self.current_song[guild.id] = track_data
+
+        async def start_playback():
+            filename = track_data.get('filename')
+
+            # If not preloaded, download now (Blocking)
+            if not filename or not os.path.exists(filename):
+                filename = await self.download_track(track_data)
+            
+            if not filename:
+                self.play_next_song(guild)
+                return
+
+            try:
+                source = discord.FFmpegPCMAudio(filename, **ffmpeg_options)
+            except Exception as e:
+                print(f"Source Error: {e}")
+                self.play_next_song(guild)
+                return
+
+            def after_playing(error):
+                if error: print(f"Player Error: {error}")
+                
+                # Move finished song to History
+                if guild.id not in self.history: self.history[guild.id] = []
+                self.history[guild.id].append(track_data)
+                
+                # Run Cleanup (Keep only last 1 in history + current)
+                self.cleanup_files(guild.id)
+                
+                # Next
+                self.play_next_song(guild)
+
+            if guild.voice_client:
+                guild.voice_client.play(source, after=after_playing)
+
+                # --- SEND NOW PLAYING EMBED ---
+                try:
+                    config = self.load_config(guild.id)
+                    music_channel_id = config.get('music_channel_id')
+                    
+                    if music_channel_id:
+                        channel = guild.get_channel(music_channel_id)
+                        if channel:
+                            embed = discord.Embed(
+                                title="🎵 Now Playing", 
+                                description=f"[{track_data['title']}]({track_data['url']})", 
+                                color=discord.Color(0xff90aa)
+                            )
+                            embed.add_field(name="Requested By", value=track_data.get('user', 'Unknown'), inline=True)
+                            
+                            view = MusicControls(self, guild)
+                            await channel.send(embed=embed, view=view)
+                except Exception as e:
+                    print(f"Failed to send NP embed: {e}")
+
+            # --- TRIGGER PRELOAD FOR THE *NEW* NEXT SONG ---
+            self.bot.loop.create_task(self.preload_next_song(guild))
+
+        asyncio.run_coroutine_threadsafe(start_playback(), self.bot.loop)
+
     # --- TASKS ---
 
     @tasks.loop(hours=24)
@@ -229,7 +451,190 @@ class Music(commands.Cog):
     async def before_check_token(self):
         await self.bot.wait_until_ready()
 
-    # --- SLASH COMMANDS (Top Level) ---
+    # --- SLASH COMMANDS (Playback) ---
+
+    @app_commands.command(name="play", description="Play music or the server playlist.")
+    @app_commands.describe(query="Search query or URL (Leave empty for Server Playlist)")
+    async def play(self, interaction: discord.Interaction, query: str = None):
+        """Play music or the server playlist."""
+        if not interaction.user.voice:
+            return await interaction.response.send_message("❌ You are not in a voice channel, buggy!", ephemeral=True)
+
+        await interaction.response.defer()
+
+        # Join VC if needed
+        if not interaction.guild.voice_client:
+            try:
+                await interaction.user.voice.channel.connect()
+            except Exception as e:
+                return await interaction.followup.send(f"❌ Failed to join VC: {e}")
+        else:
+            if interaction.guild.voice_client.channel.id != interaction.user.voice.channel.id:
+                await interaction.guild.voice_client.move_to(interaction.user.voice.channel)
+
+        guild_id = interaction.guild_id
+        if guild_id not in self.music_queues:
+            self.music_queues[guild_id] = []
+
+        songs_added = 0
+        
+        # Determine insertion point (Next in queue vs End of queue)
+        # If playing, insert at 0. If not, append (which is also effectively 0)
+        is_playing = interaction.guild.voice_client.is_playing()
+        insert_index = 0 if is_playing else len(self.music_queues[guild_id])
+
+        # --- MODE 1: DEFAULT SERVER PLAYLIST (No Query) ---
+        if not query:
+            config = self.load_config(guild_id)
+            pid = config.get('playlist_id')
+            
+            if not pid:
+                return await interaction.followup.send("❌ No Server Playlist ID is set! Use `/playlist` to set one.")
+
+            if self.youtube:
+                try:
+                    request = self.youtube.playlistItems().list(
+                        part="snippet", playlistId=pid, maxResults=50
+                    )
+                    response = await self.bot.loop.run_in_executor(None, request.execute)
+                    
+                    items = response.get('items', [])
+                    if not items:
+                        return await interaction.followup.send("⚠️ Server playlist seems empty.")
+
+                    # If inserting at front, we need to add them in order so [1,2,3] -> [1,2,3, Old...]
+                    # So we insert at (index + current_iteration)
+                    for i, item in enumerate(items):
+                        vid = item['snippet']['resourceId']['videoId']
+                        title = item['snippet']['title']
+                        if title in ["Private video", "Deleted video"]: continue
+                        
+                        url = f"https://www.youtube.com/watch?v={vid}"
+                        song_data = {'title': title, 'url': url, 'user': "Server", 'filename': None}
+                        
+                        self.music_queues[guild_id].insert(insert_index + i, song_data)
+                        songs_added += 1
+
+                    await interaction.followup.send(f"✅ Queued **{songs_added}** tracks from the Server Playlist, you genius!")
+
+                except Exception as e:
+                    return await interaction.followup.send(f"❌ Failed to fetch playlist via API: {e}")
+            else:
+                return await interaction.followup.send("❌ YouTube API not loaded. Cannot fetch server playlist efficiently.")
+
+        # --- MODE 2: SEARCH / URL ---
+        else:
+            try:
+                if not query.startswith("http"):
+                    query = f"ytsearch:{query}"
+
+                data = await self.bot.loop.run_in_executor(None, lambda: ytdl.extract_info(query, download=False))
+                
+                if 'entries' in data:
+                    data = data['entries'][0]
+
+                title = data.get('title', 'Unknown')
+                url = data.get('webpage_url', data.get('url'))
+                
+                song_data = {'title': title, 'url': url, 'user': interaction.user.display_name, 'filename': None}
+                self.music_queues[guild_id].insert(insert_index, song_data)
+                songs_added = 1
+                
+                status_msg = f"✅ Added to **top of queue**: **{title}**" if is_playing else f"✅ Added to queue: **{title}**"
+                await interaction.followup.send(status_msg)
+
+            except Exception as e:
+                return await interaction.followup.send(f"❌ Error fetching song: {e}")
+
+        # If we inserted at the front (and something is playing), we should double check preloading
+        if is_playing and songs_added > 0:
+            self.bot.loop.create_task(self.preload_next_song(interaction.guild))
+
+        # Start Playback if Idle
+        if not interaction.guild.voice_client.is_playing() and songs_added > 0:
+            self.play_next_song(interaction.guild)
+
+    @app_commands.command(name="pause", description="Pause the current song.")
+    async def pause(self, interaction: discord.Interaction):
+        """Pause the current song."""
+        vc = interaction.guild.voice_client
+        if not vc or not vc.is_playing():
+            return await interaction.response.send_message("❌ Nothing is playing to pause!", ephemeral=True)
+        
+        vc.pause()
+        await interaction.response.send_message("⏸️ Paused!", ephemeral=False)
+
+    @app_commands.command(name="resume", description="Resume the current song.")
+    async def resume(self, interaction: discord.Interaction):
+        """Resume the current song."""
+        vc = interaction.guild.voice_client
+        if not vc or not vc.is_paused():
+            return await interaction.response.send_message("❌ Nothing is paused!", ephemeral=True)
+        
+        vc.resume()
+        await interaction.response.send_message("▶️ Resumed!", ephemeral=False)
+
+    @app_commands.command(name="skip", description="Skip the current song.")
+    async def skip(self, interaction: discord.Interaction):
+        """Skip the current song."""
+        if not interaction.guild.voice_client or not interaction.guild.voice_client.is_playing():
+            return await interaction.response.send_message("❌ Nothing is playing to skip!", ephemeral=True)
+        
+        interaction.guild.voice_client.stop() 
+        await interaction.response.send_message("⏭️ Skipped!", ephemeral=False)
+
+    @app_commands.command(name="stop", description="Stop music and clear queue.")
+    async def stop(self, interaction: discord.Interaction):
+        """Stop music and clear queue."""
+        if interaction.guild_id in self.music_queues:
+            self.music_queues[interaction.guild_id] = []
+        
+        if interaction.guild.voice_client:
+            interaction.guild.voice_client.stop()
+            await interaction.guild.voice_client.disconnect()
+            
+        self.current_song.pop(interaction.guild_id, None)
+        await interaction.response.send_message("🛑 Stopped playback and cleared queue.", ephemeral=False)
+
+    @app_commands.command(name="queue", description="Show the current music queue.")
+    async def queue(self, interaction: discord.Interaction):
+        """Show the current music queue."""
+        guild_id = interaction.guild_id
+        q = self.music_queues.get(guild_id, [])
+        now_playing = self.current_song.get(guild_id, {}).get('title', "Nothing")
+
+        desc = f"**Now Playing:** {now_playing}\n\n**Up Next:**\n"
+        for i, song in enumerate(q[:10], 1):
+            desc += f"`{i}.` {song['title']} ({song['user']})\n"
+        
+        if len(q) > 10:
+            desc += f"\n*...and {len(q)-10} more.*"
+
+        embed = discord.Embed(title="🎵 Music Queue", description=desc, color=discord.Color(0xff90aa))
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="shuffle", description="Toggle permanent shuffle mode.")
+    async def shuffle(self, interaction: discord.Interaction):
+        """Toggle permanent shuffle mode."""
+        config = self.load_config(interaction.guild_id)
+        current_state = config.get('shuffle', False)
+        new_state = not current_state
+        config['shuffle'] = new_state
+        self.save_config(interaction.guild_id, config)
+        
+        msg = f"🔀 Shuffle is now **{'ON' if new_state else 'OFF'}**."
+        
+        # If turned on, shuffle the current queue immediately
+        if new_state and interaction.guild_id in self.music_queues:
+            if len(self.music_queues[interaction.guild_id]) > 0:
+                random.shuffle(self.music_queues[interaction.guild_id])
+                msg += " Queue shuffled!"
+                # Trigger preload in case the 'next' song changed
+                self.bot.loop.create_task(self.preload_next_song(interaction.guild))
+        
+        await interaction.response.send_message(msg, ephemeral=False)
+
+    # --- SLASH COMMANDS (Config) ---
 
     @app_commands.command(name="checkmusic", description="Checks all music API statuses.")
     @app_commands.default_permissions(administrator=True)
@@ -262,18 +667,10 @@ class Music(commands.Cog):
             )
             auth_url, _ = self.auth_flow.authorization_url(prompt='consent')
             
-            # Helper to find command ID for clickable link
-            cmd_mention = "` /ytcode <code> `" # Fallback
-            
-            # Try to find the command in the tree or cache
-            # Note: IDs are only available after sync.
             ytcode_cmd = discord.utils.get(self.bot.tree.get_commands(), name="ytcode")
+            cmd_mention = "` /ytcode <code> `"
             if ytcode_cmd:
-                # We try to use the cache from main.py if it exists
-                if hasattr(self.bot, 'cmd_cache') and interaction.guild_id in self.bot.cmd_cache:
-                    cmd_id = self.bot.cmd_cache[interaction.guild_id].get("ytcode")
-                    if cmd_id:
-                        cmd_mention = f"</ytcode:{cmd_id}>"
+                 pass
 
             await interaction.response.send_message(
                 f"{spot_status}\n🔄 **YouTube API Renewal Started!**\n1. Click: [Auth Link](<{auth_url}>)\n2. Run: {cmd_mention} (paste the code)", ephemeral=True
@@ -292,7 +689,6 @@ class Music(commands.Cog):
         try:
             self.auth_flow.fetch_token(code=code)
             
-            # Save Global Token
             global_config = self.bot.db.get_collection("global_music_settings")
             if isinstance(global_config, list): global_config = {}
             global_config['youtube_token_json'] = self.auth_flow.credentials.to_json()
@@ -308,7 +704,6 @@ class Music(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     async def playlist(self, interaction: discord.Interaction, playlist: str):
         """Set the YouTube Playlist Link or ID."""
-        # Extract ID if a full link is provided
         match = re.search(r'list=([a-zA-Z0-9_-]+)', playlist)
         
         if match:
@@ -339,13 +734,11 @@ class Music(commands.Cog):
         
         config = self.load_config(message.guild.id)
         
-        # Check if in music channel
-        # If music_channel_id is 0, we allow all channels.
         if config['music_channel_id'] != 0 and message.channel.id != config['music_channel_id']:
             return
             
         content = message.content
-
+        
         # Regex Definitions
         spotify_match = re.search(r'(https?://(?:open\.|www\.)?spotify\.com/(?:track|album|playlist|artist)/[a-zA-Z0-9_-]+)', content)
         yt_music_match = re.search(r'https?://music\.youtube\.com/watch\?v=([a-zA-Z0-9_-]+)', content)
@@ -362,7 +755,6 @@ class Music(commands.Cog):
 
         # 2. Handle YouTube (Music, Standard, Short)
         elif self.youtube and (yt_music_match or yt_standard_match or yt_short_match):
-            # Extract Video ID based on which one matched
             v_id = None
             if yt_music_match: v_id = yt_music_match.group(1)
             elif yt_standard_match: v_id = yt_standard_match.group(1)
