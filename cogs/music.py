@@ -403,6 +403,10 @@ class Music(commands.Cog):
 
     def play_next_song(self, guild):
         """Plays next song, triggers preload, and handles cleanup."""
+        # Check if already playing to avoid double-call race conditions
+        if guild.voice_client and guild.voice_client.is_playing():
+            return
+
         if guild.id not in self.music_queues or not self.music_queues[guild.id]:
             self.current_song.pop(guild.id, None)
             return
@@ -421,6 +425,8 @@ class Music(commands.Cog):
             
             if not filename:
                 print(f"⚠️ Skip: Could not download {track_data['title']}")
+                # Wait a brief moment before retrying next song to avoid spin loops
+                await asyncio.sleep(1)
                 self.play_next_song(guild)
                 return
 
@@ -442,31 +448,41 @@ class Music(commands.Cog):
                 self.cleanup_files(guild.id)
                 
                 # Next
+                # We need to run this on the main loop safely
+                fut = asyncio.run_coroutine_threadsafe(asyncio.sleep(0.5), self.bot.loop)
+                try: fut.result()
+                except: pass
                 self.play_next_song(guild)
 
             if guild.voice_client:
-                guild.voice_client.play(source, after=after_playing)
-                print(f"▶️ Now Playing: {track_data['title']}")
-
-                # --- SEND NOW PLAYING EMBED ---
                 try:
-                    config = self.load_config(guild.id)
-                    music_channel_id = config.get('music_channel_id')
-                    
-                    if music_channel_id:
-                        channel = guild.get_channel(music_channel_id)
-                        if channel:
-                            embed = discord.Embed(
-                                title="🎵 Now Playing", 
-                                description=f"[{track_data['title']}]({track_data['url']})", 
-                                color=discord.Color(0xff90aa)
-                            )
-                            embed.add_field(name="Requested By", value=track_data.get('user', 'Unknown'), inline=True)
-                            
-                            view = MusicControls(self, guild)
-                            await channel.send(embed=embed, view=view)
+                    guild.voice_client.play(source, after=after_playing)
+                    print(f"▶️ Now Playing: {track_data['title']}")
+
+                    # --- SEND NOW PLAYING EMBED ---
+                    try:
+                        config = self.load_config(guild.id)
+                        music_channel_id = config.get('music_channel_id')
+                        
+                        if music_channel_id:
+                            channel = guild.get_channel(music_channel_id)
+                            if channel:
+                                embed = discord.Embed(
+                                    title="🎵 Now Playing", 
+                                    description=f"[{track_data['title']}]({track_data['url']})", 
+                                    color=discord.Color(0xff90aa)
+                                )
+                                embed.add_field(name="Requested By", value=track_data.get('user', 'Unknown'), inline=True)
+                                
+                                view = MusicControls(self, guild)
+                                await channel.send(embed=embed, view=view)
+                    except Exception as e:
+                        print(f"Failed to send NP embed: {e}")
+                        
                 except Exception as e:
-                    print(f"Failed to send NP embed: {e}")
+                    print(f"❌ Failed to start voice_client.play: {e}")
+                    # If play failed, maybe still playing? Try next.
+                    self.play_next_song(guild)
 
             # --- TRIGGER PRELOAD FOR THE *NEW* NEXT SONG ---
             self.bot.loop.create_task(self.preload_next_song(guild))
