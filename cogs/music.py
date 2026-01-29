@@ -222,12 +222,22 @@ class Music(commands.Cog):
                 'no_warnings': True,
                 'default_search': 'auto',
                 'source_address': '0.0.0.0',
+                # NEW: Disable cache to prevent persisting bad tokens
+                'cachedir': False,
+                # NEW: Add headers to look like a real browser
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-us,en;q=0.5'
+                }
             }
             
             # --- COOKIE LOADING (Crucial for Age-Restricted Content) ---
             if os.path.exists('cookies.txt'):
-                self.ytdl_format_options['cookiefile'] = 'cookies.txt'
-                print("✅ Found cookies.txt! Using it for authentication and age-gated content.")
+                # Use absolute path to be safe
+                cookie_path = os.path.abspath('cookies.txt')
+                self.ytdl_format_options['cookiefile'] = cookie_path
+                print(f"✅ Found cookies.txt at {cookie_path}! Using it for authentication.")
             else:
                 print("⚠️ No cookies.txt found. Age-restricted content will fail.")
             
