@@ -362,13 +362,15 @@ class Music(commands.Cog):
     # --- ADVANCED PLAYBACK LOGIC ---
 
     async def download_track(self, track_data):
-        """Helper: Downloads a track and returns filename."""
+        """Helper: Downloads a track and returns filename. Blocks until ready."""
         if not self.ytdl: return None
         if track_data.get('filename') and os.path.exists(track_data['filename']):
             return track_data['filename']
 
         try:
             loop = asyncio.get_running_loop()
+            print(f"⬇️ Downloading: {track_data['title']}...")
+            
             # Use self.ytdl here
             data = await loop.run_in_executor(None, lambda: self.ytdl.extract_info(track_data['url'], download=True))
             
@@ -377,9 +379,16 @@ class Music(commands.Cog):
 
             filename = self.ytdl.prepare_filename(data)
             track_data['filename'] = filename # Update the dict ref
-            return filename
+            
+            # Verify file exists
+            if os.path.exists(filename):
+                print(f"✅ Downloaded: {filename}")
+                return filename
+            else:
+                print(f"❌ Error: File not found after download: {filename}")
+                return None
         except Exception as e:
-            print(f"Download Error: {e}")
+            print(f"❌ Download Error: {e}")
             return None
 
     async def manage_downloads(self, guild_id):
@@ -595,6 +604,8 @@ class Music(commands.Cog):
 
             if self.youtube:
                 try:
+                    await interaction.followup.send("⏳ Loading playlist from YouTube...", ephemeral=True)
+                    
                     next_page_token = None
                     total_items = []
                     
@@ -647,6 +658,8 @@ class Music(commands.Cog):
         # --- MODE 2: SEARCH / URL ---
         else:
             try:
+                await interaction.followup.send("🔎 Searching...", ephemeral=True)
+                
                 if not query.startswith("http"):
                     query = f"ytsearch:{query}"
 
