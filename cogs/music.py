@@ -113,12 +113,8 @@ class MusicControls(discord.ui.View):
 
     @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger)
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.cog.music_queues[self.guild.id] = []
-        vc = self.guild.voice_client
-        if vc:
-            vc.stop()
-            await vc.disconnect()
-        await interaction.response.send_message("🛑 Stopped", ephemeral=True)
+        # Stop command logic duplicated here for the button
+        await self.cog.stop_playback(interaction)
 
 # Function/Class List:
 # class Music(commands.Cog)
@@ -131,9 +127,11 @@ class MusicControls(discord.ui.View):
 # - search_youtube_official(query)
 # - process_spotify_link(url, guild_id)
 # - download_track(track_data) [Helper]
-# - preload_next_song(guild) [Helper]
+# - manage_downloads(guild_id) [Helper]
 # - cleanup_files(guild_id) [Helper]
+# - cleanup_all_files(guild_id) [Helper - New]
 # - play_next_song(guild)
+# - stop_playback(interaction) [Helper - New]
 # - check_token_validity_task()
 # - play(interaction, query) [Slash]
 # - pause(interaction) [Slash]
@@ -380,17 +378,25 @@ class Music(commands.Cog):
             print(f"Download Error: {e}")
             return None
 
-    async def preload_next_song(self, guild):
-        """Helper: Checks queue and downloads the next song if needed."""
-        if guild.id in self.music_queues and self.music_queues[guild.id]:
-            next_track = self.music_queues[guild.id][0]
-            if not next_track.get('filename'):
-                await self.download_track(next_track)
+    async def manage_downloads(self, guild_id):
+        """Helper: Ensures current + next 3 are downloaded."""
+        if guild_id not in self.music_queues: return
+
+        queue = self.music_queues[guild_id]
+        
+        # Download next 3
+        for i in range(min(3, len(queue))):
+            track = queue[i]
+            if not track.get('filename'):
+                # print(f"Preloading: {track['title']}")
+                await self.download_track(track)
 
     def cleanup_files(self, guild_id):
         """Deletes old files but keeps the last played song (for back button)."""
         if guild_id not in self.history: return
         
+        # Keep ONLY the last item in history (previous song)
+        # Delete everything older than that
         while len(self.history[guild_id]) > 1:
             old_track = self.history[guild_id].pop(0) # Remove oldest
             fname = old_track.get('filename')
@@ -400,6 +406,32 @@ class Music(commands.Cog):
                     print(f"Deleted old track: {fname}")
                 except Exception as e:
                     print(f"Cleanup Error: {e}")
+
+    def cleanup_all_files(self, guild_id):
+        """Force delete all files related to this guild's session."""
+        # 1. Clear Queue Files
+        if guild_id in self.music_queues:
+            for track in self.music_queues[guild_id]:
+                fname = track.get('filename')
+                if fname and os.path.exists(fname):
+                    try: os.remove(fname)
+                    except: pass
+        
+        # 2. Clear History Files
+        if guild_id in self.history:
+            for track in self.history[guild_id]:
+                fname = track.get('filename')
+                if fname and os.path.exists(fname):
+                    try: os.remove(fname)
+                    except: pass
+        
+        # 3. Clear Current File
+        current = self.current_song.get(guild_id)
+        if current:
+            fname = current.get('filename')
+            if fname and os.path.exists(fname):
+                try: os.remove(fname)
+                except: pass
 
     def play_next_song(self, guild):
         """Plays next song, triggers preload, and handles cleanup."""
@@ -425,7 +457,6 @@ class Music(commands.Cog):
             
             if not filename:
                 print(f"⚠️ Skip: Could not download {track_data['title']}")
-                # Wait a brief moment before retrying next song to avoid spin loops
                 await asyncio.sleep(1)
                 self.play_next_song(guild)
                 return
@@ -484,10 +515,24 @@ class Music(commands.Cog):
                     # If play failed, maybe still playing? Try next.
                     self.play_next_song(guild)
 
-            # --- TRIGGER PRELOAD FOR THE *NEW* NEXT SONG ---
-            self.bot.loop.create_task(self.preload_next_song(guild))
+            # --- TRIGGER DOWNLOADS FOR NEXT 3 SONGS ---
+            self.bot.loop.create_task(self.manage_downloads(guild.id))
 
         asyncio.run_coroutine_threadsafe(start_playback(), self.bot.loop)
+
+    async def stop_playback(self, interaction):
+        """Helper to stop music and clear everything."""
+        self.music_queues[interaction.guild.id] = []
+        self.cleanup_all_files(interaction.guild.id) # Wipe all files
+        self.history[interaction.guild.id] = [] # Wipe history
+        self.current_song.pop(interaction.guild.id, None)
+
+        vc = interaction.guild.voice_client
+        if vc:
+            vc.stop()
+            await vc.disconnect()
+        
+        await interaction.response.send_message("🛑 Stopped playback and cleared all files.", ephemeral=False)
 
     # --- TASKS ---
 
@@ -549,35 +594,44 @@ class Music(commands.Cog):
                     next_page_token = None
                     total_items = []
                     
+                    # Fetch ALL pages of metadata first (Fast)
+                    # We just store the URLs and titles, not download yet
                     while True:
                         request = self.youtube.playlistItems().list(
                             part="snippet", 
                             playlistId=pid, 
-                            maxResults=50,
+                            maxResults=50, 
                             pageToken=next_page_token
                         )
                         response = await self.bot.loop.run_in_executor(None, request.execute)
                         
                         items = response.get('items', [])
-                        total_items.extend(items)
+                        if not items: break
                         
+                        total_items.extend(items)
                         next_page_token = response.get('nextPageToken')
-                        if not next_page_token:
-                            break
+                        if not next_page_token: break
 
                     if not total_items:
                         return await interaction.followup.send("⚠️ Server playlist seems empty.")
 
-                    for i, item in enumerate(total_items):
+                    new_songs = []
+                    for item in total_items:
                         vid = item['snippet']['resourceId']['videoId']
                         title = item['snippet']['title']
                         if title in ["Private video", "Deleted video"]: continue
                         
                         url = f"https://www.youtube.com/watch?v={vid}"
-                        song_data = {'title': title, 'url': url, 'user': "Server", 'filename': None}
-                        
-                        self.music_queues[guild_id].insert(insert_index + i, song_data)
-                        songs_added += 1
+                        # filename=None means it's not downloaded yet
+                        new_songs.append({'title': title, 'url': url, 'user': "Server", 'filename': None})
+
+                    # Insert all metadata into queue
+                    # If shuffling is on, we might want to shuffle this batch before inserting
+                    if config.get('shuffle', False):
+                        random.shuffle(new_songs)
+
+                    self.music_queues[guild_id][insert_index:insert_index] = new_songs
+                    songs_added = len(new_songs)
 
                     await interaction.followup.send(f"✅ Queued **{songs_added}** tracks from the Server Playlist, mrow!")
 
@@ -610,13 +664,12 @@ class Music(commands.Cog):
             except Exception as e:
                 return await interaction.followup.send(f"❌ Error fetching song: {e}")
 
-        # Trigger preload if we inserted at front and playing
-        if is_playing and songs_added > 0:
-            self.bot.loop.create_task(self.preload_next_song(interaction.guild))
-
-        # Start Playback if Idle
+        # Start Playback if Idle (this will trigger the download of the first song)
         if interaction.guild.voice_client and not interaction.guild.voice_client.is_playing() and songs_added > 0:
             self.play_next_song(interaction.guild)
+        # If already playing, ensure the next few are downloaded in background
+        elif is_playing:
+             self.bot.loop.create_task(self.manage_downloads(interaction.guild_id))
 
     @app_commands.command(name="pause", description="Pause the current song.")
     async def pause(self, interaction: discord.Interaction):
@@ -650,15 +703,7 @@ class Music(commands.Cog):
     @app_commands.command(name="stop", description="Stop music and clear queue.")
     async def stop(self, interaction: discord.Interaction):
         """Stop music and clear queue."""
-        if interaction.guild_id in self.music_queues:
-            self.music_queues[interaction.guild_id] = []
-        
-        if interaction.guild.voice_client:
-            interaction.guild.voice_client.stop()
-            await interaction.guild.voice_client.disconnect()
-            
-        self.current_song.pop(interaction.guild_id, None)
-        await interaction.response.send_message("🛑 Stopped playback and cleared queue.", ephemeral=False)
+        await self.stop_playback(interaction)
 
     @app_commands.command(name="queue", description="Show the current music queue.")
     async def queue(self, interaction: discord.Interaction):
@@ -693,7 +738,7 @@ class Music(commands.Cog):
             if len(self.music_queues[interaction.guild_id]) > 0:
                 random.shuffle(self.music_queues[interaction.guild_id])
                 msg += " Queue shuffled!"
-                self.bot.loop.create_task(self.preload_next_song(interaction.guild))
+                self.bot.loop.create_task(self.manage_downloads(interaction.guild_id)) # Update preloads
         
         await interaction.response.send_message(msg, ephemeral=False)
 
