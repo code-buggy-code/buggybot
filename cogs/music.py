@@ -50,6 +50,8 @@ class MusicControls(discord.ui.View):
     @discord.ui.button(emoji="⬅️", style=discord.ButtonStyle.secondary)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
+        # With streaming, we just push the current song back to the front of the queue
+        # Logic: If > 10s, Restart. If < 10s, Go Previous.
         current = self.cog.current_song.get(self.guild.id)
         if not current: return
 
@@ -223,36 +225,49 @@ class Music(commands.Cog):
         async def from_url(cls, url, *, loop=None, stream=True, cookie_path=None):
             loop = loop or asyncio.get_event_loop()
             
-            # Try specific audio formats first to avoid "Requested format not available"
-            ytdl_opts = {
-                'format': 'bestaudio[ext=m4a]/bestaudio[ext=opus]/bestaudio/best',
-                'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-                'restrictfilenames': True,
-                'noplaylist': True,
-                'nocheckcertificate': True,
-                'ignoreerrors': False,
-                'logtostderr': False,
-                'quiet': True,
-                'no_warnings': True,
-                'default_search': 'auto',
-                'source_address': '0.0.0.0',
-            }
+            # 3-Stage Format Retry System
+            format_attempts = [
+                'bestaudio/best',  # Attempt 1: High Quality Audio
+                'best',            # Attempt 2: Standard Video/Audio (Fallback)
+                'worst'            # Attempt 3: Potato Quality (Desperation)
+            ]
             
-            if cookie_path:
-                ytdl_opts['cookiefile'] = cookie_path
+            data = None
+            last_error = None
 
-            ytdl = yt_dlp.YoutubeDL(ytdl_opts)
+            for fmt in format_attempts:
+                try:
+                    ytdl_opts = {
+                        'format': fmt,
+                        'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+                        'restrictfilenames': True,
+                        'noplaylist': True,
+                        'nocheckcertificate': True,
+                        'ignoreerrors': False,
+                        'logtostderr': False,
+                        'quiet': True,
+                        'no_warnings': True,
+                        'default_search': 'auto',
+                        'source_address': '0.0.0.0',
+                        'cachedir': False # Disable cache to prevent stale format errors
+                    }
+                    
+                    if cookie_path:
+                        ytdl_opts['cookiefile'] = cookie_path
+
+                    ytdl = yt_dlp.YoutubeDL(ytdl_opts)
+                    data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
+                    
+                    if data:
+                        print(f"✅ Found stream with format: {fmt}")
+                        break
+                except Exception as e:
+                    last_error = e
+                    print(f"⚠️ Format {fmt} failed: {e}")
+                    continue
             
-            try:
-                data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
-            except Exception as e:
-                # Fallback to generic search if URL fails
-                if "format" in str(e).lower():
-                     ytdl_opts['format'] = 'best' # Try again with broader format
-                     ytdl = yt_dlp.YoutubeDL(ytdl_opts)
-                     data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
-                else:
-                    raise e
+            if not data:
+                raise Exception(f"All formats failed. Last error: {last_error}")
 
             if 'entries' in data:
                 data = data['entries'][0]
@@ -521,6 +536,10 @@ class Music(commands.Cog):
                 # to keep it fast. So we do a quick metadata fetch.
                 
                 quick_opts = {'format': 'bestaudio/best', 'quiet': True, 'noplaylist': True}
+                
+                # Try to use cookies but convert first
+                # We can't access 'self' here easily inside lambda unless we use self.check_and_convert_cookies
+                # But we are in the 'play' method of 'Music' class so 'self' works.
                 cookie_path = self.check_and_convert_cookies()
                 if cookie_path: quick_opts['cookiefile'] = cookie_path
 
