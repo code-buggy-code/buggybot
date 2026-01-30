@@ -213,7 +213,7 @@ class Music(commands.Cog):
         except: pass
         return os.path.abspath('cookies.txt')
 
-    # --- NEW CORE LOGIC: PIPE SOURCE ---
+    # --- NEW CORE LOGIC: PIPE SOURCE & CLIENT ROTATION ---
     class YTDLSource(discord.PCMVolumeTransformer):
         def __init__(self, source, *, data, volume=0.5):
             super().__init__(source, volume)
@@ -225,20 +225,42 @@ class Music(commands.Cog):
         async def from_url(cls, url, *, loop=None, stream=True, cookie_path=None):
             loop = loop or asyncio.get_event_loop()
             
-            # 3-Stage Format Retry System
-            format_attempts = [
-                'bestaudio/best',  # Attempt 1: High Quality Audio
-                'best',            # Attempt 2: Standard Video/Audio (Fallback)
-                'worst'            # Attempt 3: Potato Quality (Desperation)
+            # CHAMELEON MODE: Rotate Clients to unblock
+            strategies = [
+                # 1. Android Client (Standard music client)
+                {
+                    'format': 'bestaudio/best',
+                    'client': 'android',
+                    'desc': 'Android'
+                },
+                # 2. iOS Client (Often has different permissions)
+                {
+                    'format': 'bestaudio/best',
+                    'client': 'ios',
+                    'desc': 'iOS'
+                },
+                # 3. TV Embedded (Very robust against blocks)
+                {
+                    'format': 'best', # TV often doesn't have 'bestaudio' separated
+                    'client': 'tv',
+                    'desc': 'TV'
+                },
+                # 4. Web (Last resort)
+                {
+                    'format': 'best',
+                    'client': 'web',
+                    'desc': 'Web'
+                }
             ]
             
             data = None
             last_error = None
 
-            for fmt in format_attempts:
+            for strategy in strategies:
                 try:
+                    print(f"🔄 Trying to unblock using: {strategy['desc']}...")
                     ytdl_opts = {
-                        'format': fmt,
+                        'format': strategy['format'],
                         'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
                         'restrictfilenames': True,
                         'noplaylist': True,
@@ -249,7 +271,12 @@ class Music(commands.Cog):
                         'no_warnings': True,
                         'default_search': 'auto',
                         'source_address': '0.0.0.0',
-                        'cachedir': False # Disable cache to prevent stale format errors
+                        'cachedir': False,
+                        'extractor_args': {
+                            'youtube': {
+                                'player_client': [strategy['client']]
+                            }
+                        }
                     }
                     
                     if cookie_path:
@@ -259,15 +286,15 @@ class Music(commands.Cog):
                     data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
                     
                     if data:
-                        print(f"✅ Found stream with format: {fmt}")
+                        print(f"✅ Success! Unblocked with {strategy['desc']}.")
                         break
                 except Exception as e:
                     last_error = e
-                    print(f"⚠️ Format {fmt} failed: {e}")
+                    # print(f"⚠️ {strategy['desc']} failed: {e}")
                     continue
             
             if not data:
-                raise Exception(f"All formats failed. Last error: {last_error}")
+                raise Exception(f"All unblock strategies failed. Last error: {last_error}")
 
             if 'entries' in data:
                 data = data['entries'][0]
@@ -275,7 +302,6 @@ class Music(commands.Cog):
             filename = data['url']
             
             # Use FFMPEG to stream the URL directly
-            # This handles HLS/M3U8 streams and standard files
             ffmpeg_opts = {
                 'options': '-vn',
                 'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
