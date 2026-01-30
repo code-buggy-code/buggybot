@@ -50,8 +50,6 @@ class MusicControls(discord.ui.View):
     @discord.ui.button(emoji="⬅️", style=discord.ButtonStyle.secondary)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        # With streaming, we just push the current song back to the front of the queue
-        # Logic: If > 10s, Restart. If < 10s, Go Previous.
         current = self.cog.current_song.get(self.guild.id)
         if not current: return
 
@@ -126,8 +124,8 @@ class MusicControls(discord.ui.View):
 # - search_youtube_official(query)
 # - process_spotify_link(url, guild_id)
 # - check_and_convert_cookies()
-# - get_ytdl_opts(format_mode='best') [Updated to accept format mode]
-# - play_next_song(guild, interaction=None) [Updated with fallback logic]
+# - get_ytdl_source(url) [NEW: Creates FFmpeg source via pipe]
+# - play_next_song(guild, interaction=None) [Updated to use new source]
 # - stop_playback(interaction)
 # - check_token_validity_task()
 # - play(interaction, query)
@@ -163,7 +161,7 @@ class Music(commands.Cog):
         if hasattr(self.bot, 'db'):
             self.bot.loop.create_task(self.load_youtube_service())
         
-        # Initialize YTDL options for streaming (NO DOWNLOADING)
+        # Initialize YTDL options for streaming
         if yt_dlp:
             yt_dlp.utils.bug_reports_message = lambda *args, **kwargs: ''
 
@@ -213,34 +211,69 @@ class Music(commands.Cog):
         except: pass
         return os.path.abspath('cookies.txt')
 
-    def get_ytdl_opts(self, format_mode='best'):
-        """Options strictly for extracting streaming URLs."""
-        cookie_path = self.check_and_convert_cookies()
-        
-        # Determine format string based on mode
-        # 'best' = Try to get high quality audio
-        # 'fallback' = Just get ANYTHING that works
-        fmt = 'bestaudio/best'
-        if format_mode == 'fallback':
-            fmt = 'best' # Allow video if audio-only fails
-        
-        opts = {
-            'format': fmt,
-            'noplaylist': True,
-            'nocheckcertificate': True,
-            'ignoreerrors': False,
-            'logtostderr': False,
-            'quiet': True,
-            'no_warnings': True,
-            'default_search': 'auto',
-            'source_address': '0.0.0.0',
-            # Important: We are NOT downloading files
-        }
+    # --- NEW CORE LOGIC: PIPE SOURCE ---
+    class YTDLSource(discord.PCMVolumeTransformer):
+        def __init__(self, source, *, data, volume=0.5):
+            super().__init__(source, volume)
+            self.data = data
+            self.title = data.get('title')
+            self.url = data.get('url')
 
-        if cookie_path:
-            opts['cookiefile'] = cookie_path
-        
-        return opts
+        @classmethod
+        async def from_url(cls, url, *, loop=None, stream=True, cookie_path=None):
+            loop = loop or asyncio.get_event_loop()
+            
+            ytdl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+                'restrictfilenames': True,
+                'noplaylist': True,
+                'nocheckcertificate': True,
+                'ignoreerrors': False,
+                'logtostderr': False,
+                'quiet': True,
+                'no_warnings': True,
+                'default_search': 'auto',
+                'source_address': '0.0.0.0',
+            }
+            
+            if cookie_path:
+                ytdl_opts['cookiefile'] = cookie_path
+
+            ytdl = yt_dlp.YoutubeDL(ytdl_opts)
+            
+            try:
+                data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
+            except Exception as e:
+                # Fallback to generic search if URL fails
+                if "format" in str(e).lower():
+                     ytdl_opts['format'] = 'best' # Try again with broader format
+                     ytdl = yt_dlp.YoutubeDL(ytdl_opts)
+                     data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
+                else:
+                    raise e
+
+            if 'entries' in data:
+                data = data['entries'][0]
+
+            filename = data['url']
+            
+            # Use FFMPEG to stream the URL directly
+            # This handles HLS/M3U8 streams and standard files
+            ffmpeg_opts = {
+                'options': '-vn',
+                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
+            }
+            
+            # If headers are available, pass them to FFMPEG
+            if 'http_headers' in data:
+                headers = ""
+                for key, value in data['http_headers'].items():
+                    headers += f"{key}: {value}\r\n"
+                if headers:
+                    ffmpeg_opts['before_options'] += f' -headers "{headers}"'
+
+            return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_opts), data=data)
 
     def load_config(self, guild_id):
         if not hasattr(self.bot, 'db'): return {}
@@ -347,64 +380,22 @@ class Music(commands.Cog):
         self.current_song[guild.id] = track_data
 
         async def stream_audio():
-            loop = asyncio.get_running_loop()
-            
-            # --- TRY 1: High Quality Audio ---
-            opts = self.get_ytdl_opts(format_mode='best')
-            stream_url = None
-            data = None
-            
             try:
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    data = await loop.run_in_executor(None, lambda: ydl.extract_info(track_data['url'], download=False))
+                cookie_path = self.check_and_convert_cookies()
                 
-                if 'entries' in data: data = data['entries'][0]
-                stream_url = data.get('url')
-            
-            except Exception as e:
-                # --- TRY 2: Fallback (Any Format) ---
-                print(f"⚠️ First attempt failed ({e}). Retrying with fallback format...")
-                try:
-                    opts = self.get_ytdl_opts(format_mode='fallback')
-                    with yt_dlp.YoutubeDL(opts) as ydl:
-                        data = await loop.run_in_executor(None, lambda: ydl.extract_info(track_data['url'], download=False))
-                    if 'entries' in data: data = data['entries'][0]
-                    stream_url = data.get('url')
-                except Exception as e2:
-                    print(f"❌ Fallback also failed: {e2}")
-            
-            if not stream_url:
-                if interaction: 
-                        try: await interaction.followup.send(f"⚠️ Failed to stream **{track_data['title']}** (Format unavailable)", ephemeral=True)
-                        except: pass
-                self.play_next_song(guild)
-                return
-
-            try:
-                # --- CRITICAL FIX: PASS HEADERS TO FFMPEG ---
-                # FFmpeg needs the same User-Agent and Cookies that yt-dlp used to access the URL
-                ffmpeg_before_options = '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
-                
-                if data and 'http_headers' in data:
-                    headers = ""
-                    for key, value in data['http_headers'].items():
-                        headers += f"{key}: {value}\r\n"
-                    # Add headers argument to ffmpeg
-                    if headers:
-                        ffmpeg_before_options += f' -headers "{headers}"'
-
-                # Create Audio Source directly from URL with HEADERS
-                source = discord.FFmpegPCMAudio(stream_url, before_options=ffmpeg_before_options, options='-vn')
+                # Use the helper class to get a playable source
+                # This handles all the extraction and FFMPEG setup
+                source = await self.YTDLSource.from_url(
+                    track_data['url'], 
+                    loop=self.bot.loop, 
+                    stream=True,
+                    cookie_path=cookie_path
+                )
                 
                 def after_playing(error):
                     if error: 
                         print(f"❌ Player Error: {error}")
-                        if interaction:
-                            try:
-                                # We can't await here easily, but we can print
-                                pass 
-                            except: pass
-
+                    
                     if guild.id not in self.history: self.history[guild.id] = []
                     self.history[guild.id].append(track_data)
                     
@@ -524,9 +515,15 @@ class Music(commands.Cog):
                 if not query.startswith("http"): 
                     search_query = f"ytsearch:{query}"
                 
-                # Just get metadata, no download
-                opts = self.get_ytdl_opts()
-                with yt_dlp.YoutubeDL(opts) as ydl:
+                # For adding to queue, we just need basic info first
+                # We can use our new helper method but we want to avoid downloading stream info yet
+                # to keep it fast. So we do a quick metadata fetch.
+                
+                quick_opts = {'format': 'bestaudio/best', 'quiet': True, 'noplaylist': True}
+                cookie_path = self.check_and_convert_cookies()
+                if cookie_path: quick_opts['cookiefile'] = cookie_path
+
+                with yt_dlp.YoutubeDL(quick_opts) as ydl:
                     data = await self.bot.loop.run_in_executor(None, lambda: ydl.extract_info(search_query, download=False))
                 
                 if 'entries' in data: 
@@ -538,8 +535,6 @@ class Music(commands.Cog):
                     'user': interaction.user.display_name
                 }
                 
-                # If nothing is playing, insert at 0. If playing, add to end (or after current?)
-                # Standard queue behavior: Add to end.
                 self.music_queues[guild_id].append(song)
                 songs_added = 1
                 
