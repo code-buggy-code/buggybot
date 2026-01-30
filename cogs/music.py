@@ -223,8 +223,9 @@ class Music(commands.Cog):
         async def from_url(cls, url, *, loop=None, stream=True, cookie_path=None):
             loop = loop or asyncio.get_event_loop()
             
+            # Try specific audio formats first to avoid "Requested format not available"
             ytdl_opts = {
-                'format': 'bestaudio/best',
+                'format': 'bestaudio[ext=m4a]/bestaudio[ext=opus]/bestaudio/best',
                 'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
                 'restrictfilenames': True,
                 'noplaylist': True,
