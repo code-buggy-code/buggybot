@@ -204,7 +204,7 @@ class Music(commands.Cog):
         except: pass
         return os.path.abspath('cookies.txt')
 
-    # --- NEW CORE LOGIC: PIPE SOURCE & CLIENT ROTATION ---
+    # --- SIMPLIFIED STREAMING LOGIC ---
     class YTDLSource(discord.PCMVolumeTransformer):
         def __init__(self, source, *, data, volume=0.5):
             super().__init__(source, volume)
@@ -216,104 +216,48 @@ class Music(commands.Cog):
         async def from_url(cls, url, *, loop=None, stream=True, cookie_path=None):
             loop = loop or asyncio.get_event_loop()
             
-            # --- PROXY AUTO-DETECTION ---
-            proxy_url = None
+            # Simplified "Android" Strategy for Stability
+            ytdl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+                'restrictfilenames': True,
+                'noplaylist': True,
+                'nocheckcertificate': True,
+                'ignoreerrors': False,
+                'logtostderr': False,
+                'quiet': True,
+                'no_warnings': True,
+                'default_search': 'auto',
+                'source_address': '0.0.0.0', # Use IPv4
+                'extractor_args': {'youtube': {'player_client': ['android', 'web']}} # Prioritize Android
+            }
+
+            if cookie_path:
+                ytdl_opts['cookiefile'] = cookie_path
+            
+            # Attempt to use WARP/Socks Proxy if available
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(0.5)
-                # Check Cloudflare WARP port
                 if sock.connect_ex(('127.0.0.1', 40000)) == 0:
-                    proxy_url = "socks5://127.0.0.1:40000"
-                    print("✅ Cloudflare WARP detected! Tunneling traffic...")
-                    try: import socks 
-                    except ImportError: print("⚠️ WARNING: 'pysocks' missing. Run: pip install pysocks")
+                    ytdl_opts['proxy'] = "socks5://127.0.0.1:40000"
+                    print("✅ Using WARP Proxy")
                 sock.close()
             except: pass
 
-            # ROBUST STRATEGIES
-            # If YouTube blocks outright, we need to mimic real users better.
-            # 1. Relaxed Mode: Do NOT bind to 0.0.0.0 or force IPv4. Let the OS/Network decide.
-            # 2. Add fake Browser Headers to request.
-            strategies = [
-                # 1. Relaxed Network (Best for avoiding IP blocks)
-                {'format': 'bestaudio/best', 'client': None, 'desc': 'Relaxed Network', 'relaxed': True},
-                # 2. Android Client (Good for throttling)
-                {'format': 'bestaudio/best', 'client': 'android', 'desc': 'Android Audio'},
-                # 3. TV Embedded (Fallback for blocked formats)
-                {'format': 'best', 'client': 'tv_embedded', 'desc': 'TV Embedded (Fallback)'},
-                # 4. Web Client (Standard)
-                {'format': 'bestaudio/best', 'client': 'web', 'desc': 'Web Audio'},
-                # 5. iOS
-                {'format': 'bestaudio/best', 'client': 'ios', 'desc': 'iOS Audio'},
-            ]
+            ytdl = yt_dlp.YoutubeDL(ytdl_opts)
+            data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
             
-            # Common "Real Browser" headers to reduce blocking
-            common_headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9',
+            if 'entries' in data: data = data['entries'][0]
+            filename = data['url'] if stream else ytdl.prepare_filename(data)
+            
+            # Robust FFMPEG Options
+            ffmpeg_opts = {
+                'options': '-vn',
+                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
             }
 
-            data = None
-            last_error = None
-
-            for strategy in strategies:
-                try:
-                    ytdl_opts = {
-                        'format': strategy['format'],
-                        'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-                        'restrictfilenames': True,
-                        'noplaylist': True,
-                        'nocheckcertificate': True,
-                        'ignoreerrors': False, 
-                        'logtostderr': False,
-                        'quiet': True,
-                        'no_warnings': True,
-                        'default_search': 'auto',
-                        'cachedir': False,
-                        'http_headers': common_headers
-                    }
-
-                    # Only force network settings if NOT in relaxed mode
-                    if not strategy.get('relaxed'):
-                        ytdl_opts['source_address'] = '0.0.0.0'
-                        ytdl_opts['force_ipv4'] = True
-                    
-                    if strategy.get('client'):
-                        ytdl_opts['extractor_args'] = {'youtube': {'player_client': [strategy['client']]}}
-
-                    # Use cookies if available
-                    if cookie_path:
-                        ytdl_opts['cookiefile'] = cookie_path
-                        
-                    if proxy_url:
-                        ytdl_opts['proxy'] = proxy_url
-
-                    ytdl = yt_dlp.YoutubeDL(ytdl_opts)
-                    data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
-                    
-                    if data:
-                        print(f"✅ Success! Connected via {strategy['desc']}")
-                        break
-                except Exception as e:
-                    last_error = e
-                    continue
-            
-            if not data:
-                print(f"❌ All strategies failed. Last error: {last_error}")
-                # Re-raise nicely
-                if "Sign in to confirm" in str(last_error):
-                    raise Exception("Video is age-gated/premium. Cookies required.")
-                raise Exception(f"Failed to fetch stream: {last_error}")
-
-            if 'entries' in data: data = data['entries'][0]
-            filename = data['url']
-            
-            # FFMPEG Options - Pass Proxy & Headers
-            ffmpeg_opts = {'options': '-vn', 'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'}
-            
-            if proxy_url and "socks5" in proxy_url:
-                ffmpeg_opts['before_options'] += f' -http_proxy "{proxy_url}"'
-
+            # Forward HTTP headers to FFMPEG if available
             if 'http_headers' in data:
                 headers = ""
                 for key, value in data['http_headers'].items():
@@ -482,7 +426,7 @@ class Music(commands.Cog):
             interaction.guild.voice_client.stop()
             try: await interaction.guild.voice_client.disconnect()
             except: pass
-        await interaction.response.send_message("🛑 Stopped playback and cleared queue.", ephemeral=False)
+        await interaction.response.send_message("🛑 Stopped playback and disconnected.", ephemeral=False)
 
     # --- TASKS ---
     @tasks.loop(hours=24)
@@ -553,24 +497,25 @@ class Music(commands.Cog):
                 search_query = query
                 if not query.startswith("http"): search_query = f"ytsearch:{query}"
                 
-                # Use simplified opts for metadata search (quick)
-                # We reuse the same proxy logic here just in case search is blocked too
-                quick_opts = {'format': 'bestaudio/best', 'quiet': True, 'noplaylist': True, 'force_ipv4': True}
+                # Simplified Search Options
+                quick_opts = {
+                    'format': 'bestaudio/best',
+                    'quiet': True,
+                    'noplaylist': True,
+                    'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
+                }
                 
-                # Check proxy for quick search
-                proxy_url = None
+                cookie_path = self.check_and_convert_cookies()
+                if cookie_path: quick_opts['cookiefile'] = cookie_path
+                
+                # Proxy check for search
                 try:
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     sock.settimeout(0.5)
                     if sock.connect_ex(('127.0.0.1', 40000)) == 0:
-                        proxy_url = "socks5://127.0.0.1:40000"
+                        quick_opts['proxy'] = "socks5://127.0.0.1:40000"
                     sock.close()
                 except: pass
-                
-                if proxy_url: quick_opts['proxy'] = proxy_url
-                
-                cookie_path = self.check_and_convert_cookies()
-                if cookie_path: quick_opts['cookiefile'] = cookie_path
 
                 with yt_dlp.YoutubeDL(quick_opts) as ydl:
                     data = await self.bot.loop.run_in_executor(None, lambda: ydl.extract_info(search_query, download=False))
