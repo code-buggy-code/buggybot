@@ -227,30 +227,18 @@ class Music(commands.Cog):
             
             # CHAMELEON MODE: Rotate Clients to unblock
             strategies = [
-                # 1. Android Client (Standard music client)
-                {
-                    'format': 'bestaudio/best',
-                    'client': 'android',
-                    'desc': 'Android'
-                },
-                # 2. iOS Client (Often has different permissions)
-                {
-                    'format': 'bestaudio/best',
-                    'client': 'ios',
-                    'desc': 'iOS'
-                },
-                # 3. TV Embedded (Very robust against blocks)
-                {
-                    'format': 'best', # TV often doesn't have 'bestaudio' separated
-                    'client': 'tv',
-                    'desc': 'TV'
-                },
-                # 4. Web (Last resort)
-                {
-                    'format': 'best',
-                    'client': 'web',
-                    'desc': 'Web'
-                }
+                # 1. Android - High Quality
+                {'format': 'bestaudio/best', 'client': 'android', 'desc': 'Android (HQ)'},
+                # 2. iOS - High Quality (Alt)
+                {'format': 'bestaudio/best', 'client': 'ios', 'desc': 'iOS (HQ)'},
+                # 3. TV - Best Available (Robust)
+                {'format': 'best', 'client': 'tv', 'desc': 'TV (Standard)'},
+                # 4. TV Embedded - Alternate Access (Very Robust)
+                {'format': 'best', 'client': 'tv_embedded', 'desc': 'TV Embedded'},
+                # 5. Web - Browser emulation
+                {'format': 'best', 'client': 'web', 'desc': 'Web'},
+                # 6. Desperation Mode - Just give me literally anything (Video or Audio)
+                {'format': 'worst', 'client': 'android', 'desc': 'Potato Mode (Worst)'},
             ]
             
             data = None
@@ -294,6 +282,7 @@ class Music(commands.Cog):
                     continue
             
             if not data:
+                print("❌ All strategies failed. Try updating yt-dlp: pip install -U yt-dlp")
                 raise Exception(f"All unblock strategies failed. Last error: {last_error}")
 
             if 'entries' in data:
