@@ -114,40 +114,9 @@ class MusicControls(discord.ui.View):
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.stop_playback(interaction)
 
-# Function/Class List:
-# class Music(commands.Cog)
-# - __init__(bot)
-# - cog_unload()
-# - load_config(guild_id)
-# - save_config(guild_id, config)
-# - load_youtube_service()
-# - load_music_services()
-# - search_youtube_official(query)
-# - process_spotify_link(url, guild_id)
-# - check_and_convert_cookies()
-# - get_ytdl_source(url) [Simplified logic]
-# - play_next_song(guild, interaction=None)
-# - stop_playback(interaction)
-# - check_token_validity_task()
-# - play(interaction, query)
-# - pause(interaction)
-# - resume(interaction)
-# - skip(interaction)
-# - stop(interaction)
-# - queue(interaction)
-# - shuffle(interaction)
-# - checkmusic(interaction)
-# - ytauth(interaction)
-# - ytcode(interaction, code)
-# - playlist(interaction, playlist)
-# - musicchannel(interaction, channel)
-# - on_message(message)
-# setup(bot)
-
 class Music(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        
         self.youtube = None
         self.spotify = None
         self.auth_flow = None
@@ -166,7 +135,6 @@ class Music(commands.Cog):
         self.music_queues = {} 
         self.current_song = {} 
         self.history = {} 
-        
         self.check_token_validity_task.start()
 
     def cog_unload(self):
@@ -176,38 +144,28 @@ class Music(commands.Cog):
 
     def check_and_convert_cookies(self):
         """Checks for cookies.txt, converts JSON if needed, fixes headers."""
-        if not os.path.exists('cookies.txt'):
-            return None
-
+        if not os.path.exists('cookies.txt'): return None
         try:
-            with open('cookies.txt', 'r', encoding='utf-8') as f:
-                content = f.read()
-            
+            with open('cookies.txt', 'r', encoding='utf-8') as f: content = f.read()
             if content.strip().startswith('[') or content.strip().startswith('{'):
-                try:
-                    data = json.loads(content)
-                    with open('cookies.txt', 'w', encoding='utf-8') as f:
-                        f.write("# Netscape HTTP Cookie File\n\n")
-                        for c in data:
-                            domain = c.get('Host raw', c.get('domain', '')).replace('https://', '').replace('http://', '').rstrip('/')
-                            flag = "TRUE" if domain.startswith('.') else "FALSE"
-                            path = c.get('Path raw', c.get('path', '/'))
-                            secure = "TRUE" if str(c.get('secure', False)).lower() == 'true' else "FALSE"
-                            expiry = int(float(c.get('expirationDate', 0)))
-                            name = c.get('name', '')
-                            value = c.get('value', '')
-                            if domain and name:
-                                f.write(f"{domain}\t{flag}\t{path}\t{secure}\t{expiry}\t{name}\t{value}\n")
-                except: pass
-            
+                data = json.loads(content)
+                with open('cookies.txt', 'w', encoding='utf-8') as f:
+                    f.write("# Netscape HTTP Cookie File\n\n")
+                    for c in data:
+                        domain = c.get('Host raw', c.get('domain', '')).replace('https://', '').replace('http://', '').rstrip('/')
+                        flag = "TRUE" if domain.startswith('.') else "FALSE"
+                        path = c.get('Path raw', c.get('path', '/'))
+                        secure = "TRUE" if str(c.get('secure', False)).lower() == 'true' else "FALSE"
+                        expiry = int(float(c.get('expirationDate', 0)))
+                        name = c.get('name', '')
+                        value = c.get('value', '')
+                        if domain and name: f.write(f"{domain}\t{flag}\t{path}\t{secure}\t{expiry}\t{name}\t{value}\n")
             elif not content.strip().startswith("# Netscape"):
-                 with open('cookies.txt', 'w', encoding='utf-8') as f:
-                    f.write("# Netscape HTTP Cookie File\n\n" + content)
-
+                 with open('cookies.txt', 'w', encoding='utf-8') as f: f.write("# Netscape HTTP Cookie File\n\n" + content)
         except: pass
         return os.path.abspath('cookies.txt')
 
-    # --- NEW CORE LOGIC: PIPE SOURCE ---
+    # --- NEW CORE LOGIC: PIPE SOURCE & CLIENT ROTATION ---
     class YTDLSource(discord.PCMVolumeTransformer):
         def __init__(self, source, *, data, volume=0.5):
             super().__init__(source, volume)
@@ -224,77 +182,83 @@ class Music(commands.Cog):
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(0.5)
-                # Check default WARP port
+                # Check Cloudflare WARP port
                 if sock.connect_ex(('127.0.0.1', 40000)) == 0:
                     proxy_url = "socks5://127.0.0.1:40000"
                     print("✅ Cloudflare WARP detected! Tunneling traffic...")
+                    try: import socks 
+                    except ImportError: print("⚠️ WARNING: 'pysocks' missing. Run: pip install pysocks")
                 sock.close()
-            except:
-                pass
+            except: pass
 
-            # SINGLE ROBUST STRATEGY
-            # Instead of complex rotation, we use a single, highly compatible configuration
-            # that prefers m4a/opus but accepts anything.
-            # We strictly enforce the proxy if found.
+            # ROBUST STRATEGIES
+            strategies = [
+                # 1. Web Client + Cookies (Most like a real user)
+                {'format': 'bestaudio/best', 'client': 'web', 'desc': 'Web Client'},
+                # 2. Android + Cookies
+                {'format': 'bestaudio/best', 'client': 'android', 'desc': 'Android Client'},
+                # 3. iOS + Cookies
+                {'format': 'bestaudio/best', 'client': 'ios', 'desc': 'iOS Client'},
+                # 4. Fallback: TV Embedded (No cookies usually, but robust)
+                {'format': 'best', 'client': 'tv_embedded', 'desc': 'TV Embedded'},
+                # 5. Last Resort: Potato Mode (Just get ANY format)
+                {'format': 'worst', 'client': 'web', 'desc': 'Potato Mode'}
+            ]
             
-            ytdl_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-                'restrictfilenames': True,
-                'noplaylist': True,
-                'nocheckcertificate': True,
-                'ignoreerrors': False,
-                'logtostderr': False,
-                'quiet': True,
-                'no_warnings': True,
-                'default_search': 'auto',
-                'source_address': '0.0.0.0',
-                # Force IPv4 can help with some blocks
-                'force_ipv4': True,
-            }
-            
-            if cookie_path:
-                ytdl_opts['cookiefile'] = cookie_path
-                
-            if proxy_url:
-                ytdl_opts['proxy'] = proxy_url
-
-            ytdl = yt_dlp.YoutubeDL(ytdl_opts)
             data = None
-            
-            try:
-                # Try standard first
-                data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
-            except Exception as e:
-                # Fallback: Try grabbing "worst" just to get any stream
-                print(f"⚠️ Standard extract failed: {e}. Retrying with 'worst' format...")
+            last_error = None
+
+            for strategy in strategies:
                 try:
-                    ytdl_opts['format'] = 'worst'
+                    ytdl_opts = {
+                        'format': strategy['format'],
+                        'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+                        'restrictfilenames': True,
+                        'noplaylist': True,
+                        'nocheckcertificate': True,
+                        'ignoreerrors': False,
+                        'logtostderr': False,
+                        'quiet': True,
+                        'no_warnings': True,
+                        'default_search': 'auto',
+                        'source_address': '0.0.0.0',
+                        'force_ipv4': True, # CRITICAL for Oracle Cloud
+                        'cachedir': False,
+                    }
+                    
+                    if strategy.get('client'):
+                        ytdl_opts['extractor_args'] = {'youtube': {'player_client': [strategy['client']]}}
+
+                    # Use cookies if available
+                    if cookie_path:
+                        ytdl_opts['cookiefile'] = cookie_path
+                        
+                    if proxy_url:
+                        ytdl_opts['proxy'] = proxy_url
+
                     ytdl = yt_dlp.YoutubeDL(ytdl_opts)
                     data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
-                except Exception as e2:
-                    print(f"❌ Fallback failed: {e2}")
-                    raise e2
-
+                    
+                    if data:
+                        print(f"✅ Success! Connected via {strategy['desc']}")
+                        break
+                except Exception as e:
+                    last_error = e
+                    continue
+            
             if not data:
-                raise Exception("Could not fetch stream data.")
+                print(f"❌ All strategies failed. Last error: {last_error}")
+                raise Exception(f"Failed to fetch stream. Ensure cookies.txt is valid and WARP is running.")
 
-            if 'entries' in data:
-                data = data['entries'][0]
-
+            if 'entries' in data: data = data['entries'][0]
             filename = data['url']
             
-            # FFMPEG Options
-            ffmpeg_opts = {
-                'options': '-vn',
-                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
-            }
+            # FFMPEG Options - Pass Proxy & Headers
+            ffmpeg_opts = {'options': '-vn', 'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'}
             
-            # --- CRITICAL: PASS PROXY TO FFMPEG ---
             if proxy_url and "socks5" in proxy_url:
                 ffmpeg_opts['before_options'] += f' -http_proxy "{proxy_url}"'
 
-            # Pass Headers
             if 'http_headers' in data:
                 headers = ""
                 for key, value in data['http_headers'].items():
@@ -411,9 +375,6 @@ class Music(commands.Cog):
         async def stream_audio():
             try:
                 cookie_path = self.check_and_convert_cookies()
-                
-                # Use the helper class to get a playable source
-                # This handles all the extraction and FFMPEG setup
                 source = await self.YTDLSource.from_url(
                     track_data['url'], 
                     loop=self.bot.loop, 
@@ -422,13 +383,9 @@ class Music(commands.Cog):
                 )
                 
                 def after_playing(error):
-                    if error: 
-                        print(f"❌ Player Error: {error}")
-                    
+                    if error: print(f"❌ Player Error: {error}")
                     if guild.id not in self.history: self.history[guild.id] = []
                     self.history[guild.id].append(track_data)
-                    
-                    # Next
                     fut = asyncio.run_coroutine_threadsafe(asyncio.sleep(0.5), self.bot.loop)
                     try: fut.result()
                     except: pass
@@ -439,7 +396,6 @@ class Music(commands.Cog):
                         guild.voice_client.play(source, after=after_playing)
                         print(f"▶️ Streaming: {track_data['title']}")
                         
-                        # Send Embed
                         config = self.load_config(guild.id)
                         if config.get('music_channel_id'):
                             chan = guild.get_channel(config['music_channel_id'])
@@ -536,56 +492,45 @@ class Music(commands.Cog):
                 await interaction.followup.send(f"✅ Queued **{songs_added}** tracks from Server Playlist.")
             except Exception as e: return await interaction.followup.send(f"❌ API Error: {e}")
 
-        # Mode 2: Search/URL (FIXED LOGIC)
+        # Mode 2: Search/URL
         else:
             try:
-                # Ensure query is handled as a search if not a URL
                 search_query = query
-                if not query.startswith("http"): 
-                    search_query = f"ytsearch:{query}"
+                if not query.startswith("http"): search_query = f"ytsearch:{query}"
                 
-                # For adding to queue, we just need basic info first
-                # We can use our new helper method but we want to avoid downloading stream info yet
-                # to keep it fast. So we do a quick metadata fetch.
+                # Use simplified opts for metadata search (quick)
+                # We reuse the same proxy logic here just in case search is blocked too
+                quick_opts = {'format': 'bestaudio/best', 'quiet': True, 'noplaylist': True, 'force_ipv4': True}
                 
-                quick_opts = {'format': 'bestaudio/best', 'quiet': True, 'noplaylist': True}
-                
-                cookie_path = self.check_and_convert_cookies()
-                if cookie_path: quick_opts['cookiefile'] = cookie_path
-                
-                # Add proxy to quick search too if active
+                # Check proxy for quick search
+                proxy_url = None
                 try:
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     sock.settimeout(0.5)
                     if sock.connect_ex(('127.0.0.1', 40000)) == 0:
-                        quick_opts['proxy'] = "socks5://127.0.0.1:40000"
+                        proxy_url = "socks5://127.0.0.1:40000"
                     sock.close()
                 except: pass
+                
+                if proxy_url: quick_opts['proxy'] = proxy_url
+                
+                cookie_path = self.check_and_convert_cookies()
+                if cookie_path: quick_opts['cookiefile'] = cookie_path
 
                 with yt_dlp.YoutubeDL(quick_opts) as ydl:
                     data = await self.bot.loop.run_in_executor(None, lambda: ydl.extract_info(search_query, download=False))
                 
-                if 'entries' in data: 
-                    data = data['entries'][0]
+                if 'entries' in data: data = data['entries'][0]
                 
-                song = {
-                    'title': data.get('title', 'Unknown'), 
-                    'url': data.get('webpage_url', data.get('url')), 
-                    'user': interaction.user.display_name
-                }
-                
+                song = {'title': data.get('title', 'Unknown'), 'url': data.get('webpage_url', data.get('url')), 'user': interaction.user.display_name}
                 self.music_queues[guild_id].append(song)
                 songs_added = 1
                 
-                if is_playing:
-                    await interaction.followup.send(f"✅ Added to queue: **{song['title']}**")
-                else:
-                    await interaction.followup.send(f"✅ Queued: **{song['title']}**")
+                if is_playing: await interaction.followup.send(f"✅ Added to queue: **{song['title']}**")
+                else: await interaction.followup.send(f"✅ Queued: **{song['title']}**")
 
-            except Exception as e: 
-                return await interaction.followup.send(f"❌ Error finding song: {e}")
+            except Exception as e: return await interaction.followup.send(f"❌ Error finding song: {e}")
 
-        # Start if idle and songs were added
         if not is_playing and songs_added > 0:
             self.play_next_song(interaction.guild, interaction)
 
