@@ -227,12 +227,12 @@ class Music(commands.Cog):
             
             # CHAMELEON MODE: Rotate Clients to unblock
             strategies = [
-                # 1. Android - High Quality
+                # 1. Android Embed (The Magic Key) - Mimics embedded player
+                {'format': 'bestaudio/best', 'client': 'android_embed', 'desc': 'Android Embed'},
+                # 2. Android - High Quality
                 {'format': 'bestaudio/best', 'client': 'android', 'desc': 'Android (HQ)'},
-                # 2. iOS - High Quality (Alt)
+                # 3. iOS - High Quality (Alt)
                 {'format': 'bestaudio/best', 'client': 'ios', 'desc': 'iOS (HQ)'},
-                # 3. TV - Best Available (Robust)
-                {'format': 'best', 'client': 'tv', 'desc': 'TV (Standard)'},
                 # 4. TV Embedded - Alternate Access (Very Robust)
                 {'format': 'best', 'client': 'tv_embedded', 'desc': 'TV Embedded'},
                 # 5. Web - Browser emulation
@@ -241,6 +241,11 @@ class Music(commands.Cog):
                 {'format': 'worst', 'client': 'android', 'desc': 'Potato Mode (Worst)'},
             ]
             
+            # If you have a proxy URL (e.g., http://user:pass@host:port), set it here manually for now
+            # or load it from a config/env var.
+            # proxy_url = "http://user:pass@host:port" 
+            proxy_url = None 
+
             data = None
             last_error = None
 
@@ -269,6 +274,9 @@ class Music(commands.Cog):
                     
                     if cookie_path:
                         ytdl_opts['cookiefile'] = cookie_path
+                        
+                    if proxy_url:
+                        ytdl_opts['proxy'] = proxy_url
 
                     ytdl = yt_dlp.YoutubeDL(ytdl_opts)
                     data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
