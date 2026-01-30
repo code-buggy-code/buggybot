@@ -51,8 +51,6 @@ class MusicControls(discord.ui.View):
     @discord.ui.button(emoji="⬅️", style=discord.ButtonStyle.secondary)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        # With streaming, we just push the current song back to the front of the queue
-        # Logic: If > 10s, Restart. If < 10s, Go Previous.
         current = self.cog.current_song.get(self.guild.id)
         if not current: return
 
@@ -127,7 +125,7 @@ class MusicControls(discord.ui.View):
 # - search_youtube_official(query)
 # - process_spotify_link(url, guild_id)
 # - check_and_convert_cookies()
-# - get_ytdl_source(url) [Creates FFmpeg source via pipe with proxy support]
+# - get_ytdl_source(url) [Simplified logic]
 # - play_next_song(guild, interaction=None)
 # - stop_playback(interaction)
 # - check_token_validity_task()
@@ -209,7 +207,7 @@ class Music(commands.Cog):
         except: pass
         return os.path.abspath('cookies.txt')
 
-    # --- NEW CORE LOGIC: PIPE SOURCE & CLIENT ROTATION ---
+    # --- NEW CORE LOGIC: PIPE SOURCE ---
     class YTDLSource(discord.PCMVolumeTransformer):
         def __init__(self, source, *, data, volume=0.5):
             super().__init__(source, volume)
@@ -226,85 +224,60 @@ class Music(commands.Cog):
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(0.5)
-                result = sock.connect_ex(('127.0.0.1', 40000))
-                sock.close()
-                
-                if result == 0:
+                # Check default WARP port
+                if sock.connect_ex(('127.0.0.1', 40000)) == 0:
                     proxy_url = "socks5://127.0.0.1:40000"
                     print("✅ Cloudflare WARP detected! Tunneling traffic...")
-                    
-                    # Check for pysocks
-                    try:
-                        import socks
-                    except ImportError:
-                        print("⚠️ WARNING: 'pysocks' is not installed. Proxying in yt-dlp will fail! Run: pip install pysocks")
+                sock.close()
             except:
                 pass
 
-            # STRATEGIES - COOKIES ENABLED FOR ALL
-            # We use 'bestaudio/best' to prioritize audio, but allow best (video+audio) as fallback
-            # The '-vn' flag in FFMPEG will ensure we strictly output audio only.
-            strategies = [
-                # 1. Web Client (Best with cookies)
-                {'format': 'bestaudio/best', 'client': 'web', 'desc': 'Web'},
-                
-                # 2. Android
-                {'format': 'bestaudio/best', 'client': 'android', 'desc': 'Android'},
-                
-                # 3. TV Embedded (Fallback)
-                {'format': 'bestaudio/best', 'client': 'tv_embedded', 'desc': 'TV Embedded'},
-                
-                # 4. iOS
-                {'format': 'bestaudio/best', 'client': 'ios', 'desc': 'iOS'},
-                
-                # 5. Last Resort (Generic)
-                {'format': 'bestaudio/best', 'client': None, 'desc': 'Generic Best'},
-            ]
+            # SINGLE ROBUST STRATEGY
+            # Instead of complex rotation, we use a single, highly compatible configuration
+            # that prefers m4a/opus but accepts anything.
+            # We strictly enforce the proxy if found.
             
+            ytdl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+                'restrictfilenames': True,
+                'noplaylist': True,
+                'nocheckcertificate': True,
+                'ignoreerrors': False,
+                'logtostderr': False,
+                'quiet': True,
+                'no_warnings': True,
+                'default_search': 'auto',
+                'source_address': '0.0.0.0',
+                # Force IPv4 can help with some blocks
+                'force_ipv4': True,
+            }
+            
+            if cookie_path:
+                ytdl_opts['cookiefile'] = cookie_path
+                
+            if proxy_url:
+                ytdl_opts['proxy'] = proxy_url
+
+            ytdl = yt_dlp.YoutubeDL(ytdl_opts)
             data = None
-            last_error = None
-
-            for strategy in strategies:
+            
+            try:
+                # Try standard first
+                data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
+            except Exception as e:
+                # Fallback: Try grabbing "worst" just to get any stream
+                print(f"⚠️ Standard extract failed: {e}. Retrying with 'worst' format...")
                 try:
-                    # print(f"🔄 Strategy: {strategy['desc']}...")
-                    ytdl_opts = {
-                        'format': strategy['format'],
-                        'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-                        'restrictfilenames': True,
-                        'noplaylist': True,
-                        'nocheckcertificate': True,
-                        'ignoreerrors': False,
-                        'logtostderr': False,
-                        'quiet': True,
-                        'no_warnings': True,
-                        'default_search': 'auto',
-                        'source_address': '0.0.0.0',
-                        'cachedir': False,
-                    }
-                    
-                    if strategy['client']:
-                        ytdl_opts['extractor_args'] = {'youtube': {'player_client': [strategy['client']]}}
-
-                    # ALWAYS use cookies if available
-                    if cookie_path:
-                        ytdl_opts['cookiefile'] = cookie_path
-                        
-                    if proxy_url:
-                        ytdl_opts['proxy'] = proxy_url
-
+                    ytdl_opts['format'] = 'worst'
                     ytdl = yt_dlp.YoutubeDL(ytdl_opts)
                     data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
-                    
-                    if data:
-                        print(f"✅ Success! Unblocked with {strategy['desc']}.")
-                        break
-                except Exception as e:
-                    last_error = e
-                    continue
-            
+                except Exception as e2:
+                    print(f"❌ Fallback failed: {e2}")
+                    raise e2
+
             if not data:
-                print("❌ All strategies failed. Please check 'ffmpeg' and 'pysocks' are installed.")
-                raise Exception(f"Failed to fetch stream. Last error: {last_error}")
+                raise Exception("Could not fetch stream data.")
 
             if 'entries' in data:
                 data = data['entries'][0]
@@ -313,7 +286,7 @@ class Music(commands.Cog):
             
             # FFMPEG Options
             ffmpeg_opts = {
-                'options': '-vn', # Explicitly disable video output
+                'options': '-vn',
                 'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
             }
             
