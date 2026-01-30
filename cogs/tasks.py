@@ -279,17 +279,34 @@ class Tasks(commands.Cog, name="tasks"):
                 # Remove from DB
                 self.bot.db.delete_doc("tasks_active", "message_id", existing_doc['message_id'])
 
-            await interaction.response.send_message(f"I've set your tasks to {number}! Run `/progress` to see your bar.", ephemeral=True)
+            # Prepare new state
+            state = [0] * number
+            
+            # Create View immediately
+            view = TaskView(
+                cog=self,
+                user_id=interaction.user.id,
+                total=number,
+                state=state
+            )
+            
+            content = f"<@{interaction.user.id}>'s tasks: 0/{number}\n{view.get_emoji_bar()}"
+            # Send Publicly
+            await interaction.response.send_message(content, view=view)
+            
+            msg = await interaction.original_response()
+            view.message_id = msg.id
             
             # Create new entry
             new_doc = {
                  "user_id": interaction.user.id,
                  "guild_id": interaction.guild.id, 
                  "total": number,
-                 "state": [0] * number,
-                 "message_id": None, 
+                 "state": state,
+                 "message_id": msg.id, 
                  "channel_id": interaction.channel_id
             }
+            # Append to DB
             current_active = self.bot.db.get_collection("tasks_active")
             current_active.append(new_doc)
             self.bot.db.save_collection("tasks_active", current_active)
@@ -301,6 +318,14 @@ class Tasks(commands.Cog, name="tasks"):
             if not existing_doc:
                 return await interaction.response.send_message("You don't have an active task list to change! Use `/tasks set` first.", ephemeral=True)
             
+            # Cleanup old message view
+            try:
+                chan = self.bot.get_channel(existing_doc.get('channel_id'))
+                if chan:
+                    msg = await chan.fetch_message(existing_doc.get('message_id'))
+                    await msg.edit(view=None)
+            except: pass
+            
             old_total = existing_doc['total']
             state = existing_doc['state']
             
@@ -310,8 +335,23 @@ class Tasks(commands.Cog, name="tasks"):
             elif number < old_total:
                 state = state[:number]
             
-            self.bot.db.update_doc("tasks_active", "message_id", existing_doc['message_id'], {"total": number, "state": state})
-            await interaction.response.send_message(f"I've changed your total tasks to {number}! Your progress has been saved. Run `/progress` to refresh the bar.", ephemeral=True)
+            # Create View immediately
+            view = TaskView(
+                cog=self,
+                user_id=interaction.user.id,
+                total=number,
+                state=state
+            )
+            
+            content = f"<@{interaction.user.id}>'s tasks: {state.count(1) + state.count(2)}/{number}\n{view.get_emoji_bar()}"
+            # Send Publicly
+            await interaction.response.send_message(content, view=view)
+            
+            msg = await interaction.original_response()
+            view.message_id = msg.id
+            
+            self.bot.db.update_doc("tasks_active", "message_id", existing_doc['message_id'], 
+                                   {"total": number, "state": state, "message_id": msg.id, "channel_id": interaction.channel_id})
 
     @app_commands.command(name="progress", description="Shows your progress bar and buttons.", extras={'public': True})
     async def progress(self, interaction: discord.Interaction):
