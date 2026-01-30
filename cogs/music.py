@@ -167,12 +167,6 @@ class Music(commands.Cog):
         if yt_dlp:
             yt_dlp.utils.bug_reports_message = lambda *args, **kwargs: ''
 
-        # Streaming Options for FFMPEG
-        self.ffmpeg_options = {
-            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-            'options': '-vn'
-        }
-
         # Playback State
         self.music_queues = {} # {guild_id: [track_data, ...]}
         self.current_song = {} # {guild_id: track_data}
@@ -351,7 +345,6 @@ class Music(commands.Cog):
             
             try:
                 # Extract URL without downloading
-                # We specifically do NOT download here
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     data = await loop.run_in_executor(None, lambda: ydl.extract_info(track_data['url'], download=False))
                 
@@ -361,15 +354,37 @@ class Music(commands.Cog):
                 stream_url = data.get('url')
                 if not stream_url:
                     print(f"❌ Failed to get stream URL for {track_data['title']}")
+                    # Alert users if interaction is available, otherwise console
+                    if interaction: 
+                         try: await interaction.followup.send(f"⚠️ Could not extract stream URL for **{track_data['title']}**", ephemeral=True)
+                         except: pass
                     self.play_next_song(guild)
                     return
 
-                # Create Audio Source directly from URL
-                source = discord.FFmpegPCMAudio(stream_url, **self.ffmpeg_options)
+                # --- CRITICAL FIX: PASS HEADERS TO FFMPEG ---
+                # FFmpeg needs the same User-Agent and Cookies that yt-dlp used to access the URL
+                ffmpeg_before_options = '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
+                
+                if 'http_headers' in data:
+                    headers = ""
+                    for key, value in data['http_headers'].items():
+                        headers += f"{key}: {value}\r\n"
+                    # Add headers argument to ffmpeg
+                    if headers:
+                        ffmpeg_before_options += f' -headers "{headers}"'
+
+                # Create Audio Source directly from URL with HEADERS
+                source = discord.FFmpegPCMAudio(stream_url, before_options=ffmpeg_before_options, options='-vn')
                 
                 def after_playing(error):
-                    if error: print(f"❌ Player Error: {error}")
-                    
+                    if error: 
+                        print(f"❌ Player Error: {error}")
+                        if interaction:
+                            try:
+                                # We can't await here easily, but we can print
+                                pass 
+                            except: pass
+
                     if guild.id not in self.history: self.history[guild.id] = []
                     self.history[guild.id].append(track_data)
                     
@@ -380,11 +395,11 @@ class Music(commands.Cog):
                     self.play_next_song(guild)
 
                 if guild.voice_client:
-                    guild.voice_client.play(source, after=after_playing)
-                    print(f"▶️ Streaming: {track_data['title']}")
-                    
-                    # Send Embed
                     try:
+                        guild.voice_client.play(source, after=after_playing)
+                        print(f"▶️ Streaming: {track_data['title']}")
+                        
+                        # Send Embed
                         config = self.load_config(guild.id)
                         if config.get('music_channel_id'):
                             chan = guild.get_channel(config['music_channel_id'])
@@ -392,10 +407,18 @@ class Music(commands.Cog):
                                 embed = discord.Embed(title="🎵 Now Streaming", description=f"[{track_data['title']}]({track_data['url']})", color=discord.Color(0xff90aa))
                                 embed.add_field(name="Requested By", value=track_data.get('user', 'Unknown'))
                                 await chan.send(embed=embed, view=MusicControls(self, guild))
-                    except: pass
+                    except Exception as e:
+                        print(f"❌ Play Error: {e}")
+                        if interaction:
+                             try: await interaction.followup.send(f"❌ Playback Error: {e}", ephemeral=True)
+                             except: pass
+                        self.play_next_song(guild)
 
             except Exception as e:
                 print(f"❌ Streaming Error: {e}")
+                if interaction:
+                     try: await interaction.followup.send(f"❌ Streaming Error: {e}", ephemeral=True)
+                     except: pass
                 self.play_next_song(guild)
 
         asyncio.run_coroutine_threadsafe(stream_audio(), self.bot.loop)
