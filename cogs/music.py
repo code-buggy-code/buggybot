@@ -10,7 +10,7 @@ import sys
 import time
 import random
 import shutil
-import socket # Added to check proxy connection
+import socket # Still useful for network checks if needed
 
 # Safe Imports for External Libraries
 try:
@@ -226,91 +226,48 @@ class Music(commands.Cog):
         async def from_url(cls, url, *, loop=None, stream=True, cookie_path=None):
             loop = loop or asyncio.get_event_loop()
             
-            # --- PROXY AUTO-DETECTION ---
-            # Explicitly check if WARP/SOCKS5 is listening on 40000
-            proxy_url = None
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(0.5)
-                result = sock.connect_ex(('127.0.0.1', 40000))
-                if result == 0:
-                    proxy_url = "socks5://127.0.0.1:40000"
-                    print("✅ Cloudflare WARP detected! Tunneling traffic...")
-                sock.close()
-            except:
-                pass
-
-            # STRATEGIES
-            # We mix client types with/without cookies to find a combo that works
-            strategies = [
-                # 1. Android with Cookies (Standard authenticated) - High Quality
-                {'format': 'bestaudio/best', 'client': 'android', 'desc': 'Android (Auth)', 'use_cookies': True},
-                
-                # 2. TV Embedded (Most robust against blocks, no cookies to be safe)
-                {'format': 'best', 'client': 'tv_embedded', 'desc': 'TV Embedded', 'use_cookies': False},
-                
-                # 3. iOS with Cookies (Alternate auth)
-                {'format': 'bestaudio/best', 'client': 'ios', 'desc': 'iOS (Auth)', 'use_cookies': True},
-                
-                # 4. Android Music (Good for songs)
-                {'format': 'bestaudio/best', 'client': 'android_music', 'desc': 'Android Music', 'use_cookies': True},
-                
-                # 5. Web Client (Last resort, no cookies)
-                {'format': 'best', 'client': 'web', 'desc': 'Web', 'use_cookies': False},
-                
-                # 6. Desperation Mode (Anything goes)
-                {'format': 'worst', 'client': 'android', 'desc': 'Potato Mode', 'use_cookies': False},
-            ]
+            # SIMPLIFIED: Just rely on cookies and standard best audio
+            # If cookies are provided, they are the best authentication
+            ytdl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+                'restrictfilenames': True,
+                'noplaylist': True,
+                'nocheckcertificate': True,
+                'ignoreerrors': False,
+                'logtostderr': False,
+                'quiet': True,
+                'no_warnings': True,
+                'default_search': 'auto',
+                'source_address': '0.0.0.0',
+            }
             
+            if cookie_path:
+                ytdl_opts['cookiefile'] = cookie_path
+                print(f"🍪 Using cookies.txt for auth")
+
+            ytdl = yt_dlp.YoutubeDL(ytdl_opts)
             data = None
-            last_error = None
-
-            for strategy in strategies:
-                try:
-                    # print(f"🔄 Strategy: {strategy['desc']}...")
-                    ytdl_opts = {
-                        'format': strategy['format'],
-                        'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-                        'restrictfilenames': True,
-                        'noplaylist': True,
-                        'nocheckcertificate': True,
-                        'ignoreerrors': False,
-                        'logtostderr': False,
-                        'quiet': True,
-                        'no_warnings': True,
-                        'default_search': 'auto',
-                        'source_address': '0.0.0.0',
-                        'cachedir': False,
-                        'extractor_args': {
-                            'youtube': {
-                                'player_client': [strategy['client']]
-                            }
-                        },
-                        'http_headers': {
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                        }
-                    }
-                    
-                    if strategy['use_cookies'] and cookie_path:
-                        ytdl_opts['cookiefile'] = cookie_path
-                        print(f"🍪 Using cookies for {strategy['desc']}")
-                        
-                    if proxy_url:
-                        ytdl_opts['proxy'] = proxy_url
-
-                    ytdl = yt_dlp.YoutubeDL(ytdl_opts)
-                    data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
-                    
-                    if data:
-                        print(f"✅ Success! Unblocked with {strategy['desc']}.")
-                        break
-                except Exception as e:
-                    last_error = e
-                    continue
+            
+            try:
+                data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
+            except Exception as e:
+                print(f"❌ Standard extraction failed: {e}")
+                # Retry with fallback if needed, but cookies usually fix it
+                pass
             
             if not data:
-                print("❌ All strategies failed. 1. Check VPN/Proxy. 2. pip install pysocks")
-                raise Exception(f"Failed to fetch stream. Last error: {last_error}")
+                # Last ditch effort: TV embedded client
+                print("⚠️ Retrying with TV Embedded client...")
+                ytdl_opts['extractor_args'] = {'youtube': {'player_client': ['tv_embedded']}}
+                ytdl = yt_dlp.YoutubeDL(ytdl_opts)
+                try:
+                    data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
+                except Exception as e:
+                    print(f"❌ TV Embedded failed: {e}")
+            
+            if not data:
+                raise Exception("Could not fetch stream. Please check cookies.txt validity.")
 
             if 'entries' in data:
                 data = data['entries'][0]
