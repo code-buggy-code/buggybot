@@ -243,11 +243,11 @@ class Music(commands.Cog):
             # STRATEGIES
             # We mix client types with/without cookies to find a combo that works
             strategies = [
-                # 1. TV Embedded (Most robust against blocks, no cookies to be safe)
-                {'format': 'best', 'client': 'tv_embedded', 'desc': 'TV Embedded', 'use_cookies': False},
-                
-                # 2. Android with Cookies (Standard authenticated)
+                # 1. Android with Cookies (Standard authenticated) - High Quality
                 {'format': 'bestaudio/best', 'client': 'android', 'desc': 'Android (Auth)', 'use_cookies': True},
+                
+                # 2. TV Embedded (Most robust against blocks, no cookies to be safe)
+                {'format': 'best', 'client': 'tv_embedded', 'desc': 'TV Embedded', 'use_cookies': False},
                 
                 # 3. iOS with Cookies (Alternate auth)
                 {'format': 'bestaudio/best', 'client': 'ios', 'desc': 'iOS (Auth)', 'use_cookies': True},
@@ -285,11 +285,15 @@ class Music(commands.Cog):
                             'youtube': {
                                 'player_client': [strategy['client']]
                             }
+                        },
+                        'http_headers': {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                         }
                     }
                     
                     if strategy['use_cookies'] and cookie_path:
                         ytdl_opts['cookiefile'] = cookie_path
+                        print(f"🍪 Using cookies for {strategy['desc']}")
                         
                     if proxy_url:
                         ytdl_opts['proxy'] = proxy_url
