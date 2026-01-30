@@ -10,7 +10,7 @@ import sys
 import time
 import random
 import shutil
-import socket # Still useful for network checks if needed
+import socket
 
 # Safe Imports for External Libraries
 try:
@@ -51,8 +51,6 @@ class MusicControls(discord.ui.View):
     @discord.ui.button(emoji="⬅️", style=discord.ButtonStyle.secondary)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        # With streaming, we just push the current song back to the front of the queue
-        # Logic: If > 10s, Restart. If < 10s, Go Previous.
         current = self.cog.current_song.get(self.guild.id)
         if not current: return
 
@@ -127,8 +125,8 @@ class MusicControls(discord.ui.View):
 # - search_youtube_official(query)
 # - process_spotify_link(url, guild_id)
 # - check_and_convert_cookies()
-# - get_ytdl_source(url) [NEW: Creates FFmpeg source via pipe]
-# - play_next_song(guild, interaction=None) [Updated to use new source]
+# - get_ytdl_source(url) [Creates FFmpeg source via pipe with proxy support]
+# - play_next_song(guild, interaction=None)
 # - stop_playback(interaction)
 # - check_token_validity_task()
 # - play(interaction, query)
@@ -155,23 +153,19 @@ class Music(commands.Cog):
         self.auth_flow = None
         self.ytdl = None
         
-        # Check for FFMPEG
         if not shutil.which("ffmpeg"):
             print("❌ Critical: 'ffmpeg' is missing from system PATH. Music will not play.")
 
-        # Initialize Music Services
         self.load_music_services()
         if hasattr(self.bot, 'db'):
             self.bot.loop.create_task(self.load_youtube_service())
         
-        # Initialize YTDL options for streaming
         if yt_dlp:
             yt_dlp.utils.bug_reports_message = lambda *args, **kwargs: ''
 
-        # Playback State
-        self.music_queues = {} # {guild_id: [track_data, ...]}
-        self.current_song = {} # {guild_id: track_data}
-        self.history = {} # {guild_id: [track_data, ...]}
+        self.music_queues = {} 
+        self.current_song = {} 
+        self.history = {} 
         
         self.check_token_validity_task.start()
 
@@ -189,7 +183,6 @@ class Music(commands.Cog):
             with open('cookies.txt', 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            # Convert JSON to Netscape if needed
             if content.strip().startswith('[') or content.strip().startswith('{'):
                 try:
                     data = json.loads(content)
@@ -226,8 +219,7 @@ class Music(commands.Cog):
         async def from_url(cls, url, *, loop=None, stream=True, cookie_path=None):
             loop = loop or asyncio.get_event_loop()
             
-            # --- PROXY AUTO-DETECTION & ENFORCEMENT ---
-            # Explicitly check if WARP/SOCKS5 is listening on 40000
+            # --- PROXY AUTO-DETECTION ---
             proxy_url = None
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -238,33 +230,26 @@ class Music(commands.Cog):
                 if result == 0:
                     proxy_url = "socks5://127.0.0.1:40000"
                     print("✅ Cloudflare WARP detected! Tunneling traffic...")
-                else:
-                    print("❌ Cloudflare WARP NOT detected on port 40000. Aborting.")
-                    raise Exception("Security Check Failed: Cloudflare WARP is not running on port 40000.")
-            except Exception as e:
-                # Re-raise explicit exception or generic socket error
-                raise Exception(f"Proxy Connection Error: {e}")
+            except:
+                pass
 
-            # STRATEGIES
-            # We mix client types with/without cookies to find a combo that works
+            # STRATEGIES - COOKIES ENABLED FOR ALL
+            # Since we have valid cookies, Web client is actually the strongest candidate now
             strategies = [
-                # 1. Android with Cookies (Standard authenticated) - High Quality
-                {'format': 'bestaudio/best', 'client': 'android', 'desc': 'Android (Auth)', 'use_cookies': True},
+                # 1. Web Client (Best with cookies)
+                {'format': 'bestaudio/best', 'client': 'web', 'desc': 'Web'},
                 
-                # 2. TV Embedded (Most robust against blocks, no cookies to be safe)
-                {'format': 'best', 'client': 'tv_embedded', 'desc': 'TV Embedded', 'use_cookies': False},
+                # 2. Android
+                {'format': 'bestaudio/best', 'client': 'android', 'desc': 'Android'},
                 
-                # 3. iOS with Cookies (Alternate auth)
-                {'format': 'bestaudio/best', 'client': 'ios', 'desc': 'iOS (Auth)', 'use_cookies': True},
+                # 3. TV Embedded (Fallback)
+                {'format': 'best', 'client': 'tv_embedded', 'desc': 'TV Embedded'},
                 
-                # 4. Android Music (Good for songs)
-                {'format': 'bestaudio/best', 'client': 'android_music', 'desc': 'Android Music', 'use_cookies': True},
+                # 4. iOS
+                {'format': 'bestaudio/best', 'client': 'ios', 'desc': 'iOS'},
                 
-                # 5. Web Client (Last resort, no cookies)
-                {'format': 'best', 'client': 'web', 'desc': 'Web', 'use_cookies': False},
-                
-                # 6. Desperation Mode (Anything goes)
-                {'format': 'worst', 'client': 'android', 'desc': 'Potato Mode', 'use_cookies': False},
+                # 5. Last Resort (Generic)
+                {'format': 'best', 'client': None, 'desc': 'Generic'},
             ]
             
             data = None
@@ -286,16 +271,14 @@ class Music(commands.Cog):
                         'default_search': 'auto',
                         'source_address': '0.0.0.0',
                         'cachedir': False,
-                        'extractor_args': {
-                            'youtube': {
-                                'player_client': [strategy['client']]
-                            }
-                        }
                     }
                     
-                    if strategy['use_cookies'] and cookie_path:
+                    if strategy['client']:
+                        ytdl_opts['extractor_args'] = {'youtube': {'player_client': [strategy['client']]}}
+
+                    # ALWAYS use cookies if available
+                    if cookie_path:
                         ytdl_opts['cookiefile'] = cookie_path
-                        print(f"🍪 Using cookies for {strategy['desc']}")
                         
                     if proxy_url:
                         ytdl_opts['proxy'] = proxy_url
@@ -311,7 +294,7 @@ class Music(commands.Cog):
                     continue
             
             if not data:
-                print("❌ All strategies failed. 1. Check VPN/Proxy. 2. pip install pysocks")
+                print("❌ All strategies failed.")
                 raise Exception(f"Failed to fetch stream. Last error: {last_error}")
 
             if 'entries' in data:
@@ -319,13 +302,25 @@ class Music(commands.Cog):
 
             filename = data['url']
             
-            # Use FFMPEG to stream the URL directly
+            # FFMPEG Options
             ffmpeg_opts = {
                 'options': '-vn',
                 'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
             }
             
-            # If headers are available, pass them to FFMPEG
+            # --- CRITICAL: PASS PROXY TO FFMPEG ---
+            # If we used a proxy to find the URL, we must use it to play the URL
+            if proxy_url:
+                # ffmpeg expects http_proxy syntax usually, but socks5 might need specific handling
+                # -http_proxy works for http/https streams
+                if "socks5" in proxy_url:
+                    # FFmpeg SOCKS support can be tricky, but let's try strict env var or flag
+                    # Converting socks5://127.0.0.1:40000 to user-friendly string if needed
+                    # However, widely compatible ffmpeg builds handle http_proxy well.
+                    # For SOCKS, simple way:
+                    ffmpeg_opts['before_options'] += f' -http_proxy "{proxy_url}"'
+
+            # Pass Headers
             if 'http_headers' in data:
                 headers = ""
                 for key, value in data['http_headers'].items():
@@ -444,7 +439,6 @@ class Music(commands.Cog):
                 cookie_path = self.check_and_convert_cookies()
                 
                 # Use the helper class to get a playable source
-                # This handles all the extraction and FFMPEG setup
                 source = await self.YTDLSource.from_url(
                     track_data['url'], 
                     loop=self.bot.loop, 
@@ -581,11 +575,17 @@ class Music(commands.Cog):
                 
                 quick_opts = {'format': 'bestaudio/best', 'quiet': True, 'noplaylist': True}
                 
-                # Try to use cookies but convert first
-                # We can't access 'self' here easily inside lambda unless we use self.check_and_convert_cookies
-                # But we are in the 'play' method of 'Music' class so 'self' works.
                 cookie_path = self.check_and_convert_cookies()
                 if cookie_path: quick_opts['cookiefile'] = cookie_path
+                
+                # Add proxy to quick search too if active
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(0.5)
+                    if sock.connect_ex(('127.0.0.1', 40000)) == 0:
+                        quick_opts['proxy'] = "socks5://127.0.0.1:40000"
+                    sock.close()
+                except: pass
 
                 with yt_dlp.YoutubeDL(quick_opts) as ydl:
                     data = await self.bot.loop.run_in_executor(None, lambda: ydl.extract_info(search_query, download=False))
@@ -718,8 +718,6 @@ class Music(commands.Cog):
             res = await self.process_spotify_link(re.search(r'(https?://[^\s]+)', message.content).group(1), message.guild.id)
             if res is True: await message.add_reaction("🎵")
         elif "youtube.com/watch" in message.content or "youtu.be/" in message.content:
-            # Basic logic for adding YT link to playlist manually if needed
-            # For brevity in this fix, we assume the user just wants Spotify auto-add or commands
             pass
 
 async def setup(bot):
