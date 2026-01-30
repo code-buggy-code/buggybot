@@ -10,6 +10,7 @@ import sys
 import time
 import random
 import shutil
+import socket # Added to check proxy connection
 
 # Safe Imports for External Libraries
 try:
@@ -225,32 +226,48 @@ class Music(commands.Cog):
         async def from_url(cls, url, *, loop=None, stream=True, cookie_path=None):
             loop = loop or asyncio.get_event_loop()
             
-            # CHAMELEON MODE: Rotate Clients to unblock
+            # --- PROXY AUTO-DETECTION ---
+            # Explicitly check if WARP/SOCKS5 is listening on 40000
+            proxy_url = None
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(0.5)
+                result = sock.connect_ex(('127.0.0.1', 40000))
+                if result == 0:
+                    proxy_url = "socks5://127.0.0.1:40000"
+                    print("✅ Cloudflare WARP detected! Tunneling traffic...")
+                sock.close()
+            except:
+                pass
+
+            # STRATEGIES
+            # We mix client types with/without cookies to find a combo that works
             strategies = [
-                # 1. Android Embed (The Magic Key) - Mimics embedded player
-                {'format': 'bestaudio/best', 'client': 'android_embed', 'desc': 'Android Embed'},
-                # 2. Android - High Quality
-                {'format': 'bestaudio/best', 'client': 'android', 'desc': 'Android (HQ)'},
-                # 3. iOS - High Quality (Alt)
-                {'format': 'bestaudio/best', 'client': 'ios', 'desc': 'iOS (HQ)'},
-                # 4. TV Embedded - Alternate Access (Very Robust)
-                {'format': 'best', 'client': 'tv_embedded', 'desc': 'TV Embedded'},
-                # 5. Web - Browser emulation
-                {'format': 'best', 'client': 'web', 'desc': 'Web'},
-                # 6. Desperation Mode - Just give me literally anything (Video or Audio)
-                {'format': 'worst', 'client': 'android', 'desc': 'Potato Mode (Worst)'},
+                # 1. TV Embedded (Most robust against blocks, no cookies to be safe)
+                {'format': 'best', 'client': 'tv_embedded', 'desc': 'TV Embedded', 'use_cookies': False},
+                
+                # 2. Android with Cookies (Standard authenticated)
+                {'format': 'bestaudio/best', 'client': 'android', 'desc': 'Android (Auth)', 'use_cookies': True},
+                
+                # 3. iOS with Cookies (Alternate auth)
+                {'format': 'bestaudio/best', 'client': 'ios', 'desc': 'iOS (Auth)', 'use_cookies': True},
+                
+                # 4. Android Music (Good for songs)
+                {'format': 'bestaudio/best', 'client': 'android_music', 'desc': 'Android Music', 'use_cookies': True},
+                
+                # 5. Web Client (Last resort, no cookies)
+                {'format': 'best', 'client': 'web', 'desc': 'Web', 'use_cookies': False},
+                
+                # 6. Desperation Mode (Anything goes)
+                {'format': 'worst', 'client': 'android', 'desc': 'Potato Mode', 'use_cookies': False},
             ]
             
-            # --- PROXY CONFIGURATION ---
-            # Automatically use the default Cloudflare WARP Proxy port
-            proxy_url = "socks5://127.0.0.1:40000" 
-
             data = None
             last_error = None
 
             for strategy in strategies:
                 try:
-                    print(f"🔄 Trying to unblock using: {strategy['desc']}...")
+                    # print(f"🔄 Strategy: {strategy['desc']}...")
                     ytdl_opts = {
                         'format': strategy['format'],
                         'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
@@ -271,12 +288,10 @@ class Music(commands.Cog):
                         }
                     }
                     
-                    if cookie_path:
+                    if strategy['use_cookies'] and cookie_path:
                         ytdl_opts['cookiefile'] = cookie_path
                         
                     if proxy_url:
-                        # Only apply proxy if it's actually running (simple check by trying to use it)
-                        # For now, we assume if the user set up WARP, they want it used.
                         ytdl_opts['proxy'] = proxy_url
 
                     ytdl = yt_dlp.YoutubeDL(ytdl_opts)
@@ -287,12 +302,11 @@ class Music(commands.Cog):
                         break
                 except Exception as e:
                     last_error = e
-                    # print(f"⚠️ {strategy['desc']} failed: {e}")
                     continue
             
             if not data:
-                print("❌ All strategies failed. Try updating yt-dlp: pip install -U yt-dlp")
-                raise Exception(f"All unblock strategies failed. Last error: {last_error}")
+                print("❌ All strategies failed. 1. Check VPN/Proxy. 2. pip install pysocks")
+                raise Exception(f"Failed to fetch stream. Last error: {last_error}")
 
             if 'entries' in data:
                 data = data['entries'][0]
