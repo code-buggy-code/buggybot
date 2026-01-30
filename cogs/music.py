@@ -241,10 +241,9 @@ class Music(commands.Cog):
                 {'format': 'worst', 'client': 'android', 'desc': 'Potato Mode (Worst)'},
             ]
             
-            # If you have a proxy URL (e.g., http://user:pass@host:port), set it here manually for now
-            # or load it from a config/env var.
-            # proxy_url = "http://user:pass@host:port" 
-            proxy_url = None 
+            # --- PROXY CONFIGURATION ---
+            # Automatically use the default Cloudflare WARP Proxy port
+            proxy_url = "socks5://127.0.0.1:40000" 
 
             data = None
             last_error = None
@@ -276,6 +275,8 @@ class Music(commands.Cog):
                         ytdl_opts['cookiefile'] = cookie_path
                         
                     if proxy_url:
+                        # Only apply proxy if it's actually running (simple check by trying to use it)
+                        # For now, we assume if the user set up WARP, they want it used.
                         ytdl_opts['proxy'] = proxy_url
 
                     ytdl = yt_dlp.YoutubeDL(ytdl_opts)
