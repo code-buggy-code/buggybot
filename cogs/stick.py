@@ -12,8 +12,8 @@ from typing import Literal
 # - save_stickies(stickies)
 # - get_sticky_settings()
 # - save_sticky_settings(settings)
-# - send_sticky(channel) [New Helper]
-# - sticky_task(channel, delay) [New Task]
+# - send_sticky(channel)
+# - sticky_task(channel, delay)
 # - handle_sticky(message)
 # - on_message(message)
 # - on_message_delete(message)
@@ -25,8 +25,8 @@ class Stickies(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.description = "Manage sticky messages."
-        self.ignore_ids = set()
         self.pending_tasks = {} # {channel_id: asyncio.Task}
+        self.reposting = set()  # {channel_id} - Safety lock to prevent race conditions
 
     # --- HELPERS ---
 
@@ -48,44 +48,54 @@ class Stickies(commands.Cog):
 
     async def send_sticky(self, channel):
         """Actually sends the sticky message."""
-        stickies = self.get_stickies()
-        sticky_data = next((s for s in stickies if s['channel_id'] == channel.id), None)
-        
-        if not sticky_data: return
+        # Safety Lock: Prevent concurrent sends in the same channel
+        # This prevents the "triggers itself once" race condition where the bot sees its own new sticky
+        if channel.id in self.reposting:
+            return
 
-        # Check if the last message is already the sticky to avoid double posting
-        # (Though logic usually handles deletion, this is a safety check)
-        if channel.last_message_id == sticky_data.get('last_message_id'):
-             return
-
-        # Delete old sticky
-        if sticky_data.get('last_message_id'):
-            try:
-                old_msg = await channel.fetch_message(sticky_data['last_message_id'])
-                await old_msg.delete()
-            except (discord.NotFound, discord.HTTPException):
-                pass
-        
-        # Send new sticky
+        self.reposting.add(channel.id)
         try:
-            embed = discord.Embed(description=sticky_data['content'], color=discord.Color(0xff90aa))
-            new_msg = await channel.send(embed=embed)
+            stickies = self.get_stickies()
+            sticky_data = next((s for s in stickies if s['channel_id'] == channel.id), None)
             
-            self.ignore_ids.add(new_msg.id)
+            if not sticky_data: return
 
-            sticky_data['last_message_id'] = new_msg.id
-            sticky_data['last_posted_at'] = datetime.datetime.now().timestamp()
-            sticky_data['active'] = True
+            # Check if the last message is already the sticky to avoid double posting
+            if channel.last_message_id == sticky_data.get('last_message_id'):
+                 return
 
-            self.bot.db.update_doc("sticky_messages", "channel_id", channel.id, sticky_data)
+            # Delete old sticky
+            if sticky_data.get('last_message_id'):
+                try:
+                    old_msg = await channel.fetch_message(sticky_data['last_message_id'])
+                    await old_msg.delete()
+                except (discord.NotFound, discord.HTTPException):
+                    pass
+            
+            # Send new sticky
+            try:
+                embed = discord.Embed(description=sticky_data['content'], color=discord.Color(0xff90aa))
+                new_msg = await channel.send(embed=embed)
+                
+                sticky_data['last_message_id'] = new_msg.id
+                sticky_data['last_posted_at'] = datetime.datetime.now().timestamp()
+                sticky_data['active'] = True
 
-        except Exception as e:
-            print(f"Failed to send sticky: {e}")
+                self.bot.db.update_doc("sticky_messages", "channel_id", channel.id, sticky_data)
+
+            except Exception as e:
+                print(f"Failed to send sticky: {e}")
+        finally:
+            # Always release the lock so the next message can trigger it
+            self.reposting.discard(channel.id)
 
     async def sticky_task(self, channel, delay):
         """Waits for delay then sends sticky."""
         try:
             await asyncio.sleep(delay)
+            # Re-fetch channel to ensure freshness
+            if not channel: return
+            
             await self.send_sticky(channel)
         except asyncio.CancelledError:
             pass
@@ -141,27 +151,22 @@ class Stickies(commands.Cog):
     async def on_message(self, message):
         """Handles sticky message triggering."""
         if not message.guild: return
+        
+        # FIX: Ignore ALL bot messages (including self) to prevent loops
+        if message.author.bot: return
 
         stickies = self.get_stickies()
         sticky_data = next((s for s in stickies if s['channel_id'] == message.channel.id), None)
         
         if sticky_data:
             if not sticky_data.get('active', True): return
-            if message.id in self.ignore_ids:
-                self.ignore_ids.discard(message.id)
-                return
             if sticky_data.get('last_message_id') == message.id: return
-
-            is_me = (message.author.id == self.bot.user.id)
-            if message.author.bot and not is_me: return
 
             await self.handle_sticky(message)
 
     @commands.Cog.listener()
     async def on_message_delete(self, message):
         """Prevents log spam if a sticky is deleted by the bot logic."""
-        # Note: The main logic for ignoring sticky logs is usually handled in the Logger cog,
-        # but stickies manage their own deletion logic in handle_sticky.
         pass
 
     # --- SLASH COMMANDS ---
