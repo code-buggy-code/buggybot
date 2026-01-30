@@ -231,19 +231,28 @@ class Music(commands.Cog):
             except: pass
 
             # ROBUST STRATEGIES
+            # If YouTube blocks outright, we need to mimic real users better.
+            # 1. Relaxed Mode: Do NOT bind to 0.0.0.0 or force IPv4. Let the OS/Network decide.
+            # 2. Add fake Browser Headers to request.
             strategies = [
-                # 1. Android + Cookies (Often most reliable)
-                {'format': 'bestaudio/best', 'client': 'android', 'desc': 'Android Client'},
-                # 2. Web Client + Cookies (Standard)
-                {'format': 'bestaudio/best', 'client': 'web', 'desc': 'Web Client'},
-                # 3. iOS + Cookies
-                {'format': 'bestaudio/best', 'client': 'ios', 'desc': 'iOS Client'},
-                # 4. TV Embedded (No cookies usually, but robust)
-                {'format': 'best', 'client': 'tv_embedded', 'desc': 'TV Embedded'},
-                # 5. Generic (Let yt-dlp decide, useful if clients are broken)
-                {'format': 'bestaudio/best', 'client': None, 'desc': 'Generic'},
+                # 1. Relaxed Network (Best for avoiding IP blocks)
+                {'format': 'bestaudio/best', 'client': None, 'desc': 'Relaxed Network', 'relaxed': True},
+                # 2. Android Client (Good for throttling)
+                {'format': 'bestaudio/best', 'client': 'android', 'desc': 'Android Audio'},
+                # 3. TV Embedded (Fallback for blocked formats)
+                {'format': 'best', 'client': 'tv_embedded', 'desc': 'TV Embedded (Fallback)'},
+                # 4. Web Client (Standard)
+                {'format': 'bestaudio/best', 'client': 'web', 'desc': 'Web Audio'},
+                # 5. iOS
+                {'format': 'bestaudio/best', 'client': 'ios', 'desc': 'iOS Audio'},
             ]
             
+            # Common "Real Browser" headers to reduce blocking
+            common_headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
+
             data = None
             last_error = None
 
@@ -255,15 +264,19 @@ class Music(commands.Cog):
                         'restrictfilenames': True,
                         'noplaylist': True,
                         'nocheckcertificate': True,
-                        'ignoreerrors': False,
+                        'ignoreerrors': False, 
                         'logtostderr': False,
                         'quiet': True,
                         'no_warnings': True,
                         'default_search': 'auto',
-                        'source_address': '0.0.0.0',
-                        'force_ipv4': True, # CRITICAL for Oracle Cloud, but can fail on others
                         'cachedir': False,
+                        'http_headers': common_headers
                     }
+
+                    # Only force network settings if NOT in relaxed mode
+                    if not strategy.get('relaxed'):
+                        ytdl_opts['source_address'] = '0.0.0.0'
+                        ytdl_opts['force_ipv4'] = True
                     
                     if strategy.get('client'):
                         ytdl_opts['extractor_args'] = {'youtube': {'player_client': [strategy['client']]}}
@@ -285,26 +298,12 @@ class Music(commands.Cog):
                     last_error = e
                     continue
             
-            # FALLBACK: If all strategies failed, try "Relaxed Mode" (No IPv4 forcing, no source address binding)
-            if not data:
-                print("⚠️ Standard strategies failed. Trying Relaxed Network Mode...")
-                try:
-                    ytdl_opts = {
-                        'format': 'bestaudio/best',
-                        'noplaylist': True,
-                        'quiet': True,
-                        'default_search': 'auto',
-                        # No source_address, no force_ipv4
-                    }
-                    if cookie_path: ytdl_opts['cookiefile'] = cookie_path
-                    ytdl = yt_dlp.YoutubeDL(ytdl_opts)
-                    data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
-                except Exception as e:
-                    last_error = e
-
             if not data:
                 print(f"❌ All strategies failed. Last error: {last_error}")
-                raise Exception(f"Failed to fetch stream. Last Error: {last_error}")
+                # Re-raise nicely
+                if "Sign in to confirm" in str(last_error):
+                    raise Exception("Video is age-gated/premium. Cookies required.")
+                raise Exception(f"Failed to fetch stream: {last_error}")
 
             if 'entries' in data: data = data['entries'][0]
             filename = data['url']
