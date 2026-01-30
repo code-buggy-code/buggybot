@@ -126,8 +126,8 @@ class MusicControls(discord.ui.View):
 # - search_youtube_official(query)
 # - process_spotify_link(url, guild_id)
 # - check_and_convert_cookies()
-# - get_ytdl_opts()
-# - play_next_song(guild, interaction=None)
+# - get_ytdl_opts(format_mode='best') [Updated to accept format mode]
+# - play_next_song(guild, interaction=None) [Updated with fallback logic]
 # - stop_playback(interaction)
 # - check_token_validity_task()
 # - play(interaction, query)
@@ -213,12 +213,19 @@ class Music(commands.Cog):
         except: pass
         return os.path.abspath('cookies.txt')
 
-    def get_ytdl_opts(self):
+    def get_ytdl_opts(self, format_mode='best'):
         """Options strictly for extracting streaming URLs."""
         cookie_path = self.check_and_convert_cookies()
         
+        # Determine format string based on mode
+        # 'best' = Try to get high quality audio
+        # 'fallback' = Just get ANYTHING that works
+        fmt = 'bestaudio/best'
+        if format_mode == 'fallback':
+            fmt = 'best' # Allow video if audio-only fails
+        
         opts = {
-            'format': 'bestaudio/best',
+            'format': fmt,
             'noplaylist': True,
             'nocheckcertificate': True,
             'ignoreerrors': False,
@@ -341,31 +348,44 @@ class Music(commands.Cog):
 
         async def stream_audio():
             loop = asyncio.get_running_loop()
-            opts = self.get_ytdl_opts()
+            
+            # --- TRY 1: High Quality Audio ---
+            opts = self.get_ytdl_opts(format_mode='best')
+            stream_url = None
+            data = None
             
             try:
-                # Extract URL without downloading
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     data = await loop.run_in_executor(None, lambda: ydl.extract_info(track_data['url'], download=False))
                 
                 if 'entries' in data: data = data['entries'][0]
-                
-                # Get the streaming URL
                 stream_url = data.get('url')
-                if not stream_url:
-                    print(f"❌ Failed to get stream URL for {track_data['title']}")
-                    # Alert users if interaction is available, otherwise console
-                    if interaction: 
-                         try: await interaction.followup.send(f"⚠️ Could not extract stream URL for **{track_data['title']}**", ephemeral=True)
-                         except: pass
-                    self.play_next_song(guild)
-                    return
+            
+            except Exception as e:
+                # --- TRY 2: Fallback (Any Format) ---
+                print(f"⚠️ First attempt failed ({e}). Retrying with fallback format...")
+                try:
+                    opts = self.get_ytdl_opts(format_mode='fallback')
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        data = await loop.run_in_executor(None, lambda: ydl.extract_info(track_data['url'], download=False))
+                    if 'entries' in data: data = data['entries'][0]
+                    stream_url = data.get('url')
+                except Exception as e2:
+                    print(f"❌ Fallback also failed: {e2}")
+            
+            if not stream_url:
+                if interaction: 
+                        try: await interaction.followup.send(f"⚠️ Failed to stream **{track_data['title']}** (Format unavailable)", ephemeral=True)
+                        except: pass
+                self.play_next_song(guild)
+                return
 
+            try:
                 # --- CRITICAL FIX: PASS HEADERS TO FFMPEG ---
                 # FFmpeg needs the same User-Agent and Cookies that yt-dlp used to access the URL
                 ffmpeg_before_options = '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
                 
-                if 'http_headers' in data:
+                if data and 'http_headers' in data:
                     headers = ""
                     for key, value in data['http_headers'].items():
                         headers += f"{key}: {value}\r\n"
