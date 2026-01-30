@@ -51,6 +51,8 @@ class MusicControls(discord.ui.View):
     @discord.ui.button(emoji="⬅️", style=discord.ButtonStyle.secondary)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
+        # With streaming, we just push the current song back to the front of the queue
+        # Logic: If > 10s, Restart. If < 10s, Go Previous.
         current = self.cog.current_song.get(self.guild.id)
         if not current: return
 
@@ -230,11 +232,18 @@ class Music(commands.Cog):
                 if result == 0:
                     proxy_url = "socks5://127.0.0.1:40000"
                     print("✅ Cloudflare WARP detected! Tunneling traffic...")
+                    
+                    # Check for pysocks
+                    try:
+                        import socks
+                    except ImportError:
+                        print("⚠️ WARNING: 'pysocks' is not installed. Proxying in yt-dlp will fail! Run: pip install pysocks")
             except:
                 pass
 
             # STRATEGIES - COOKIES ENABLED FOR ALL
-            # Since we have valid cookies, Web client is actually the strongest candidate now
+            # We use 'bestaudio/best' to prioritize audio, but allow best (video+audio) as fallback
+            # The '-vn' flag in FFMPEG will ensure we strictly output audio only.
             strategies = [
                 # 1. Web Client (Best with cookies)
                 {'format': 'bestaudio/best', 'client': 'web', 'desc': 'Web'},
@@ -243,13 +252,13 @@ class Music(commands.Cog):
                 {'format': 'bestaudio/best', 'client': 'android', 'desc': 'Android'},
                 
                 # 3. TV Embedded (Fallback)
-                {'format': 'best', 'client': 'tv_embedded', 'desc': 'TV Embedded'},
+                {'format': 'bestaudio/best', 'client': 'tv_embedded', 'desc': 'TV Embedded'},
                 
                 # 4. iOS
                 {'format': 'bestaudio/best', 'client': 'ios', 'desc': 'iOS'},
                 
                 # 5. Last Resort (Generic)
-                {'format': 'best', 'client': None, 'desc': 'Generic'},
+                {'format': 'bestaudio/best', 'client': None, 'desc': 'Generic Best'},
             ]
             
             data = None
@@ -294,7 +303,7 @@ class Music(commands.Cog):
                     continue
             
             if not data:
-                print("❌ All strategies failed.")
+                print("❌ All strategies failed. Please check 'ffmpeg' and 'pysocks' are installed.")
                 raise Exception(f"Failed to fetch stream. Last error: {last_error}")
 
             if 'entries' in data:
@@ -304,21 +313,13 @@ class Music(commands.Cog):
             
             # FFMPEG Options
             ffmpeg_opts = {
-                'options': '-vn',
+                'options': '-vn', # Explicitly disable video output
                 'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
             }
             
             # --- CRITICAL: PASS PROXY TO FFMPEG ---
-            # If we used a proxy to find the URL, we must use it to play the URL
-            if proxy_url:
-                # ffmpeg expects http_proxy syntax usually, but socks5 might need specific handling
-                # -http_proxy works for http/https streams
-                if "socks5" in proxy_url:
-                    # FFmpeg SOCKS support can be tricky, but let's try strict env var or flag
-                    # Converting socks5://127.0.0.1:40000 to user-friendly string if needed
-                    # However, widely compatible ffmpeg builds handle http_proxy well.
-                    # For SOCKS, simple way:
-                    ffmpeg_opts['before_options'] += f' -http_proxy "{proxy_url}"'
+            if proxy_url and "socks5" in proxy_url:
+                ffmpeg_opts['before_options'] += f' -http_proxy "{proxy_url}"'
 
             # Pass Headers
             if 'http_headers' in data:
@@ -439,6 +440,7 @@ class Music(commands.Cog):
                 cookie_path = self.check_and_convert_cookies()
                 
                 # Use the helper class to get a playable source
+                # This handles all the extraction and FFMPEG setup
                 source = await self.YTDLSource.from_url(
                     track_data['url'], 
                     loop=self.bot.loop, 
@@ -718,6 +720,8 @@ class Music(commands.Cog):
             res = await self.process_spotify_link(re.search(r'(https?://[^\s]+)', message.content).group(1), message.guild.id)
             if res is True: await message.add_reaction("🎵")
         elif "youtube.com/watch" in message.content or "youtu.be/" in message.content:
+            # Basic logic for adding YT link to playlist manually if needed
+            # For brevity in this fix, we assume the user just wants Spotify auto-add or commands
             pass
 
 async def setup(bot):
