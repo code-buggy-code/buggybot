@@ -40,6 +40,45 @@ except ImportError:
     SpotifyClientCredentials = None
     print("⚠️ Warning: 'spotipy' not found. Run: pip install spotipy")
 
+# Function/Class List:
+# class MusicControls(discord.ui.View)
+# - __init__(cog, guild)
+# - back_button(interaction, button)
+# - pause_button(interaction, button)
+# - skip_button(interaction, button)
+# - queue_button(interaction, button)
+# - stop_button(interaction, button)
+# class Music(commands.Cog)
+# - __init__(bot)
+# - cog_unload()
+# - check_and_convert_cookies()
+# - class YTDLSource(discord.PCMVolumeTransformer)
+#   - __init__(source, data, volume)
+#   - from_url(cls, url, loop, stream, cookie_path)
+# - load_config(guild_id)
+# - save_config(guild_id, config)
+# - load_youtube_service()
+# - load_music_services()
+# - search_youtube_official(query)
+# - process_spotify_link(url, guild_id)
+# - play_next_song(guild, interaction)
+# - stop_playback(interaction)
+# - check_token_validity_task()
+# - play(interaction, query) [Slash]
+# - pause(interaction) [Slash]
+# - resume(interaction) [Slash]
+# - skip(interaction) [Slash]
+# - stop(interaction) [Slash]
+# - queue(interaction) [Slash]
+# - shuffle(interaction) [Slash]
+# - checkmusic(interaction) [Slash]
+# - ytauth(interaction) [Slash]
+# - ytcode(interaction, code) [Slash]
+# - playlist(interaction, playlist) [Slash]
+# - musicchannel(interaction, channel) [Slash]
+# - on_message(message)
+# setup(bot)
+
 # --- UI VIEW FOR CONTROLS ---
 
 class MusicControls(discord.ui.View):
@@ -193,16 +232,16 @@ class Music(commands.Cog):
 
             # ROBUST STRATEGIES
             strategies = [
-                # 1. Web Client + Cookies (Most like a real user)
-                {'format': 'bestaudio/best', 'client': 'web', 'desc': 'Web Client'},
-                # 2. Android + Cookies
+                # 1. Android + Cookies (Often most reliable)
                 {'format': 'bestaudio/best', 'client': 'android', 'desc': 'Android Client'},
+                # 2. Web Client + Cookies (Standard)
+                {'format': 'bestaudio/best', 'client': 'web', 'desc': 'Web Client'},
                 # 3. iOS + Cookies
                 {'format': 'bestaudio/best', 'client': 'ios', 'desc': 'iOS Client'},
-                # 4. Fallback: TV Embedded (No cookies usually, but robust)
+                # 4. TV Embedded (No cookies usually, but robust)
                 {'format': 'best', 'client': 'tv_embedded', 'desc': 'TV Embedded'},
-                # 5. Last Resort: Potato Mode (Just get ANY format)
-                {'format': 'worst', 'client': 'web', 'desc': 'Potato Mode'}
+                # 5. Generic (Let yt-dlp decide, useful if clients are broken)
+                {'format': 'bestaudio/best', 'client': None, 'desc': 'Generic'},
             ]
             
             data = None
@@ -222,7 +261,7 @@ class Music(commands.Cog):
                         'no_warnings': True,
                         'default_search': 'auto',
                         'source_address': '0.0.0.0',
-                        'force_ipv4': True, # CRITICAL for Oracle Cloud
+                        'force_ipv4': True, # CRITICAL for Oracle Cloud, but can fail on others
                         'cachedir': False,
                     }
                     
@@ -246,9 +285,26 @@ class Music(commands.Cog):
                     last_error = e
                     continue
             
+            # FALLBACK: If all strategies failed, try "Relaxed Mode" (No IPv4 forcing, no source address binding)
+            if not data:
+                print("⚠️ Standard strategies failed. Trying Relaxed Network Mode...")
+                try:
+                    ytdl_opts = {
+                        'format': 'bestaudio/best',
+                        'noplaylist': True,
+                        'quiet': True,
+                        'default_search': 'auto',
+                        # No source_address, no force_ipv4
+                    }
+                    if cookie_path: ytdl_opts['cookiefile'] = cookie_path
+                    ytdl = yt_dlp.YoutubeDL(ytdl_opts)
+                    data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
+                except Exception as e:
+                    last_error = e
+
             if not data:
                 print(f"❌ All strategies failed. Last error: {last_error}")
-                raise Exception(f"Failed to fetch stream. Ensure cookies.txt is valid and WARP is running.")
+                raise Exception(f"Failed to fetch stream. Last Error: {last_error}")
 
             if 'entries' in data: data = data['entries'][0]
             filename = data['url']
