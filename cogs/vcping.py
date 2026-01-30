@@ -44,7 +44,8 @@ class VCPing(commands.Cog):
     @tasks.loop(seconds=60)
     async def check_vcs(self):
         config = self.get_vcping_config()
-        for guild_id, state_data in self.vc_state.items():
+        # Create a list copy of items to prevent "dictionary changed size during iteration" errors
+        for guild_id, state_data in list(self.vc_state.items()):
             if guild_id not in config: continue
             
             settings = config[guild_id]
@@ -59,20 +60,25 @@ class VCPing(commands.Cog):
             role = guild.get_role(ping_role_id)
             if not role: continue
 
-            for channel_id, data in state_data.items():
+            # Create a list copy here too
+            for channel_id, data in list(state_data.items()):
                 if data.get('pinged'): continue
 
                 start_time_iso = data.get('start_time')
                 if not start_time_iso: continue
 
                 start_time = datetime.datetime.fromisoformat(start_time_iso)
+                # Check if enough time has passed
                 if datetime.datetime.now() - start_time >= datetime.timedelta(minutes=threshold_minutes):
                     channel = guild.get_channel(int(channel_id))
                     if channel:
                         try:
-                            await channel.send(f"{role.mention} The VC has been active for {threshold_minutes} minutes!")
-                            self.vc_state[guild_id][channel_id]['pinged'] = True
-                        except Exception as e: print(f"Failed to send VC ping in {channel.name}: {e}")
+                            # Verify one last time that we haven't pinged (race condition safety)
+                            if not self.vc_state[guild_id][channel_id]['pinged']:
+                                await channel.send(f"{role.mention} The VC has been active for {threshold_minutes} minutes!")
+                                self.vc_state[guild_id][channel_id]['pinged'] = True
+                        except Exception as e: 
+                            print(f"Failed to send VC ping in {channel.name}: {e}")
 
     @check_vcs.before_loop
     async def before_check_vcs(self):
@@ -98,22 +104,40 @@ class VCPing(commands.Cog):
             cid = str(channel.id)
             if guild_id not in self.vc_state: self.vc_state[guild_id] = {}
 
-            current_members = len(channel.members)
+            # Count only REAL people (ignore bots)
+            current_members = len([m for m in channel.members if not m.bot])
 
             if current_members == 0:
-                if cid in self.vc_state[guild_id]: del self.vc_state[guild_id][cid]
+                if cid in self.vc_state[guild_id]: 
+                    del self.vc_state[guild_id][cid]
                 return
 
             if current_members >= threshold_people:
                 if cid not in self.vc_state[guild_id]:
-                    self.vc_state[guild_id][cid] = {'start_time': datetime.datetime.now().isoformat(), 'pinged': False}
+                    # Start tracking
+                    self.vc_state[guild_id][cid] = {
+                        'start_time': datetime.datetime.now().isoformat(), 
+                        'pinged': False
+                    }
+                # Else: Already tracking, do NOT reset timer/pinged status
             else:
+                # Count is below threshold (but > 0)
                 if cid in self.vc_state[guild_id]:
+                    # If we haven't pinged yet, this session is invalid (dropped below threshold early). Reset.
                     if not self.vc_state[guild_id][cid]['pinged']:
                          del self.vc_state[guild_id][cid]
+                    # If we HAVE pinged, we keep the state so we don't spam pings if it fluctuates 
+                    # between threshold and threshold-1. 
+                    # It will only delete when it hits 0.
 
-        if before.channel: update_channel_state(before.channel)
-        if after.channel and (not before.channel or before.channel.id != after.channel.id): update_channel_state(after.channel)
+        # Check 'before' channel (User left this channel)
+        if before.channel: 
+            update_channel_state(before.channel)
+        
+        # Check 'after' channel (User joined this channel)
+        # We also check if it's the same channel (e.g. mute toggle) to ensure state is consistent
+        if after.channel and (not before.channel or before.channel.id != after.channel.id): 
+            update_channel_state(after.channel)
 
     # --- SLASH COMMANDS ---
 
