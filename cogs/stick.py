@@ -152,8 +152,10 @@ class Stickies(commands.Cog):
         """Handles sticky message triggering."""
         if not message.guild: return
         
-        # FIX: Ignore ALL bot messages (including self) to prevent loops
-        if message.author.bot: return
+        # Allow purge announcements to trigger stickies, but ignore other bot messages (especially self)
+        if message.author.bot:
+            if not message.content.startswith("🧹 **Nightly Purge Complete.**"):
+                return
 
         stickies = self.get_stickies()
         sticky_data = next((s for s in stickies if s['channel_id'] == message.channel.id), None)
