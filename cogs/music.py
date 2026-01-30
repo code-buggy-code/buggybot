@@ -126,9 +126,9 @@ class MusicControls(discord.ui.View):
 # - load_music_services()
 # - search_youtube_official(query)
 # - process_spotify_link(url, guild_id)
-# - check_and_convert_cookies()
-# - get_ytdl_opts()
-# - download_track(track_data, interaction=None) [Updated with 5-Stage Retry]
+# - check_and_convert_cookies() [Updated Logic]
+# - get_ytdl_opts(use_cookies=True) [Updated]
+# - download_track(track_data, interaction=None) [Updated with Cookie Failover]
 # - manage_downloads(guild_id)
 # - cleanup_files(guild_id)
 # - cleanup_all_files(guild_id)
@@ -196,7 +196,7 @@ class Music(commands.Cog):
     # --- HELPERS ---
 
     def check_and_convert_cookies(self):
-        """Checks for cookies.txt, converts JSON if needed, returns path or None."""
+        """Checks for cookies.txt, converts JSON if needed, fixes headers, returns path or None."""
         if not os.path.exists('cookies.txt'):
             return None
 
@@ -205,6 +205,7 @@ class Music(commands.Cog):
             with open('cookies.txt', 'r', encoding='utf-8') as f:
                 content = f.read()
             
+            # CASE 1: JSON Format
             if content.strip().startswith('[') or content.strip().startswith('{'):
                 print("🔄 Detected JSON content in cookies.txt. Converting to Netscape format...")
                 try:
@@ -229,7 +230,9 @@ class Music(commands.Cog):
                             else:
                                 secure = "TRUE" if str(secure_raw).lower() == 'true' else "FALSE"
                             
-                            expiry = c.get('Expires raw', c.get('expirationDate', '0'))
+                            # Ensure expiry is integer
+                            expiry = int(float(c.get('Expires raw', c.get('expirationDate', 0))))
+                            
                             name = c.get('Name raw', c.get('name', ''))
                             value = c.get('Content raw', c.get('value', ''))
                             
@@ -238,15 +241,20 @@ class Music(commands.Cog):
                     print("✅ Successfully converted cookies.txt to Netscape format.")
                 except json.JSONDecodeError:
                     print("⚠️ cookies.txt looked like JSON but failed to parse. Using as is.")
+
+            # CASE 2: Text but missing Header
+            elif not content.strip().startswith("# Netscape HTTP Cookie File"):
+                print("⚠️ cookies.txt missing Netscape header. Prepending it...")
+                with open('cookies.txt', 'w', encoding='utf-8') as f:
+                    f.write("# Netscape HTTP Cookie File\n\n" + content)
+
         except Exception as e:
             print(f"⚠️ Error checking/converting cookies.txt: {e}")
 
         return os.path.abspath('cookies.txt')
 
-    def get_ytdl_opts(self):
+    def get_ytdl_opts(self, use_cookies=True):
         """Generates fresh YTDL options for high quality audio."""
-        cookie_path = self.check_and_convert_cookies()
-        
         opts = {
             # Default to High Quality Audio Only, or Best Available
             'format': 'bestaudio/best', 
@@ -284,8 +292,10 @@ class Music(commands.Cog):
             }
         }
 
-        if cookie_path:
-            opts['cookiefile'] = cookie_path
+        if use_cookies:
+            cookie_path = self.check_and_convert_cookies()
+            if cookie_path:
+                opts['cookiefile'] = cookie_path
         
         return opts
 
@@ -502,12 +512,16 @@ class Music(commands.Cog):
         
         final_filename = None
         last_error = None
+        cookies_disabled = False
 
         for attempt in attempts:
             try:
-                print(f"⬇️ Attempting download ({attempt['desc']}): {track_data['title']}")
+                msg_suffix = " (No Cookies)" if cookies_disabled else ""
+                print(f"⬇️ Attempting download ({attempt['desc']}{msg_suffix}): {track_data['title']}")
                 
-                opts = self.get_ytdl_opts()
+                # Use cookies ONLY if they haven't failed yet
+                opts = self.get_ytdl_opts(use_cookies=not cookies_disabled)
+                
                 opts['format'] = attempt['format']
                 opts['progress_hooks'] = [progress_hook]
                 
@@ -515,7 +529,6 @@ class Music(commands.Cog):
                 if attempt['client']:
                     opts['extractor_args'] = {'youtube': {'player_client': [attempt['client']]}}
                 else:
-                    # Remove extractor args if None (use defaults)
                     opts.pop('extractor_args', None)
 
                 with yt_dlp.YoutubeDL(opts) as ydl:
@@ -538,7 +551,7 @@ class Music(commands.Cog):
                          except: pass
                     return final_filename
                 
-                # Fallback: Check if file exists with original extension (if MP3 conversion failed)
+                # Fallback: Check if file exists with original extension
                 if os.path.exists(temp_filename):
                      print(f"⚠️ Conversion failed, playing original: {temp_filename}")
                      track_data['filename'] = temp_filename
@@ -549,6 +562,14 @@ class Music(commands.Cog):
             
             except Exception as e:
                 last_error = e
+                error_str = str(e).lower()
+                
+                # Detect Cookie Errors specifically
+                if "netscape" in error_str or "cookie" in error_str or "format" in error_str:
+                    if not cookies_disabled:
+                        print("🍪 Cookie/Format error detected! Disabling cookies for subsequent attempts.")
+                        cookies_disabled = True
+                        
                 print(f"❌ Attempt ({attempt['desc']}) failed: {e}")
                 # Loop continues to next attempt...
 
