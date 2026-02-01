@@ -26,7 +26,7 @@ from typing import Literal, Optional, Union
 # - on_voice_state_update(member, before, after)
 # - voice_time_checker()
 # - point_saver()
-# - lead(interaction, action, group_num, name) [Slash - Admin]
+# - lead(interaction, action, group_num, name, reset) [Slash - Admin]
 # - track(interaction, group_num, action, channel) [Slash - Admin]
 # - setpoints(interaction, action_type, value) [Slash - Admin]
 # - award(interaction, member, group_num, amount) [Slash - Admin]
@@ -341,13 +341,15 @@ class Lead(commands.Cog):
     @app_commands.describe(
         action="What do you want to do?",
         group_num="Group ID (for Edit/Delete)",
-        name="Group Name (for Add/Edit)"
+        name="Group Name (for Add/Edit)",
+        reset="[Edit Only] Reset all points in this group to 0?"
     )
     @app_commands.default_permissions(administrator=True)
     async def lead(self, interaction: discord.Interaction, 
                    action: Literal["Add", "Edit", "Delete", "List"],
                    group_num: Optional[int] = None,
-                   name: Optional[str] = None):
+                   name: Optional[str] = None,
+                   reset: Optional[bool] = False):
         """Manage leaderboard groups."""
         
         # --- 1. ADD ---
@@ -369,19 +371,41 @@ class Lead(commands.Cog):
 
         # --- 2. EDIT ---
         elif action == "Edit":
-            if not group_num or not name:
-                return await interaction.response.send_message("❌ Error: `group_num` and `name` are required to edit.", ephemeral=True)
+            if not group_num:
+                return await interaction.response.send_message("❌ Error: `group_num` is required to edit.", ephemeral=True)
             
+            if not name and not reset:
+                 return await interaction.response.send_message("❌ Error: You must provide either `name` (to rename) or `reset` (to clear points).", ephemeral=True)
+
             config = await self.get_config(interaction.guild_id)
             group_key = str(group_num)
             
             if group_key not in config["groups"]:
                 return await interaction.response.send_message(f"❌ Group ID {group_num} not found.", ephemeral=True)
+            
+            messages = []
+            
+            if reset:
+                # 1. Clear DB points
+                await self.clear_points_by_group(interaction.guild_id, group_key)
                 
-            old_name = config["groups"][group_key]["name"]
-            config["groups"][group_key]["name"] = name
-            await self.save_config(interaction.guild_id, config)
-            await interaction.response.send_message(f"✅ Renamed Group {group_num} from **{old_name}** to **{name}**.", ephemeral=True)
+                # 2. Clear Cache
+                gid = str(interaction.guild_id)
+                if gid in self.point_cache and group_key in self.point_cache[gid]:
+                    del self.point_cache[gid][group_key]
+                
+                if gid in self.leaderboard_cache and group_key in self.leaderboard_cache[gid]:
+                     del self.leaderboard_cache[gid][group_key]
+                     
+                messages.append(f"🗑️ Reset all points for group **{group_num}** to 0.")
+
+            if name:
+                old_name = config["groups"][group_key]["name"]
+                config["groups"][group_key]["name"] = name
+                await self.save_config(interaction.guild_id, config)
+                messages.append(f"✅ Renamed Group {group_num} from **{old_name}** to **{name}**.")
+
+            await interaction.response.send_message("\n".join(messages), ephemeral=True)
 
         # --- 3. DELETE ---
         elif action == "Delete":
