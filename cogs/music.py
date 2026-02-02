@@ -32,6 +32,7 @@ from spotipy.oauth2 import SpotifyClientCredentials
 # - ytcode(interaction, code) [Slash]
 # - playlist(interaction, playlist) [Slash]
 # - musicchannel(interaction, channel) [Slash]
+# - removesong(interaction, query) [Slash] <--- NEW
 # - on_message(message)
 # setup(bot)
 
@@ -330,6 +331,77 @@ class Music(commands.Cog):
         config['music_channel_id'] = channel.id
         self.save_config(interaction.guild_id, config)
         await interaction.response.send_message(f"✅ music channel set to {channel.mention}.", ephemeral=True)
+
+    @app_commands.command(name="removesong", description="Remove a song from the playlist by URL or ID.")
+    @app_commands.describe(query="The YouTube URL or Video ID to remove")
+    @app_commands.default_permissions(administrator=True)
+    async def removesong(self, interaction: discord.Interaction, query: str):
+        """Remove a song from the playlist by URL or ID."""
+        await interaction.response.defer(ephemeral=True)
+        
+        if not self.youtube:
+            return await interaction.followup.send("❌ YouTube API not loaded.")
+
+        config = self.load_config(interaction.guild_id)
+        playlist_id = config.get('playlist_id')
+        
+        if not playlist_id:
+            return await interaction.followup.send("❌ No playlist configured.")
+
+        # Extract Video ID
+        video_id = None
+        # Regex for standard/short/music youtube links to grab ID
+        yt_match = re.search(r'(?:v=|\/)([a-zA-Z0-9_-]{11})', query)
+        if yt_match:
+            video_id = yt_match.group(1)
+        else:
+            # Maybe it is just the ID? (11 chars)
+            if len(query) == 11:
+                video_id = query
+        
+        if not video_id:
+             return await interaction.followup.send("❌ Could not parse Video ID from query.")
+
+        loop = asyncio.get_running_loop()
+
+        # Search Playlist for this Video ID
+        try:
+            request = self.youtube.playlistItems().list(
+                part="id,snippet",
+                playlistId=playlist_id,
+                maxResults=50
+            )
+            
+            target_item_id = None
+            video_title = "?"
+            
+            # Simple pagination handling
+            while request:
+                response = await loop.run_in_executor(None, request.execute)
+                
+                for item in response.get('items', []):
+                    # Check if this item's video ID matches our target
+                    if item['snippet']['resourceId']['videoId'] == video_id:
+                        target_item_id = item['id']
+                        video_title = item['snippet']['title']
+                        break
+                
+                if target_item_id:
+                    break
+                    
+                request = self.youtube.playlistItems().list_next(request, response)
+            
+            if not target_item_id:
+                return await interaction.followup.send(f"❌ Video ID `{video_id}` not found in the playlist.")
+            
+            # Delete it
+            del_req = self.youtube.playlistItems().delete(id=target_item_id)
+            await loop.run_in_executor(None, del_req.execute)
+            
+            await interaction.followup.send(f"✅ Removed **{video_title}** from the playlist.")
+
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error removing song: {e}")
 
     # --- LISTENER ---
 
