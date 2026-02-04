@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import datetime
+import asyncio
 from typing import Literal
 
 # Function/Class List:
@@ -113,15 +114,32 @@ class VoteKick(commands.Cog):
         
         current_votes = len(active_votes[target_id_str])
         
+        # Log the vote
         embed = discord.Embed(description=f"🗳️ **Vote Cast**\n{interaction.user.mention} voted to kick {member.mention}.\nCurrent Votes: **{current_votes}/{self.VOTE_THRESHOLD}**", color=discord.Color.yellow(), timestamp=datetime.datetime.now())
         await self.log_to_channel(interaction.guild, embed)
 
         if current_votes >= self.VOTE_THRESHOLD:
             try:
                 await member.kick(reason=f"Votekicked by {current_votes} users.")
+                
+                # Log success
                 embed = discord.Embed(description=f"✅ **VOTEKICK SUCCESS**\n{member.mention} was kicked.\nTotal Votes: {current_votes}", color=discord.Color.green(), timestamp=datetime.datetime.now())
                 await self.log_to_channel(interaction.guild, embed)
-                await interaction.response.send_message(f"✅ {member.mention} has been kicked by vote.", ephemeral=False) 
+                
+                # Ephemeral confirmation to the final voter (Obscured)
+                await interaction.response.send_message(f"✅ Vote cast against {member.display_name}.", ephemeral=True)
+
+                # Public Announcement (Delayed 6 minutes to protect identity)
+                channel = interaction.channel
+                member_mention = member.mention
+                
+                async def delayed_announcement():
+                    await asyncio.sleep(6 * 60) # 6 minutes
+                    try:
+                        await channel.send(f"✅ {member_mention} has been kicked by vote.")
+                    except: pass
+                
+                asyncio.create_task(delayed_announcement())
                 
                 # Cleanup and Save
                 if target_id_str in active_votes: del active_votes[target_id_str]
