@@ -33,6 +33,7 @@ import traceback
 # - Player.skip
 # - Player.queue
 # - Player.ensure_voice
+# - setup (NEW: Required to load the cog)
 
 # Silence useless bug reports messages
 yt_dlp.utils.bug_reports_message = lambda: ''
@@ -314,9 +315,28 @@ class Player(commands.Cog):
     @commands.command(name='play')
     async def _play(self, ctx: commands.Context, *, search: str):
         """Plays a song. Redbot-style playlist support."""
-        # Note: ensure_voice decorator handles connection now.
         
+        # 1. Handle Voice Connection explicitly
+        if not ctx.voice_state.voice:
+            if ctx.author.voice:
+                try:
+                    ctx.voice_state.voice = await ctx.author.voice.channel.connect()
+                except discord.ClientException:
+                    # It might be connected but the state is desynced
+                    ctx.voice_state.voice = ctx.guild.voice_client
+                except Exception as e:
+                    return await ctx.send(f"❌ Failed to join voice channel: {e}")
+            else:
+                return await ctx.send("❌ You need to be in a voice channel first!")
+        
+        # 2. Immediate feedback
+        msg = await ctx.send(f"🔎 **Searching** for `{search}`...")
+
         async with ctx.typing():
+            # Tweak: music.youtube.com handling
+            if "music.youtube.com" in search:
+                search = search.replace("music.youtube.com", "www.youtube.com")
+
             ydl_opts_flat = {
                 'extract_flat': True, 
                 'skip_download': True,
@@ -327,14 +347,17 @@ class Player(commands.Cog):
             }
             
             partial = functools.partial(yt_dlp.YoutubeDL(ydl_opts_flat).extract_info, search, download=False)
-            info = await self.bot.loop.run_in_executor(None, partial)
+            try:
+                info = await self.bot.loop.run_in_executor(None, partial)
+            except Exception as e:
+                return await msg.edit(content=f"❌ Error during search: {e}")
 
             if info is None:
-                return await ctx.send("Could not find any matches.")
+                return await msg.edit(content="❌ Could not find any matches.")
 
             # Check if it's a playlist
             if 'entries' in info and (info.get('_type') == 'playlist' or info.get('_type') == 'multi_video'):
-                await self._play_playlist(ctx, info)
+                await self._play_playlist(ctx, info, msg)
             else:
                 # Single video logic
                 try:
@@ -348,13 +371,13 @@ class Player(commands.Cog):
                         
                     source = await YTDLSource.create_source(ctx, url, loop=self.bot.loop)
                 except YTDLError as e:
-                    await ctx.send(f'An error occurred: {str(e)}')
+                    await msg.edit(content=f'❌ An error occurred: {str(e)}')
                 else:
                     song = source
                     await ctx.voice_state.songs.put(song)
-                    await ctx.send(f'Enqueued {str(source)}')
+                    await msg.edit(content=f'✅ Enqueued **{source.title}**')
 
-    async def _play_playlist(self, ctx, info):
+    async def _play_playlist(self, ctx, info, msg):
         """
         Redbot-style lazy queueing.
         """
@@ -375,7 +398,7 @@ class Player(commands.Cog):
                 count += 1
 
         title = info.get('title', 'Unknown Playlist')
-        await ctx.send(f"Enqueued **{count}** songs from playlist **{title}**.")
+        await msg.edit(content=f"✅ Enqueued **{count}** songs from playlist **{title}**.")
 
     @commands.command(name='now', aliases=['np', 'current', 'playing'])
     async def _now(self, ctx: commands.Context):
@@ -454,9 +477,8 @@ class Player(commands.Cog):
                  .set_footer(text='Viewing page {}/{}'.format(page, pages)))
         await ctx.send(embed=embed)
 
-    @_join.before_invoke
-    @_play.before_invoke
     async def ensure_voice(self, ctx):
+        """Legacy helper, kept for compatibility if referenced elsewhere."""
         if ctx.voice_client is None:
             if ctx.author.voice:
                 ctx.voice_state.voice = await ctx.author.voice.channel.connect()
@@ -465,3 +487,6 @@ class Player(commands.Cog):
                 raise commands.CommandError("Author not connected to a voice channel.")
         else:
             ctx.voice_state.voice = ctx.voice_client
+
+async def setup(bot):
+    await bot.add_cog(Player(bot))
