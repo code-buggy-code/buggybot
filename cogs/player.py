@@ -62,7 +62,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
         'default_search': 'auto',
         'source_address': '0.0.0.0',
         'geo_bypass': True,
-        'cookiefile': 'cookies.txt',
+        # 'cookiefile': 'cookies.txt', # Uncomment if you have a cookies.txt file
     }
 
     FFMPEG_OPTIONS = {
@@ -205,6 +205,9 @@ class VoiceState:
                     self.voice = self._ctx.voice_client
                 else:
                     # If we really aren't connected, we can't play.
+                    # Re-queue the item so we don't lose it while we wait/fail
+                    await self.songs.put(item)
+                    await asyncio.sleep(1)
                     continue
 
             if isinstance(item, str):
@@ -212,7 +215,7 @@ class VoiceState:
                     source = await YTDLSource.create_source(self._ctx, item, loop=self.bot.loop)
                     self.current = source
                 except Exception as e:
-                    await self._ctx.send(f"Error processing track: {e}. Skipping...")
+                    await self._ctx.send(f"Error processing track: `{str(e)}`. Skipping to next...")
                     traceback.print_exc()
                     self.next.set()
                     continue
@@ -224,7 +227,7 @@ class VoiceState:
                 self.voice.play(self.current, after=self.play_next_song)
                 await self.current.channel.send(embed=self.current.create_embed())
             except Exception as e:
-                print(f"Playback error: {e}")
+                await self._ctx.send(f"Playback Error: `{str(e)}`")
                 traceback.print_exc()
                 self.next.set()
             
@@ -311,9 +314,8 @@ class Player(commands.Cog):
     @commands.command(name='play')
     async def _play(self, ctx: commands.Context, *, search: str):
         """Plays a song. Redbot-style playlist support."""
-        if not ctx.voice_state.voice:
-            await ctx.invoke(self._join)
-
+        # Note: ensure_voice decorator handles connection now.
+        
         async with ctx.typing():
             ydl_opts_flat = {
                 'extract_flat': True, 
@@ -340,6 +342,10 @@ class Player(commands.Cog):
                         info = info['entries'][0]
                         
                     url = info.get('webpage_url') or info.get('url')
+                    if not url:
+                        # Fallback for search results that might be bare
+                        url = info.get('id')
+                        
                     source = await YTDLSource.create_source(ctx, url, loop=self.bot.loop)
                 except YTDLError as e:
                     await ctx.send(f'An error occurred: {str(e)}')
@@ -451,10 +457,6 @@ class Player(commands.Cog):
     @_join.before_invoke
     @_play.before_invoke
     async def ensure_voice(self, ctx):
-        # We check if voice_client is present.
-        # If it is, we sync it to voice_state.voice.
-        # If not, we connect.
-        # CRITICAL: Do NOT stop the player here, or we kill the queue when adding songs!
         if ctx.voice_client is None:
             if ctx.author.voice:
                 ctx.voice_state.voice = await ctx.author.voice.channel.connect()
