@@ -5,6 +5,7 @@ import yt_dlp
 import functools
 import math
 import random
+import traceback
 
 # List of functions in this code:
 # - YTDLSource.__init__
@@ -46,7 +47,6 @@ class YTDLSource(discord.PCMVolumeTransformer):
     """
     Standard YTDLSource class, adapted to mirror Redbot's extraction logic.
     """
-    # Redbot-like options for robustness
     YTDL_OPTIONS = {
         'format': 'bestaudio/best',
         'extractaudio': True,
@@ -62,7 +62,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
         'default_search': 'auto',
         'source_address': '0.0.0.0',
         'geo_bypass': True,
-        'cookiefile': 'cookies.txt', # Optional: Add cookies.txt to bot folder if needed
+        'cookiefile': 'cookies.txt',
     }
 
     FFMPEG_OPTIONS = {
@@ -115,7 +115,6 @@ class YTDLSource(discord.PCMVolumeTransformer):
     async def create_source(cls, ctx, search: str, *, loop: asyncio.BaseEventLoop = None):
         loop = loop or asyncio.get_event_loop()
 
-        # Redbot logic: Extract info lightly first
         partial = functools.partial(cls.ytdl.extract_info, search, download=False, process=False)
         data = await loop.run_in_executor(None, partial)
 
@@ -192,29 +191,42 @@ class VoiceState:
             self.next.clear()
 
             try:
-                async with asyncio.timeout(300): # 5 minutes timeout
+                # Wait for the next song. If we time out, stop the player.
+                async with asyncio.timeout(300): # 5 minutes
                     item = await self.songs.get()
             except asyncio.TimeoutError:
                 self.bot.loop.create_task(self.stop())
                 return
 
-            # Redbot-like Lazy Loading Logic
+            # Ensure we have a valid voice connection before trying to play
+            if not self.voice:
+                # Try to recover if ctx.voice_client exists
+                if self._ctx.voice_client:
+                    self.voice = self._ctx.voice_client
+                else:
+                    # If we really aren't connected, we can't play.
+                    continue
+
             if isinstance(item, str):
                 try:
-                    # Process the URL into a source just-in-time
                     source = await YTDLSource.create_source(self._ctx, item, loop=self.bot.loop)
                     self.current = source
                 except Exception as e:
                     await self._ctx.send(f"Error processing track: {e}. Skipping...")
-                    self.next.set() # Trigger next loop
+                    traceback.print_exc()
+                    self.next.set()
                     continue
             else:
                 self.current = item
 
             self.current.volume = self._volume
-            self.voice.play(self.current, after=self.play_next_song)
-            
-            await self.current.channel.send(embed=self.current.create_embed())
+            try:
+                self.voice.play(self.current, after=self.play_next_song)
+                await self.current.channel.send(embed=self.current.create_embed())
+            except Exception as e:
+                print(f"Playback error: {e}")
+                traceback.print_exc()
+                self.next.set()
             
             await self.next.wait()
 
@@ -303,7 +315,6 @@ class Player(commands.Cog):
             await ctx.invoke(self._join)
 
         async with ctx.typing():
-            # Redbot method: 'extract_flat' to quickly identify type without downloading
             ydl_opts_flat = {
                 'extract_flat': True, 
                 'skip_download': True,
@@ -319,13 +330,12 @@ class Player(commands.Cog):
             if info is None:
                 return await ctx.send("Could not find any matches.")
 
-            # Check if it's a playlist (entries present and _type is playlist or multi_video)
+            # Check if it's a playlist
             if 'entries' in info and (info.get('_type') == 'playlist' or info.get('_type') == 'multi_video'):
                 await self._play_playlist(ctx, info)
             else:
                 # Single video logic
                 try:
-                    # If it's a search result (list with 1 item), use the first item
                     if 'entries' in info:
                         info = info['entries'][0]
                         
@@ -345,13 +355,11 @@ class Player(commands.Cog):
         entries = info['entries']
         count = 0
         
-        # We queue the URLs directly. The player task will handle the heavy lifting (create_source)
-        # when it's time to play. This prevents timeouts on large playlists.
         for entry in entries:
             if not entry: 
                 continue
-                
-            # Try to find a valid URL
+            
+            # Extract URL safely from lazy entry
             url = entry.get('url') or entry.get('webpage_url')
             if not url and 'id' in entry:
                 url = f"https://www.youtube.com/watch?v={entry['id']}"
@@ -443,11 +451,15 @@ class Player(commands.Cog):
     @_join.before_invoke
     @_play.before_invoke
     async def ensure_voice(self, ctx):
+        # We check if voice_client is present.
+        # If it is, we sync it to voice_state.voice.
+        # If not, we connect.
+        # CRITICAL: Do NOT stop the player here, or we kill the queue when adding songs!
         if ctx.voice_client is None:
             if ctx.author.voice:
-                await ctx.author.voice.channel.connect()
+                ctx.voice_state.voice = await ctx.author.voice.channel.connect()
             else:
                 await ctx.send("You are not connected to a voice channel.")
                 raise commands.CommandError("Author not connected to a voice channel.")
-        elif ctx.voice_client.is_playing():
-            ctx.voice_client.stop()
+        else:
+            ctx.voice_state.voice = ctx.voice_client
