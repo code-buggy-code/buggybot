@@ -10,7 +10,7 @@ from typing import cast
 # You must have a Lavalink server running (usually on port 2333).
 # If you don't have one, download Lavalink.jar and run it with `java -jar Lavalink.jar`
 LAVALINK_HOST = "127.0.0.1"
-LAVALINK_PORT = 2333
+LAVALINK_PORT = 8080
 LAVALINK_PASS = "youshallnotpass" # Default Lavalink password
 
 class RedAudio(commands.Cog):
