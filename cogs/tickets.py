@@ -101,16 +101,43 @@ class Tickets(commands.Cog):
             if not filtered_setups:
                 return await interaction.response.send_message("📝 No ticket setups found for this server.", ephemeral=True)
             
-            text = "**🎫 Ticket Setups:**\n"
-            for s in filtered_setups:
-                role_ping = f"<@&{s['role_id']}>"
-                admin_ping = f"<@&{s['admin_role_id']}>" if s['admin_role_id'] else "None"
-                cat_ping = f"<#{s.get('category_id')}>" if s.get('category_id') else "None"
-                gate = "Yes" if s.get('gate_message_id') else "No"
-                demessage = "Yes" if s.get('demessage_id') else "No"
-                text += f"• **Role:** {role_ping} | **buggy:** {admin_ping} | **Cat:** {cat_ping} | **Gate:** {gate} | **DeMsg:** {demessage}\n"
+            embed = discord.Embed(title="🎫 Ticket Setups", color=discord.Color.blue())
             
-            return await interaction.response.send_message(text, ephemeral=True)
+            for s in filtered_setups:
+                # Resolve objects to names/mentions for clarity
+                trigger_role = interaction.guild.get_role(s['role_id'])
+                t_role_name = trigger_role.name if trigger_role else f"ID: {s['role_id']}"
+                
+                admin_role = interaction.guild.get_role(s['admin_role_id']) if s.get('admin_role_id') else None
+                admin_text = admin_role.mention if admin_role else "None"
+                
+                cat_obj = interaction.guild.get_channel(s['category_id']) if s.get('category_id') else None
+                cat_text = cat_obj.name if cat_obj else "None"
+                
+                acc_role = interaction.guild.get_role(s['access_role_id']) if s.get('access_role_id') else None
+                acc_text = acc_role.mention if acc_role else "None"
+                
+                gate_info = f"Msg: {s.get('gate_message_id')}\nEmoji: {s.get('gate_emoji')}" if s.get('gate_message_id') else "None"
+                demsg_info = f"Msg: {s.get('demessage_id')}" if s.get('demessage_id') else "None"
+                
+                # Show raw prompt so user can see if {user} is there
+                raw_prompt = s.get('prompt', 'No prompt set')
+                if len(raw_prompt) > 100:
+                    raw_prompt = raw_prompt[:97] + "..."
+                
+                info_block = (
+                    f"**Ticket Name:** `{s.get('ticket_name')}`\n"
+                    f"**Category:** {cat_text}\n"
+                    f"**Admin Role:** {admin_text}\n"
+                    f"**Access Role:** {acc_text}\n"
+                    f"**Gate:** {gate_info}\n"
+                    f"**De-Msg:** {demsg_info}\n"
+                    f"**Prompt:**\n`{raw_prompt}`"
+                )
+                
+                embed.add_field(name=f"Trigger: {t_role_name}", value=info_block, inline=False)
+            
+            return await interaction.response.send_message(embed=embed, ephemeral=True)
 
         # For Add/Edit/Remove, Role is required
         if not role:
@@ -316,6 +343,7 @@ class Tickets(commands.Cog):
             return
 
         # 5. Send Prompt
+        # Ensure we use the current member's mention to avoid "stuck" pings from user error
         prompt_text = setup['prompt']\
             .replace("{user}", member.mention)\
             .replace("{admin}", admin_role.mention if admin_role else "")\
