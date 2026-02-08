@@ -11,18 +11,22 @@ class Player(commands.Cog):
         """
         Connects to the Lavalink Server when the cog is loaded.
         """
-        # We need to connect to the Lavalink node. 
-        # Standard default configuration for Lavalink is:
-        # URI: http://localhost:2333
-        # Password: youshallnotpass
-        node: wavelink.Node = wavelink.Node(
-            uri='http://localhost:2333', 
-            password='youshallnotpass'
-        )
-        await wavelink.Pool.connect(client=self.bot, nodes=[node])
+        # Define the node connection details
+        # Make sure these match your application.yml in the 'player' folder
+        nodes = [
+            wavelink.Node(
+                uri='http://localhost:2333',
+                password='youshallnotpass',
+                identifier='Local-Node'
+            )
+        ]
+        
+        # Connect to the nodes
+        await wavelink.Pool.connect(client=self.bot, nodes=nodes)
 
     @commands.Cog.listener()
     async def on_wavelink_node_ready(self, payload: wavelink.NodeReadyEventPayload):
+        # This logs to internal logs, but we will use the !node command to check it
         print(f"Lavalink Node connected: {payload.node.identifier}")
 
     @commands.Cog.listener()
@@ -40,10 +44,31 @@ class Player(commands.Cog):
         if original_requester:
             embed.set_footer(text=f"Requested by {original_requester}")
         
-        if player.home:
+        # Send update to the channel where the song was queued
+        if hasattr(player, 'home') and player.home:
             channel = self.bot.get_channel(player.home)
             if channel:
                 await channel.send(embed=embed)
+
+    @commands.command(name="node", aliases=["lavalink", "status"])
+    async def node_status(self, ctx: commands.Context):
+        """Check the connection status of the Lavalink server."""
+        nodes = wavelink.Pool.nodes.values()
+        
+        if not nodes:
+            return await ctx.send("❌ No Lavalink nodes connected. Please check your Java terminal.")
+
+        embed = discord.Embed(title="Lavalink Connection Status", color=discord.Color.green())
+        
+        for node in nodes:
+            status_emoji = "🟢" if node.status == wavelink.NodeStatus.CONNECTED else "🔴"
+            embed.add_field(
+                name=f"{status_emoji} Node: {node.identifier}",
+                value=f"**URI:** `{node.uri}`\n**Status:** {node.status}",
+                inline=False
+            )
+        
+        await ctx.send(embed=embed)
 
     @commands.command(name="play", aliases=["p"])
     async def play(self, ctx: commands.Context, *, query: str):
