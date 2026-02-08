@@ -1,10 +1,9 @@
-
 import discord
 import wavelink
 from discord.ext import commands
 from typing import cast
 
-class Music(commands.Cog):
+class Player(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
@@ -147,4 +146,4 @@ class Music(commands.Cog):
         await ctx.send(embed=embed)
 
 async def setup(bot):
-    await bot.add_cog(Music(bot))
+    await bot.add_cog(Player(bot))
