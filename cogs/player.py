@@ -2,6 +2,7 @@ import discord
 import wavelink
 from discord.ext import commands
 from typing import cast
+import logging
 
 class Player(commands.Cog):
     def __init__(self, bot):
@@ -11,22 +12,17 @@ class Player(commands.Cog):
         """
         Connects to the Lavalink Server when the cog is loaded.
         """
-        # Define the node connection details
-        # Make sure these match your application.yml in the 'player' folder
-        nodes = [
-            wavelink.Node(
-                uri='http://localhost:2333',
-                password='youshallnotpass',
-                identifier='Local-Node'
-            )
-        ]
-        
-        # Connect to the nodes
-        await wavelink.Pool.connect(client=self.bot, nodes=nodes)
+        # Standard default configuration for Lavalink
+        # Ensure your Lavalink server (Java) is running on port 2333 with this password
+        node: wavelink.Node = wavelink.Node(
+            uri='http://localhost:2333', 
+            password='youshallnotpass'
+        )
+        await wavelink.Pool.connect(client=self.bot, nodes=[node])
 
     @commands.Cog.listener()
     async def on_wavelink_node_ready(self, payload: wavelink.NodeReadyEventPayload):
-        # This logs to internal logs, but we will use the !node command to check it
+        logging.info(f"Lavalink Node connected: {payload.node.identifier}")
         print(f"Lavalink Node connected: {payload.node.identifier}")
 
     @commands.Cog.listener()
@@ -36,11 +32,13 @@ class Player(commands.Cog):
             return
         
         original_requester = getattr(payload.track.extras, "requester", None)
+        
         embed = discord.Embed(
             title="Now Playing",
             description=f"[{payload.track.title}]({payload.track.uri})",
             color=discord.Color.blurple()
         )
+        
         if original_requester:
             embed.set_footer(text=f"Requested by {original_requester}")
         
@@ -49,26 +47,6 @@ class Player(commands.Cog):
             channel = self.bot.get_channel(player.home)
             if channel:
                 await channel.send(embed=embed)
-
-    @commands.command(name="node", aliases=["lavalink", "status"])
-    async def node_status(self, ctx: commands.Context):
-        """Check the connection status of the Lavalink server."""
-        nodes = wavelink.Pool.nodes.values()
-        
-        if not nodes:
-            return await ctx.send("❌ No Lavalink nodes connected. Please check your Java terminal.")
-
-        embed = discord.Embed(title="Lavalink Connection Status", color=discord.Color.green())
-        
-        for node in nodes:
-            status_emoji = "🟢" if node.status == wavelink.NodeStatus.CONNECTED else "🔴"
-            embed.add_field(
-                name=f"{status_emoji} Node: {node.identifier}",
-                value=f"**URI:** `{node.uri}`\n**Status:** {node.status}",
-                inline=False
-            )
-        
-        await ctx.send(embed=embed)
 
     @commands.command(name="play", aliases=["p"])
     async def play(self, ctx: commands.Context, *, query: str):
@@ -85,7 +63,7 @@ class Player(commands.Cog):
             try:
                 player: wavelink.Player = await ctx.author.voice.channel.connect(cls=wavelink.Player)
             except Exception as e:
-                return await ctx.send("I couldn't connect to the voice channel.")
+                return await ctx.send(f"I couldn't connect to the voice channel: {e}")
         else:
             player: wavelink.Player = cast(wavelink.Player, ctx.voice_client)
 
@@ -93,23 +71,21 @@ class Player(commands.Cog):
         player.home = ctx.channel.id
 
         # 4. Search for the track
-        # wavelink.Playable.search will automatically search YouTube by default if no URL is provided
-        tracks: wavelink.Search = await wavelink.Playable.search(query)
+        try:
+            tracks: wavelink.Search = await wavelink.Playable.search(query)
+        except Exception as e:
+            return await ctx.send(f"An error occurred while searching: {e}")
 
         if not tracks:
             return await ctx.send("No tracks found with that query.")
 
         # 5. Add to queue
         if isinstance(tracks, wavelink.Playlist):
-            # If it's a playlist, add all tracks
             added: int = await player.queue.put_wait(tracks)
             await ctx.send(f"Added playlist **{tracks.name}** ({added} songs) to the queue.")
         else:
-            # If it's a single track, take the first result
             track: wavelink.Playable = tracks[0]
-            # Store the requester ID in the track object for later reference
             track.extras = {"requester": ctx.author.display_name}
-            
             await player.queue.put_wait(track)
             await ctx.send(f"Added **{track.title}** to the queue.")
 
@@ -170,5 +146,26 @@ class Player(commands.Cog):
 
         await ctx.send(embed=embed)
 
+    @commands.command(name="node", aliases=["lavalink", "status"])
+    async def node_status(self, ctx: commands.Context):
+        """Check the connection status of the Lavalink server."""
+        nodes = wavelink.Pool.nodes.values()
+        
+        if not nodes:
+            return await ctx.send("❌ No Lavalink nodes connected. Please check your Java terminal.")
+
+        embed = discord.Embed(title="Lavalink Connection Status", color=discord.Color.green())
+        
+        for node in nodes:
+            status_emoji = "🟢" if node.status == wavelink.NodeStatus.CONNECTED else "🔴"
+            embed.add_field(
+                name=f"{status_emoji} Node: {node.identifier}",
+                value=f"**URI:** `{node.uri}`\n**Status:** {node.status}",
+                inline=False
+            )
+        
+        await ctx.send(embed=embed)
+
+# This setup function is required for the cog to be loaded
 async def setup(bot):
     await bot.add_cog(Player(bot))
