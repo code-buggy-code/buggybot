@@ -19,12 +19,10 @@ from typing import cast
 # setup(bot)
 
 # --- CONFIGURATION ---
-# Redbot's method requires a Lavalink Node.
-# You must have a Lavalink server running (usually on port 2333).
-# If you don't have one, download Lavalink.jar and run it with `java -jar Lavalink.jar`
+# We use port 2333 to match the new application.yml configuration
 LAVALINK_HOST = "127.0.0.1"
 LAVALINK_PORT = 2333
-LAVALINK_PASS = "youshallnotpass" # Default Lavalink password
+LAVALINK_PASS = "youshallnotpass"
 
 class Player(commands.Cog):
     def __init__(self, bot: commands.Bot):
