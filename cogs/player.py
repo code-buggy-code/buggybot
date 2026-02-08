@@ -5,12 +5,25 @@ from discord.ext import commands
 from discord import app_commands
 from typing import cast
 
+# Function/Class List:
+# class RedAudio(commands.Cog)
+# - __init__(bot)
+# - cog_load()
+# - connect_nodes()
+# - on_wavelink_node_ready(payload)
+# - verify_audio(interaction)
+# - play(interaction, search)
+# - stop(interaction)
+# - skip(interaction)
+# - queue(interaction)
+# setup(bot)
+
 # --- CONFIGURATION ---
 # Redbot's method requires a Lavalink Node.
-# You must have a Lavalink server running (usually on port 2333).
-# If you don't have one, download Lavalink.jar and run it with `java -jar Lavalink.jar`
+# You must have a Lavalink server running.
+# Your logs indicated it is running on port 8080.
 LAVALINK_HOST = "127.0.0.1"
-LAVALINK_PORT = 2333
+LAVALINK_PORT = 8080 
 LAVALINK_PASS = "youshallnotpass" # Default Lavalink password
 
 class RedAudio(commands.Cog):
@@ -174,23 +187,3 @@ class RedAudio(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(RedAudio(bot))
-```
-
-### **Instructions for Buggy**
-
-1.  **Install Requirements:**
-    You need to install `wavelink` to use this code. Run this in your terminal:
-    ```bash
-    pip install wavelink
-    ```
-
-2.  **The "Redbot Method" (Crucial Step):**
-    Redbot uses a Java application called **Lavalink** to handle the heavy audio processing. For this cog to work, you must have Lavalink running.
-    * **Download:** [Lavalink.jar (GitHub)](https://github.com/lavalink-devs/Lavalink/releases)
-    * **Run:** Open a terminal in the folder where you downloaded it and type: `java -jar Lavalink.jar`.
-    * If you skip this, `Step 2` in the verification command will fail.
-
-3.  **Loading the Cog:**
-    Ensure your `main.py` is set up to load extensions. If you don't have an auto-loader, add this line in your `main.py` startup logic:
-    ```python
-    await bot.load_extension("cogs.red_audio")
