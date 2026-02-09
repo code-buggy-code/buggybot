@@ -29,12 +29,16 @@ class Player(commands.Cog):
 
     async def cog_load(self):
         """Connects to the Lavalink Server when the cog is loaded."""
-        # Standard default configuration for Lavalink
-        node: wavelink.Node = wavelink.Node(
-            uri='http://localhost:2333', 
-            password='youshallnotpass'
-        )
-        await wavelink.Pool.connect(client=self.bot, nodes=[node])
+        try:
+            # Standard default configuration for Lavalink
+            node: wavelink.Node = wavelink.Node(
+                uri='http://localhost:2333', 
+                password='youshallnotpass'
+            )
+            await wavelink.Pool.connect(client=self.bot, nodes=[node])
+        except Exception as e:
+            logging.error(f"Failed to connect to Lavalink: {e}")
+            print(f"Failed to connect to Lavalink: {e}")
 
     @commands.Cog.listener()
     async def on_wavelink_node_ready(self, payload: wavelink.NodeReadyEventPayload):
