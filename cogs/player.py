@@ -1,19 +1,20 @@
 import discord
 import wavelink
+from discord import app_commands
 from discord.ext import commands
 from typing import cast
 import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
 
 class Player(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
     async def setup_hook(self):
-        """
-        Connects to the Lavalink Server when the cog is loaded.
-        """
+        """Connects to the Lavalink Server when the cog is loaded."""
         # Standard default configuration for Lavalink
-        # Ensure your Lavalink server (Java) is running on port 2333 with this password
         node: wavelink.Node = wavelink.Node(
             uri='http://localhost:2333', 
             password='youshallnotpass'
@@ -42,117 +43,113 @@ class Player(commands.Cog):
         if original_requester:
             embed.set_footer(text=f"Requested by {original_requester}")
         
-        # Send update to the channel where the song was queued
         if hasattr(player, 'home') and player.home:
             channel = self.bot.get_channel(player.home)
             if channel:
                 await channel.send(embed=embed)
 
-    @commands.command(name="play", aliases=["p"])
-    async def play(self, ctx: commands.Context, *, query: str):
+    @app_commands.command(name="play", description="Play a song from YouTube/SoundCloud/Spotify")
+    @app_commands.describe(query="The search query or URL")
+    async def play(self, interaction: discord.Interaction, query: str):
         """Play a song from YouTube/SoundCloud/Spotify."""
-        if not ctx.guild:
-            return
+        await interaction.response.defer()
 
-        # 1. Check if user is in voice
-        if not ctx.author.voice:
-            return await ctx.send("You need to be in a voice channel to play music!")
+        if not interaction.guild:
+            return await interaction.followup.send("This command can only be used in a server.")
 
-        # 2. Get or Connect Player
-        if not ctx.voice_client:
+        user = cast(discord.Member, interaction.user)
+        if not user.voice:
+            return await interaction.followup.send("You need to be in a voice channel to play music!")
+
+        if not interaction.guild.voice_client:
             try:
-                player: wavelink.Player = await ctx.author.voice.channel.connect(cls=wavelink.Player)
+                player: wavelink.Player = await user.voice.channel.connect(cls=wavelink.Player)
             except Exception as e:
-                return await ctx.send(f"I couldn't connect to the voice channel: {e}")
+                return await interaction.followup.send(f"I couldn't connect to the voice channel: {e}")
         else:
-            player: wavelink.Player = cast(wavelink.Player, ctx.voice_client)
+            player: wavelink.Player = cast(wavelink.Player, interaction.guild.voice_client)
 
-        # 3. Set the "home" channel for notifications
-        player.home = ctx.channel.id
+        # Store channel ID for notifications
+        player.home = interaction.channel_id
 
-        # 4. Search for the track
         try:
             tracks: wavelink.Search = await wavelink.Playable.search(query)
         except Exception as e:
-            return await ctx.send(f"An error occurred while searching: {e}")
+            return await interaction.followup.send(f"An error occurred while searching: {e}")
 
         if not tracks:
-            return await ctx.send("No tracks found with that query.")
+            return await interaction.followup.send("No tracks found with that query.")
 
-        # 5. Add to queue
         if isinstance(tracks, wavelink.Playlist):
             added: int = await player.queue.put_wait(tracks)
-            await ctx.send(f"Added playlist **{tracks.name}** ({added} songs) to the queue.")
+            await interaction.followup.send(f"Added playlist **{tracks.name}** ({added} songs) to the queue.")
         else:
             track: wavelink.Playable = tracks[0]
-            track.extras = {"requester": ctx.author.display_name}
+            track.extras = {"requester": user.display_name}
             await player.queue.put_wait(track)
-            await ctx.send(f"Added **{track.title}** to the queue.")
+            await interaction.followup.send(f"Added **{track.title}** to the queue.")
 
-        # 6. If not playing, start playing
         if not player.playing:
             await player.play(player.queue.get())
 
-    @commands.command(name="skip", aliases=["s"])
-    async def skip(self, ctx: commands.Context):
+    @app_commands.command(name="skip", description="Skip the current song")
+    async def skip(self, interaction: discord.Interaction):
         """Skip the current song."""
-        if not ctx.voice_client:
-            return
+        if not interaction.guild.voice_client:
+            return await interaction.response.send_message("I am not currently connected.", ephemeral=True)
         
-        player: wavelink.Player = cast(wavelink.Player, ctx.voice_client)
+        player: wavelink.Player = cast(wavelink.Player, interaction.guild.voice_client)
         
         if not player.playing:
-            return await ctx.send("Nothing is playing.")
+            return await interaction.response.send_message("Nothing is playing.", ephemeral=True)
 
         await player.skip(force=True)
-        await ctx.send("Skipped! ⏭️")
+        await interaction.response.send_message("Skipped! ⏭️")
 
-    @commands.command(name="stop", aliases=["leave", "dc"])
-    async def stop(self, ctx: commands.Context):
+    @app_commands.command(name="stop", description="Stop music and clear the queue")
+    async def stop(self, interaction: discord.Interaction):
         """Stop music and clear the queue."""
-        if not ctx.voice_client:
-            return
+        if not interaction.guild.voice_client:
+            return await interaction.response.send_message("I am not currently connected.", ephemeral=True)
         
-        player: wavelink.Player = cast(wavelink.Player, ctx.voice_client)
+        player: wavelink.Player = cast(wavelink.Player, interaction.guild.voice_client)
         await player.disconnect()
-        await ctx.send("Disconnected. 👋")
+        await interaction.response.send_message("Disconnected. 👋")
 
-    @commands.command(name="queue", aliases=["q"])
-    async def queue(self, ctx: commands.Context):
+    @app_commands.command(name="queue", description="Show the current queue")
+    async def queue(self, interaction: discord.Interaction):
         """Show the current queue."""
-        if not ctx.voice_client:
-            return
+        if not interaction.guild.voice_client:
+            return await interaction.response.send_message("I am not currently connected.", ephemeral=True)
         
-        player: wavelink.Player = cast(wavelink.Player, ctx.voice_client)
+        player: wavelink.Player = cast(wavelink.Player, interaction.guild.voice_client)
         
         if player.queue.is_empty and not player.playing:
-            return await ctx.send("The queue is empty.")
+            return await interaction.response.send_message("The queue is empty.", ephemeral=True)
 
         embed = discord.Embed(title="Music Queue", color=discord.Color.green())
         
-        # Current track
         if player.current:
             embed.add_field(name="Now Playing", value=player.current.title, inline=False)
 
-        # Upcoming tracks
         if not player.queue.is_empty:
             upcoming = ""
             for index, track in enumerate(player.queue):
                 upcoming += f"{index + 1}. {track.title}\n"
-                if index >= 9: # Only show next 10 songs
+                if index >= 9:
                     upcoming += "... and more"
                     break
             embed.add_field(name="Up Next", value=upcoming, inline=False)
 
-        await ctx.send(embed=embed)
+        await interaction.response.send_message(embed=embed)
 
-    @commands.command(name="node", aliases=["lavalink", "status"])
-    async def node_status(self, ctx: commands.Context):
+    @app_commands.command(name="node", description="Check Lavalink connection status")
+    async def node_status(self, interaction: discord.Interaction):
         """Check the connection status of the Lavalink server."""
         nodes = wavelink.Pool.nodes.values()
         
         if not nodes:
-            return await ctx.send("❌ No Lavalink nodes connected. Please check your Java terminal.")
+            return await interaction.response.send_message("❌ No Lavalink nodes connected. Please check your Java terminal.", ephemeral=True)
 
         embed = discord.Embed(title="Lavalink Connection Status", color=discord.Color.green())
         
@@ -164,8 +161,56 @@ class Player(commands.Cog):
                 inline=False
             )
         
-        await ctx.send(embed=embed)
+        await interaction.response.send_message(embed=embed)
 
-# This setup function is required for the cog to be loaded
+    @app_commands.command(name="debug_play", description="Diagnose audio playback issues step-by-step")
+    async def debug_play(self, interaction: discord.Interaction):
+        """Run a diagnostic check for the audio system."""
+        await interaction.response.defer()
+        
+        report = []
+        user = cast(discord.Member, interaction.user)
+        
+        # Step 1: Check User Voice State
+        if user.voice and user.voice.channel:
+            report.append(f"✅ User is in voice channel: **{user.voice.channel.name}**")
+        else:
+            report.append("❌ User is NOT in a voice channel.")
+            await interaction.followup.send("\n".join(report))
+            return
+
+        # Step 2: Check Bot Permissions
+        permissions = user.voice.channel.permissions_for(interaction.guild.me)
+        if permissions.connect and permissions.speak:
+            report.append("✅ Bot has Connect/Speak permissions.")
+        else:
+            report.append("❌ Bot is missing Connect or Speak permissions in that channel.")
+            await interaction.followup.send("\n".join(report))
+            return
+
+        # Step 3: Check Lavalink Node Connection
+        nodes = wavelink.Pool.nodes.values()
+        connected_nodes = [n for n in nodes if n.status == wavelink.NodeStatus.CONNECTED]
+        if connected_nodes:
+            report.append(f"✅ Lavalink Node connected ({len(connected_nodes)} active).")
+        else:
+            report.append("❌ No active Lavalink nodes found. Is `java -jar Lavalink.jar` running?")
+            await interaction.followup.send("\n".join(report))
+            return
+
+        # Step 4: Test Search Query
+        report.append("🔍 Attempting test search for 'rick roll'...")
+        try:
+            tracks: wavelink.Search = await wavelink.Playable.search("rick roll")
+            if tracks:
+                report.append(f"✅ Search successful. Found: {tracks[0].title}")
+            else:
+                report.append("⚠️ Search returned no results.")
+        except Exception as e:
+            report.append(f"❌ Search failed with error: {str(e)}")
+
+        embed = discord.Embed(title="Audio System Diagnostic", description="\n".join(report), color=discord.Color.orange())
+        await interaction.followup.send(embed=embed)
+
 async def setup(bot):
     await bot.add_cog(Player(bot))
