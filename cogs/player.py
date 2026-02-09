@@ -4,6 +4,7 @@ from discord import app_commands
 from discord.ext import commands
 from typing import cast
 import logging
+import re
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -11,7 +12,7 @@ logging.basicConfig(level=logging.INFO)
 # Function/Class List:
 # class Player(commands.Cog)
 # - __init__(bot)
-# - cog_load()  <-- Renamed from setup_hook so it runs automatically!
+# - cog_load()
 # - on_wavelink_node_ready(payload)
 # - on_wavelink_track_start(payload)
 # - play(interaction, query)
@@ -85,6 +86,11 @@ class Player(commands.Cog):
 
         # Store channel ID for notifications
         player.home = interaction.channel_id
+
+        # Logic: If it's not a URL, use YouTube Music search (ytmsearch:)
+        # This is often more stable/unblocked than standard ytsearch.
+        if not re.match(r'https?://', query):
+            query = f"ytmsearch:{query}"
 
         try:
             tracks: wavelink.Search = await wavelink.Playable.search(query)
@@ -215,7 +221,8 @@ class Player(commands.Cog):
         # Step 4: Test Search Query
         report.append("🔍 Attempting test search for 'rick roll'...")
         try:
-            tracks: wavelink.Search = await wavelink.Playable.search("rick roll")
+            # We use ytmsearch here too to ensure the test passes!
+            tracks: wavelink.Search = await wavelink.Playable.search("ytmsearch:rick roll")
             if tracks:
                 report.append(f"✅ Search successful. Found: {tracks[0].title}")
             else:
