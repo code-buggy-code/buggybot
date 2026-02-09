@@ -87,10 +87,10 @@ class Player(commands.Cog):
         # Store channel ID for notifications
         player.home = interaction.channel_id
 
-        # Logic: If it's not a URL, use YouTube Music search (ytmsearch:)
-        # This is often more stable/unblocked than standard ytsearch.
+        # Logic: If it's not a URL, use YouTube search (ytsearch:)
+        # We are forcing YouTube as requested.
         if not re.match(r'https?://', query):
-            query = f"ytmsearch:{query}"
+            query = f"ytsearch:{query}"
 
         try:
             tracks: wavelink.Search = await wavelink.Playable.search(query)
@@ -222,7 +222,7 @@ class Player(commands.Cog):
         report.append("🔍 Attempting test search for 'rick roll'...")
         try:
             # We use ytmsearch here too to ensure the test passes!
-            tracks: wavelink.Search = await wavelink.Playable.search("ytmsearch:rick roll")
+            tracks: wavelink.Search = await wavelink.Playable.search("ytsearch:rick roll")
             if tracks:
                 report.append(f"✅ Search successful. Found: {tracks[0].title}")
             else:
