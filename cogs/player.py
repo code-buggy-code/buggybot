@@ -222,15 +222,30 @@ class Player(commands.Cog):
             await interaction.followup.send("\n".join(report))
             return
 
-        # Step 3: Check Lavalink Node Connection
+        # Step 3: Check Lavalink Node Connection (IMPROVED)
         nodes = wavelink.Pool.nodes.values()
         connected_nodes = [n for n in nodes if n.status == wavelink.NodeStatus.CONNECTED]
+        
         if connected_nodes:
             report.append(f"✅ Lavalink Node connected ({len(connected_nodes)} active).")
         else:
-            report.append("❌ No active Lavalink nodes found. Is `java -jar Lavalink.jar` running?")
-            await interaction.followup.send("\n".join(report))
-            return
+            report.append("⚠️ No active Lavalink nodes found initially.")
+            report.append("🔄 Attempting emergency connection to http://localhost:2333...")
+            
+            try:
+                # Try to force a connection to see the specific error
+                node: wavelink.Node = wavelink.Node(
+                    uri='http://localhost:2333', 
+                    password='youshallnotpass'
+                )
+                await wavelink.Pool.connect(client=self.bot, nodes=[node])
+                report.append("✅ Emergency connection successful!")
+            except Exception as e:
+                # This will catch and display the REAL error
+                report.append(f"❌ Connection failed: {e}")
+                report.append("ℹ️ **Possible causes:**\n1. `application.yml` password mismatch.\n2. `java -jar` window is closed.\n3. Port 2333 is blocked.")
+                await interaction.followup.send("\n".join(report))
+                return
 
         # Step 4: Test Search Query with verbose logging
         report.append("🔍 Attempting test search for 'ytsearch:rick roll'...")
