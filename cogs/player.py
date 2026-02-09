@@ -5,6 +5,7 @@ from discord.ext import commands
 from typing import cast
 import logging
 import re
+import traceback
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -88,18 +89,20 @@ class Player(commands.Cog):
         else:
             player: wavelink.Player = cast(wavelink.Player, interaction.guild.voice_client)
 
-        # Store channel ID for notifications
         player.home = interaction.channel_id
 
-        # Logic: If it's not a URL, use YouTube search (ytsearch:)
-        # We are forcing YouTube as requested.
+        # Using ytsearch as requested
         if not re.match(r'https?://', query):
             query = f"ytsearch:{query}"
 
         try:
             tracks: wavelink.Search = await wavelink.Playable.search(query)
         except Exception as e:
-            return await interaction.followup.send(f"An error occurred while searching: {e}")
+            # Enhanced error logging for diagnosis
+            error_msg = f"Error: {str(e)}"
+            print(f"DEBUG: Search failed for query '{query}': {e}")
+            traceback.print_exc() 
+            return await interaction.followup.send(f"An error occurred while searching. Check console for details.\n`{error_msg}`")
 
         if not tracks:
             return await interaction.followup.send("No tracks found with that query.")
@@ -222,10 +225,9 @@ class Player(commands.Cog):
             await interaction.followup.send("\n".join(report))
             return
 
-        # Step 4: Test Search Query
-        report.append("🔍 Attempting test search for 'rick roll'...")
+        # Step 4: Test Search Query with verbose logging
+        report.append("🔍 Attempting test search for 'ytsearch:rick roll'...")
         try:
-            # We use ytmsearch here too to ensure the test passes!
             tracks: wavelink.Search = await wavelink.Playable.search("ytsearch:rick roll")
             if tracks:
                 report.append(f"✅ Search successful. Found: {tracks[0].title}")
@@ -233,6 +235,7 @@ class Player(commands.Cog):
                 report.append("⚠️ Search returned no results.")
         except Exception as e:
             report.append(f"❌ Search failed with error: {str(e)}")
+            report.append(f"ℹ️ **Action Required:** Please check the Lavalink Java window for the full error trace.")
 
         embed = discord.Embed(title="Audio System Diagnostic", description="\n".join(report), color=discord.Color.orange())
         await interaction.followup.send(embed=embed)
