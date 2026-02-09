@@ -8,11 +8,25 @@ import logging
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 
+# Function/Class List:
+# class Player(commands.Cog)
+# - __init__(bot)
+# - cog_load()  <-- Renamed from setup_hook so it runs automatically!
+# - on_wavelink_node_ready(payload)
+# - on_wavelink_track_start(payload)
+# - play(interaction, query)
+# - skip(interaction)
+# - stop(interaction)
+# - queue(interaction)
+# - node_status(interaction)
+# - debug_play(interaction)
+# setup(bot)
+
 class Player(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    async def setup_hook(self):
+    async def cog_load(self):
         """Connects to the Lavalink Server when the cog is loaded."""
         # Standard default configuration for Lavalink
         node: wavelink.Node = wavelink.Node(
