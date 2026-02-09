@@ -1,6 +1,7 @@
 import discord
 import wavelink
 import asyncio
+import socket
 from discord import app_commands
 from discord.ext import commands
 from typing import cast
@@ -24,6 +25,7 @@ logging.basicConfig(level=logging.INFO)
 # - queue(interaction)
 # - node_status(interaction)
 # - debug_play(interaction)
+# - check_port(host, port) <--- NEW HELPER FUNCTION
 # setup(bot)
 
 class Player(commands.Cog):
@@ -32,14 +34,12 @@ class Player(commands.Cog):
 
     async def cog_load(self):
         """Start the connection process when the cog loads."""
-        # We use create_task so we don't block the bot/cog loading if Lavalink is down/slow
         self.bot.loop.create_task(self.connect_nodes())
 
     async def connect_nodes(self):
         """Connects to the Lavalink Server."""
         await self.bot.wait_until_ready()
         try:
-            # Standard default configuration for Lavalink
             node: wavelink.Node = wavelink.Node(
                 uri='http://localhost:2333', 
                 password='youshallnotpass'
@@ -49,6 +49,14 @@ class Player(commands.Cog):
         except Exception as e:
             logging.error(f"Failed to connect to Lavalink: {e}")
             print(f"DEBUG: Background connection failed: {e}")
+
+    def check_port(self, host, port):
+        """Helper function to check if a port is open."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2) # 2 second timeout for the check
+        result = sock.connect_ex((host, port))
+        sock.close()
+        return result == 0
 
     @commands.Cog.listener()
     async def on_wavelink_node_ready(self, payload: wavelink.NodeReadyEventPayload):
@@ -104,14 +112,12 @@ class Player(commands.Cog):
 
         player.home = interaction.channel_id
 
-        # Using ytsearch as requested
         if not re.match(r'https?://', query):
             query = f"ytsearch:{query}"
 
         try:
             tracks: wavelink.Search = await wavelink.Playable.search(query)
         except Exception as e:
-            # Enhanced error logging for diagnosis
             error_msg = f"Error: {str(e)}"
             print(f"DEBUG: Search failed for query '{query}': {e}")
             traceback.print_exc() 
@@ -228,33 +234,25 @@ class Player(commands.Cog):
             await interaction.followup.send("\n".join(report))
             return
 
-        # Step 3: Check Lavalink Node Connection (IMPROVED with Timeout)
+        # Step 3: Check Lavalink Node Connection (DEEP DIAGNOSTIC)
         nodes = wavelink.Pool.nodes.values()
         connected_nodes = [n for n in nodes if n.status == wavelink.NodeStatus.CONNECTED]
         
         if connected_nodes:
             report.append(f"✅ Lavalink Node connected ({len(connected_nodes)} active).")
         else:
-            report.append("⚠️ No active Lavalink nodes found initially.")
-            report.append("🔄 Attempting emergency connection to http://localhost:2333...")
+            report.append("⚠️ No active Lavalink nodes found. Digging deeper...")
             
-            try:
-                # Try to force a connection to see the specific error with a TIMEOUT
-                node: wavelink.Node = wavelink.Node(
-                    uri='http://localhost:2333', 
-                    password='youshallnotpass'
-                )
-                # This ensures we don't think forever!
-                await asyncio.wait_for(wavelink.Pool.connect(client=self.bot, nodes=[node]), timeout=10.0)
-                report.append("✅ Emergency connection successful!")
-            except asyncio.TimeoutError:
-                report.append("❌ Connection TIMED OUT after 10 seconds.")
-                report.append("ℹ️ **Possible causes:**\n1. Firewall is blocking port 2333.\n2. `application.yml` has the wrong port.\n3. Lavalink is frozen.")
-                await interaction.followup.send("\n".join(report))
-                return
-            except Exception as e:
-                report.append(f"❌ Connection failed: {e}")
-                report.append("ℹ️ **Possible causes:**\n1. `application.yml` password mismatch.\n2. `java -jar` window is closed.\n3. Port 2333 is blocked.")
+            # CHECK 1: Is the port even open?
+            is_open = self.check_port('localhost', 2333)
+            if is_open:
+                report.append("✅ **Port 2333 is OPEN.** Lavalink is running and reachable!")
+                # If port is open but connection failed, it's likely a password issue
+                report.append("❌ **Diagnosis:** Password mismatch. Check `application.yml` and `player.py` match.")
+            else:
+                report.append("❌ **Port 2333 is CLOSED.**")
+                report.append("❌ **Diagnosis:** Lavalink is NOT running or `application.yml` has the wrong port.")
+                report.append("ℹ️ **Fix:** Make sure the black Java window is open and says 'Ready'.")
                 await interaction.followup.send("\n".join(report))
                 return
 
@@ -268,7 +266,6 @@ class Player(commands.Cog):
                 report.append("⚠️ Search returned no results.")
         except Exception as e:
             report.append(f"❌ Search failed with error: {str(e)}")
-            report.append(f"ℹ️ **Action Required:** Please check the Lavalink Java window for the full error trace.")
 
         embed = discord.Embed(title="Audio System Diagnostic", description="\n".join(report), color=discord.Color.orange())
         await interaction.followup.send(embed=embed)
