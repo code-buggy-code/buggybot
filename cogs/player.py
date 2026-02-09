@@ -1,5 +1,6 @@
 import discord
 import wavelink
+import asyncio
 from discord import app_commands
 from discord.ext import commands
 from typing import cast
@@ -44,9 +45,10 @@ class Player(commands.Cog):
                 password='youshallnotpass'
             )
             await wavelink.Pool.connect(client=self.bot, nodes=[node])
+            print("DEBUG: Background connection to Lavalink successful.")
         except Exception as e:
             logging.error(f"Failed to connect to Lavalink: {e}")
-            print(f"Failed to connect to Lavalink: {e}")
+            print(f"DEBUG: Background connection failed: {e}")
 
     @commands.Cog.listener()
     async def on_wavelink_node_ready(self, payload: wavelink.NodeReadyEventPayload):
@@ -80,6 +82,10 @@ class Player(commands.Cog):
     async def play(self, interaction: discord.Interaction, query: str):
         """Play a song from YouTube/SoundCloud/Spotify."""
         await interaction.response.defer()
+
+        # Check for nodes FIRST to prevent hanging
+        if not wavelink.Pool.nodes:
+            return await interaction.followup.send("❌ Lavalink is not connected. I cannot play music until `java -jar Lavalink.jar` is running and connected.")
 
         if not interaction.guild:
             return await interaction.followup.send("This command can only be used in a server.")
@@ -222,7 +228,7 @@ class Player(commands.Cog):
             await interaction.followup.send("\n".join(report))
             return
 
-        # Step 3: Check Lavalink Node Connection (IMPROVED)
+        # Step 3: Check Lavalink Node Connection (IMPROVED with Timeout)
         nodes = wavelink.Pool.nodes.values()
         connected_nodes = [n for n in nodes if n.status == wavelink.NodeStatus.CONNECTED]
         
@@ -233,15 +239,20 @@ class Player(commands.Cog):
             report.append("🔄 Attempting emergency connection to http://localhost:2333...")
             
             try:
-                # Try to force a connection to see the specific error
+                # Try to force a connection to see the specific error with a TIMEOUT
                 node: wavelink.Node = wavelink.Node(
                     uri='http://localhost:2333', 
                     password='youshallnotpass'
                 )
-                await wavelink.Pool.connect(client=self.bot, nodes=[node])
+                # This ensures we don't think forever!
+                await asyncio.wait_for(wavelink.Pool.connect(client=self.bot, nodes=[node]), timeout=10.0)
                 report.append("✅ Emergency connection successful!")
+            except asyncio.TimeoutError:
+                report.append("❌ Connection TIMED OUT after 10 seconds.")
+                report.append("ℹ️ **Possible causes:**\n1. Firewall is blocking port 2333.\n2. `application.yml` has the wrong port.\n3. Lavalink is frozen.")
+                await interaction.followup.send("\n".join(report))
+                return
             except Exception as e:
-                # This will catch and display the REAL error
                 report.append(f"❌ Connection failed: {e}")
                 report.append("ℹ️ **Possible causes:**\n1. `application.yml` password mismatch.\n2. `java -jar` window is closed.\n3. Port 2333 is blocked.")
                 await interaction.followup.send("\n".join(report))
