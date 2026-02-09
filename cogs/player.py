@@ -14,6 +14,7 @@ logging.basicConfig(level=logging.INFO)
 # class Player(commands.Cog)
 # - __init__(bot)
 # - cog_load()
+# - connect_nodes()
 # - on_wavelink_node_ready(payload)
 # - on_wavelink_track_start(payload)
 # - play(interaction, query)
@@ -29,7 +30,13 @@ class Player(commands.Cog):
         self.bot = bot
 
     async def cog_load(self):
-        """Connects to the Lavalink Server when the cog is loaded."""
+        """Start the connection process when the cog loads."""
+        # We use create_task so we don't block the bot/cog loading if Lavalink is down/slow
+        self.bot.loop.create_task(self.connect_nodes())
+
+    async def connect_nodes(self):
+        """Connects to the Lavalink Server."""
+        await self.bot.wait_until_ready()
         try:
             # Standard default configuration for Lavalink
             node: wavelink.Node = wavelink.Node(
