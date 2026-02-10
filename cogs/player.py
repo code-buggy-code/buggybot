@@ -17,7 +17,7 @@ import signal
 # - is_port_in_use(port)
 # - kill_process_on_port(port)
 # - download_redbot_lavalink()
-# - start_lavalink()
+# - start_lavalink() <--- UPDATED: Uses Python native detach
 # - connect_nodes()
 # - cog_load()
 # - cog_unload()
@@ -28,7 +28,7 @@ import signal
 # - volume(interaction, level)
 # - queue(interaction)
 # - nowplaying(interaction)
-# - checkplayer(interaction) <--- UPDATED: Shows real status
+# - checkplayer(interaction) <--- UPDATED: Added timeouts & live updates
 # - on_wavelink_track_start(payload)
 # - on_wavelink_track_end(payload)
 # - on_wavelink_track_exception(payload)
@@ -47,7 +47,6 @@ class Player(commands.Cog):
         self.port = 2333
         self.password = "youshallnotpass"
         self.download_url = "https://github.com/Cog-Creators/Lavalink-Jars/releases/latest/download/Lavalink.jar"
-        self.lavalink_process = None
 
     def is_port_in_use(self, port: int) -> bool:
         """Checks if a port is already being used."""
@@ -61,7 +60,6 @@ class Player(commands.Cog):
             cmd_pid = f"lsof -t -i:{port}"
             pid_res = subprocess.run(cmd_pid, shell=True, capture_output=True, text=True)
             pid = pid_res.stdout.strip()
-
             if pid:
                 print(f"💥 Player Cog: Found PID {pid}. Killing it...")
                 subprocess.run(f"kill -9 {pid}", shell=True)
@@ -74,9 +72,7 @@ class Player(commands.Cog):
     async def download_redbot_lavalink(self):
         """Downloads the latest Lavalink.jar from RedBot's repo."""
         jar_path = os.path.join(os.getcwd(), self.lavalink_dir, self.lavalink_jar)
-        
-        if not os.path.exists(self.lavalink_dir):
-            os.makedirs(self.lavalink_dir)
+        if not os.path.exists(self.lavalink_dir): os.makedirs(self.lavalink_dir)
 
         print(f"⬇️  Player Cog: Downloading latest RedBot Lavalink.jar...")
         try:
@@ -98,7 +94,7 @@ class Player(commands.Cog):
             return False
 
     async def start_lavalink(self):
-        """Starts the Lavalink server using nohup."""
+        """Starts the Lavalink server using Python's detached mode."""
         # 1. Check Port
         if self.is_port_in_use(self.port):
             print(f"⚡ Player Cog: Port {self.port} is busy. Assuming Lavalink is running.")
@@ -108,44 +104,34 @@ class Player(commands.Cog):
         jar_path = os.path.join(os.getcwd(), self.lavalink_dir, self.lavalink_jar)
         if not os.path.exists(jar_path):
             print("⚠️ Player Cog: Lavalink.jar not found. Initial download...")
-            if not await self.download_redbot_lavalink():
-                return
+            if not await self.download_redbot_lavalink(): return
 
-        # 3. Start Process using nohup
-        print(f"☕ Player Cog: Launching Lavalink via nohup...")
+        # 3. Start Process (Native Detach)
+        print(f"☕ Player Cog: Launching Lavalink (Detached)...")
+        log_path = os.path.join(os.getcwd(), self.lavalink_dir, "lavalink.log")
         try:
-            # We explicitly allow writing to lavalink.log for debugging
-            cmd = f"nohup {self.java_path} -jar {self.lavalink_jar} > lavalink.log 2>&1 &"
-            
-            subprocess.Popen(
-                cmd,
-                cwd=os.path.join(os.getcwd(), self.lavalink_dir),
-                shell=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True
-            )
-            print("✅ Player Cog: Lavalink process launched. Waiting for startup...")
-            await asyncio.sleep(10) # Give it 10s to ensure it binds to port
+            with open(log_path, "w") as logfile:
+                subprocess.Popen(
+                    [self.java_path, "-jar", self.lavalink_jar],
+                    cwd=os.path.join(os.getcwd(), self.lavalink_dir),
+                    stdout=logfile,
+                    stderr=logfile,
+                    start_new_session=True # This detaches the process properly
+                )
+            print("✅ Player Cog: Lavalink process launched.")
+            await asyncio.sleep(8) # Give it time to bind
         except Exception as e:
             print(f"❌ Player Cog: Failed to launch Java: {e}")
 
     async def connect_nodes(self):
         """Connects Wavelink to the Lavalink node."""
-        # Wait for port to be open before connecting
         retries = 0
         while not self.is_port_in_use(self.port) and retries < 5:
-            print(f"⏳ Player Cog: Waiting for Lavalink port {self.port}...")
+            print(f"⏳ Player Cog: Waiting for port {self.port}...")
             await asyncio.sleep(2)
             retries += 1
             
-        nodes = [
-            wavelink.Node(
-                identifier="local-node",
-                uri=f"http://{self.host}:{self.port}",
-                password=self.password
-            )
-        ]
+        nodes = [wavelink.Node(identifier="local-node", uri=f"http://{self.host}:{self.port}", password=self.password)]
         try:
             await wavelink.Pool.connect(nodes=nodes, client=self.bot, cache_capacity=100)
             print("✅ Player Cog: Wavelink connected to nodes!")
@@ -153,19 +139,12 @@ class Player(commands.Cog):
             print(f"❌ Player Cog: Wavelink connection error: {e}")
 
     async def cog_load(self):
-        """Called when bot loads this cog."""
         await self.start_lavalink()
         await self.connect_nodes()
 
     async def cog_unload(self):
-        """Called when bot unloads this cog."""
-        await self.stop_lavalink()
         try: await wavelink.Pool.close()
         except: pass
-    
-    async def stop_lavalink(self):
-        # Placeholder for strict stop logic if needed later
-        pass
 
     # --- UPDATER COMMAND ---
 
@@ -173,48 +152,86 @@ class Player(commands.Cog):
     async def update_lavalink(self, interaction: discord.Interaction):
         """Force kills existing Lavalink, updates jar, and restarts."""
         if not interaction.user.guild_permissions.administrator:
-            return await interaction.response.send_message("❌ You must be an administrator to use this.", ephemeral=True)
+            return await interaction.response.send_message("❌ You must be an administrator.", ephemeral=True)
 
         await interaction.response.defer()
         
         embed = discord.Embed(title="🔄 Updating Music System", color=discord.Color.blue())
-        embed.add_field(name="Step 1", value="Cleaning up old processes... ⏳")
+        embed.add_field(name="Status", value="Killing old process... ⏳")
         msg = await interaction.followup.send(embed=embed)
 
         self.kill_process_on_port(self.port)
-        await asyncio.sleep(3) 
+        await asyncio.sleep(2) 
         
-        embed.set_field_at(0, name="Step 1", value="Cleaning up old processes... ✅")
-        embed.add_field(name="Step 2", value="Downloading latest core... ⏳", inline=False)
+        embed.set_field_at(0, name="Status", value="Downloading new core... ⏳")
         await msg.edit(embed=embed)
 
         success = await self.download_redbot_lavalink()
         if not success:
             embed.color = discord.Color.red()
-            embed.set_field_at(1, name="Step 2", value="Downloading latest core... ❌ Failed!")
+            embed.set_field_at(0, name="Status", value="❌ Download Failed!")
             return await msg.edit(embed=embed)
 
-        embed.set_field_at(1, name="Step 2", value="Downloading latest core... ✅")
-        embed.add_field(name="Step 3", value="Restarting services... ⏳", inline=False)
+        embed.set_field_at(0, name="Status", value="Restarting services... ⏳")
         await msg.edit(embed=embed)
 
         await self.start_lavalink()
 
-        # Force reconnect logic
+        # Reconnect
         try:
             node = wavelink.Pool.get_node("local-node")
-            if node:
-                await node.close() # Close old connection if exists
+            if node: await node.close()
             await self.connect_nodes()
-        except:
-            pass
+        except: pass
 
         embed.color = discord.Color.green()
-        embed.set_field_at(2, name="Step 3", value="Restarting services... ✅")
-        embed.description = "**Success!** The music system has been fully updated and restarted."
+        embed.set_field_at(0, name="Status", value="✅ **Success!** System updated and restarted.")
         await msg.edit(embed=embed)
 
-    # --- MUSIC COMMANDS ---
+    # --- COMMANDS ---
+
+    @app_commands.command(name="checkplayer", description="Diagnostics: Check Lavalink connection and search.")
+    async def checkplayer(self, interaction: discord.Interaction):
+        """Runs diagnostics with timeouts to prevent hanging."""
+        # 1. Immediate response to prevent "Thinking..." hang
+        await interaction.response.defer()
+        embed = discord.Embed(title="🎧 Player Diagnostics", description="Initializing...", color=discord.Color.from_str("#ff90aa"))
+        msg = await interaction.followup.send(embed=embed)
+
+        # 2. Check Port
+        is_running = self.is_port_in_use(self.port)
+        embed.add_field(name="1. Process Check", value=f"{'✅ Running' if is_running else '🔴 Not Found'} (Port {self.port})", inline=False)
+        await msg.edit(embed=embed)
+
+        # 3. Check Node
+        node = wavelink.Pool.get_node("local-node")
+        status = "Unknown"
+        if node:
+            status = f"{'✅ Connected' if node.status == wavelink.NodeStatus.CONNECTED else '⚠️ ' + str(node.status)}"
+        else:
+            status = "🔴 Missing from Pool"
+        
+        embed.add_field(name="2. Node Status", value=status, inline=False)
+        await msg.edit(embed=embed)
+
+        # 4. Search Test (WITH TIMEOUT)
+        if node and node.status == wavelink.NodeStatus.CONNECTED:
+            try:
+                # Wait max 5 seconds for search
+                tracks = await asyncio.wait_for(wavelink.Playable.search("ytsearch:Rick Astley"), timeout=5.0)
+                if tracks:
+                    embed.add_field(name="3. Search Test", value=f"✅ **Success**\nFound: {tracks[0].title}", inline=False)
+                else:
+                    embed.add_field(name="3. Search Test", value="⚠️ **Empty** (No results)", inline=False)
+            except asyncio.TimeoutError:
+                 embed.add_field(name="3. Search Test", value="⏰ **Timed Out** (Engine unresponsive)", inline=False)
+            except Exception as e:
+                 embed.add_field(name="3. Search Test", value=f"❌ **Error**: {e}", inline=False)
+        else:
+            embed.add_field(name="3. Search Test", value="🚫 Skipped (Node not connected)", inline=False)
+
+        embed.description = "Diagnostics Complete."
+        await msg.edit(embed=embed)
 
     @app_commands.command(name="play", description="Play a song from YouTube/Spotify")
     @app_commands.describe(search="The song name or URL")
@@ -224,7 +241,6 @@ class Player(commands.Cog):
 
         await interaction.response.defer()
         
-        # Ensure voice connection
         if not interaction.guild.voice_client:
             try:
                 vc: wavelink.Player = await interaction.user.voice.channel.connect(cls=wavelink.Player)
@@ -235,17 +251,11 @@ class Player(commands.Cog):
 
         vc.home = interaction.channel
 
-        # CRITICAL: Verify Node Status before searching
-        node = wavelink.Pool.get_node("local-node")
-        if not node or node.status != wavelink.NodeStatus.CONNECTED:
-             return await interaction.followup.send(
-                 f"❌ **Music System Offline.**\n"
-                 f"Status: `{node.status if node else 'None'}`\n"
-                 "Please run `/update_lavalink` to restart it."
-             )
-
         try:
-            tracks = await wavelink.Playable.search(search)
+            # Added timeout here too just in case
+            tracks = await asyncio.wait_for(wavelink.Playable.search(search), timeout=10.0)
+        except asyncio.TimeoutError:
+            return await interaction.followup.send("❌ **Timeout:** The music engine is not responding.")
         except Exception as e:
             return await interaction.followup.send(f"❌ Search error: {e}")
 
@@ -301,43 +311,6 @@ class Player(commands.Cog):
         embed = discord.Embed(title="Now Playing", description=f"[{vc.current.title}]({vc.current.uri})", color=discord.Color.from_str("#ff90aa"))
         embed.add_field(name="Artist", value=vc.current.author, inline=True)
         await interaction.response.send_message(embed=embed)
-
-    @app_commands.command(name="checkplayer", description="Diagnostics: Check Lavalink connection and search.")
-    async def checkplayer(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        node = wavelink.Pool.get_node("local-node")
-        
-        embed = discord.Embed(title="🎧 Player Diagnostics", color=discord.Color.from_str("#ff90aa"))
-        
-        if not node:
-            embed.description = "❌ **Node Object Missing (Code Logic Error).**"
-            return await interaction.followup.send(embed=embed)
-
-        # Get the REAL status
-        status_str = str(node.status)
-        status_emoji = "✅" if node.status == wavelink.NodeStatus.CONNECTED else "🔴"
-        
-        # Show Version
-        version_info = "Unknown"
-        if hasattr(node, "server_version"): 
-             version_info = node.server_version
-        
-        embed.add_field(name="1. Lavalink Node", value=f"{status_emoji} Status: `{status_str}`\nID: `{node.identifier}`\nVersion: `{version_info}`", inline=False)
-
-        if node.status != wavelink.NodeStatus.CONNECTED:
-             embed.add_field(name="2. Search & Access", value="🚫 **Skipped** (Node not connected)", inline=False)
-             embed.set_footer(text="Try running /update_lavalink to restart the server.")
-        else:
-            try:
-                tracks = await wavelink.Playable.search("ytsearch:Rick Astley Never Gonna Give You Up")
-                if tracks:
-                    embed.add_field(name="2. Search & Access", value=f"✅ **Success**\nFound: {tracks[0].title}", inline=False)
-                else:
-                    embed.add_field(name="2. Search & Access", value="❌ **Failed** (No results)", inline=False)
-            except Exception as e:
-                 embed.add_field(name="2. Search & Access", value=f"❌ **Error**: {e}", inline=False)
-
-        await interaction.followup.send(embed=embed)
 
     @commands.Cog.listener()
     async def on_wavelink_track_start(self, payload: wavelink.TrackStartEventPayload):
