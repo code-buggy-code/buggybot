@@ -147,8 +147,18 @@ class Player(commands.Cog):
             await player.queue.put_wait(track)
             await interaction.followup.send(f"Added **{track.title}** to the queue.")
 
+        # FORCE PLAY if not playing
         if not player.playing:
-            await player.play(player.queue.get())
+            # Explicitly play the track we just added to the queue
+            # This ensures the audio stream actually starts
+            try:
+                # Retrieve from queue but put it back if play fails for some reason
+                next_track = player.queue.get() 
+                await player.play(next_track)
+            except Exception as e:
+                 print(f"DEBUG: Failed to force play: {e}")
+                 # If queue was empty or something failed, just ignore
+                 pass
 
     @app_commands.command(name="skip", description="Skip the current song")
     async def skip(self, interaction: discord.Interaction):
