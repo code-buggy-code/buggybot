@@ -9,18 +9,19 @@ import asyncio
 import sys
 import socket
 import aiohttp
+import signal
 
 # Function List:
 # class Player(commands.Cog)
 # - __init__(bot)
 # - is_port_in_use(port)
-# - kill_process_on_port(port) <--- NEW: Force kills existing Lavalink
+# - kill_process_on_port(port) <--- UPDATED: More robust killing
 # - download_redbot_lavalink()
-# - start_lavalink() <--- UPDATED: Starts as 'nohup'
+# - start_lavalink()
 # - connect_nodes()
 # - cog_load()
 # - cog_unload()
-# - update_lavalink(interaction) <--- UPDATED: Uses force kill
+# - update_lavalink(interaction) <--- UPDATED: Removes checks, just kills
 # - play(interaction, search)
 # - skip(interaction)
 # - stop(interaction)
@@ -46,6 +47,7 @@ class Player(commands.Cog):
         self.port = 2333
         self.password = "youshallnotpass"
         self.download_url = "https://github.com/Cog-Creators/Lavalink-Jars/releases/latest/download/Lavalink.jar"
+        self.lavalink_process = None
 
     def is_port_in_use(self, port: int) -> bool:
         """Checks if a port is already being used."""
@@ -54,13 +56,21 @@ class Player(commands.Cog):
 
     def kill_process_on_port(self, port: int):
         """Finds the process on the specific port and kills it."""
-        print(f"🔪 Player Cog: Attempting to kill process on port {port}...")
+        print(f"🔪 Player Cog: Hunting for process on port {port}...")
         try:
-            # We use lsof to find the PID and kill to terminate it
-            # This is a shell command that works on most Linux systems
-            cmd = f"kill -9 $(lsof -t -i:{port})"
-            subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return True
+            # 1. Get the PID
+            cmd_pid = f"lsof -t -i:{port}"
+            pid_res = subprocess.run(cmd_pid, shell=True, capture_output=True, text=True)
+            pid = pid_res.stdout.strip()
+
+            if pid:
+                print(f"💥 Player Cog: Found PID {pid}. Killing it...")
+                # 2. Kill the PID
+                subprocess.run(f"kill -9 {pid}", shell=True)
+                return True
+            else:
+                print("ℹ️ Player Cog: No process found on port (it might have already closed).")
+                return True
         except Exception as e:
             print(f"⚠️ Player Cog: Failed to force kill process: {e}")
             return False
@@ -91,9 +101,25 @@ class Player(commands.Cog):
             print(f"❌ Player Cog: Download error: {e}")
             return False
 
+    async def stop_lavalink(self):
+        """Stops the Lavalink subprocess if it exists in memory."""
+        # This only stops the one THIS instance started. 
+        # The update_lavalink command uses kill_process_on_port for everything else.
+        if self.lavalink_process:
+            try:
+                self.lavalink_process.terminate()
+            except:
+                pass
+            self.lavalink_process = None
+
     async def start_lavalink(self):
         """Starts the Lavalink server using nohup."""
-        # 1. Download if missing
+        # 1. Check Port
+        if self.is_port_in_use(self.port):
+            print(f"⚡ Player Cog: Port {self.port} is busy. Assuming Lavalink is running.")
+            return
+
+        # 2. Download if missing
         jar_path = os.path.join(os.getcwd(), self.lavalink_dir, self.lavalink_jar)
         if not os.path.exists(jar_path):
             print("⚠️ Player Cog: Lavalink.jar not found. Initial download...")
@@ -101,30 +127,21 @@ class Player(commands.Cog):
                 print("❌ Player Cog: Startup failed (Download error).")
                 return
 
-        # 2. Check Port
-        if self.is_port_in_use(self.port):
-            print(f"⚡ Player Cog: Port {self.port} is busy. Assuming Lavalink is running.")
-            return
-
         # 3. Start Process using nohup
         print(f"☕ Player Cog: Launching Lavalink via nohup...")
         try:
-            # We construct a shell command that runs java in the background with nohup
-            # > /dev/null 2>&1 redirects all output to blackhole so it doesn't clutter console or create huge log files
             cmd = f"nohup {self.java_path} -jar {self.lavalink_jar} > /dev/null 2>&1 &"
             
             subprocess.Popen(
                 cmd,
                 cwd=os.path.join(os.getcwd(), self.lavalink_dir),
-                shell=True, # Required for nohup and & to work
+                shell=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                start_new_session=True # Detaches the child process
+                start_new_session=True
             )
-            
-            # Give Java a moment to spin up
             await asyncio.sleep(5) 
-            print("✅ Player Cog: Lavalink nohup process triggered.")
+            print("✅ Player Cog: Lavalink process launched.")
         except Exception as e:
             print(f"❌ Player Cog: Failed to launch Java: {e}")
 
@@ -150,50 +167,47 @@ class Player(commands.Cog):
 
     async def cog_unload(self):
         """Called when bot unloads this cog."""
-        # We DO NOT kill the process here anymore, because it is running as nohup
-        try:
-            await wavelink.Pool.close()
-        except:
-            pass
+        await self.stop_lavalink()
+        try: await wavelink.Pool.close()
+        except: pass
 
     # --- UPDATER COMMAND ---
 
     @app_commands.command(name="update_lavalink", description="[Admin] Kills, Updates, and Restarts Lavalink.")
     async def update_lavalink(self, interaction: discord.Interaction):
-        """Force kills existing Lavalink, updates jar, and restarts as nohup."""
+        """Force kills existing Lavalink, updates jar, and restarts."""
         if not interaction.user.guild_permissions.administrator:
             return await interaction.response.send_message("❌ You must be an administrator to use this.", ephemeral=True)
 
         await interaction.response.defer()
         
-        embed = discord.Embed(title="🔄 Updating Music System (Nohup Mode)", color=discord.Color.blue())
-        embed.add_field(name="Step 1", value="Force killing existing process... ⏳")
+        embed = discord.Embed(title="🔄 Updating Music System", color=discord.Color.blue())
+        embed.add_field(name="Step 1", value="Cleaning up old processes... ⏳")
         msg = await interaction.followup.send(embed=embed)
 
-        # 1. Force Kill
+        # 1. Force Kill (No questions asked!)
         self.kill_process_on_port(self.port)
-        await asyncio.sleep(2) # Wait for OS to clean up
+        await asyncio.sleep(2) 
         
         # 2. Download
-        embed.set_field_at(0, name="Step 1", value="Force killing existing process... ✅")
-        embed.add_field(name="Step 2", value="Downloading RedBot Lavalink... ⏳", inline=False)
+        embed.set_field_at(0, name="Step 1", value="Cleaning up old processes... ✅")
+        embed.add_field(name="Step 2", value="Downloading latest core... ⏳", inline=False)
         await msg.edit(embed=embed)
 
         success = await self.download_redbot_lavalink()
         if not success:
             embed.color = discord.Color.red()
-            embed.set_field_at(1, name="Step 2", value="Downloading RedBot Lavalink... ❌ Failed!")
+            embed.set_field_at(1, name="Step 2", value="Downloading latest core... ❌ Failed!")
             return await msg.edit(embed=embed)
 
         # 3. Start
-        embed.set_field_at(1, name="Step 2", value="Downloading RedBot Lavalink... ✅")
-        embed.add_field(name="Step 3", value="Starting new nohup process... ⏳", inline=False)
+        embed.set_field_at(1, name="Step 2", value="Downloading latest core... ✅")
+        embed.add_field(name="Step 3", value="Restarting services... ⏳", inline=False)
         await msg.edit(embed=embed)
 
         await self.start_lavalink()
 
         # 4. Reconnect
-        # Wait a bit longer for cold start
         await asyncio.sleep(5)
         try:
             node = wavelink.Pool.get_node("local-node")
@@ -203,8 +217,8 @@ class Player(commands.Cog):
             await self.connect_nodes()
 
         embed.color = discord.Color.green()
-        embed.set_field_at(2, name="Step 3", value="Starting new nohup process... ✅")
-        embed.description = "**Success!** Lavalink updated and restarted in background."
+        embed.set_field_at(2, name="Step 3", value="Restarting services... ✅")
+        embed.description = "**Success!** The music system has been fully updated and restarted."
         await msg.edit(embed=embed)
 
     # --- MUSIC COMMANDS ---
