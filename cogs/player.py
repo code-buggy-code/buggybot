@@ -20,8 +20,8 @@ logging.basicConfig(level=logging.INFO)
 # - check_port(host, port)
 # - on_wavelink_node_ready(payload)
 # - on_wavelink_track_start(payload)
-# - on_wavelink_track_exception(payload)  <-- NEW: Logs why tracks fail
-# - on_wavelink_track_end(payload)        <-- NEW: Handles queue loop
+# - on_wavelink_track_exception(payload)
+# - on_wavelink_track_end(payload)
 # - play(interaction, query)
 # - skip(interaction)
 # - stop(interaction)
@@ -151,8 +151,9 @@ class Player(commands.Cog):
 
         player.home = interaction.channel_id
 
+        # SWITCHED TO YTMSEARCH because ytsearch is broken by the signature error
         if not re.match(r'https?://', query):
-            query = f"ytsearch:{query}"
+            query = f"ytmsearch:{query}"
 
         try:
             tracks: wavelink.Search = await wavelink.Playable.search(query)
