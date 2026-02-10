@@ -20,6 +20,8 @@ logging.basicConfig(level=logging.INFO)
 # - check_port(host, port)
 # - on_wavelink_node_ready(payload)
 # - on_wavelink_track_start(payload)
+# - on_wavelink_track_exception(payload)  <-- NEW: Logs why tracks fail
+# - on_wavelink_track_end(payload)        <-- NEW: Handles queue loop
 # - play(interaction, query)
 # - skip(interaction)
 # - stop(interaction)
@@ -90,6 +92,31 @@ class Player(commands.Cog):
             channel = self.bot.get_channel(player.home)
             if channel:
                 await channel.send(embed=embed)
+
+    @commands.Cog.listener()
+    async def on_wavelink_track_exception(self, payload: wavelink.TrackExceptionEventPayload):
+        """Log when a track fails to play."""
+        logging.error(f"Track Exception: {payload.exception}")
+        print(f"Track Exception: {payload.exception}")
+        
+        if payload.player and hasattr(payload.player, 'home'):
+             channel = self.bot.get_channel(payload.player.home)
+             if channel:
+                 await channel.send(f"⚠️ **Track Error:** The track failed to play. Reason: `{payload.exception}`")
+
+    @commands.Cog.listener()
+    async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload):
+        """Handle queue looping when a track ends."""
+        logging.info(f"Track Ended: {payload.track.title} - Reason: {payload.reason}")
+        
+        player = payload.player
+        if not player:
+            return
+
+        # If queue has more songs, play the next one
+        if not player.queue.is_empty:
+             next_track = player.queue.get()
+             await player.play(next_track)
 
     @app_commands.command(name="play", description="Play a song from YouTube/SoundCloud/Spotify")
     @app_commands.describe(query="The search query or URL")
