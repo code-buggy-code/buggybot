@@ -1,320 +1,201 @@
 import discord
-import wavelink
-import asyncio
-import socket
 from discord import app_commands
 from discord.ext import commands
-from typing import cast
+import wavelink
 import logging
-import re
-import traceback
+import subprocess
+import os
+import time
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-
-# Function/Class List:
-# class Player(commands.Cog)
+# Function List:
+# class Music(commands.Cog)
 # - __init__(bot)
+# - start_lavalink()
 # - cog_load()
-# - connect_nodes()
-# - check_port(host, port)
-# - on_wavelink_node_ready(payload)
-# - on_wavelink_track_start(payload)
-# - on_wavelink_track_exception(payload)
-# - on_wavelink_track_end(payload)
-# - play(interaction, query)
+# - play(interaction, search)
 # - skip(interaction)
 # - stop(interaction)
+# - volume(interaction, level)
 # - queue(interaction)
-# - node_status(interaction)
-# - debug_play(interaction)
-# setup(bot)
+# - nowplaying(interaction)
+# def setup(bot)
 
-class Player(commands.Cog):
+class Music(commands.Cog):
+    """Music commands using Wavelink (Lavalink)"""
+    
     def __init__(self, bot):
         self.bot = bot
+        # Configuration for the Java path and Lavalink location
+        self.java_path = "/usr/lib/jvm/java-17-openjdk-arm64/bin/java"
+        self.lavalink_dir = "lavalink" # Assuming it is in a subfolder named 'lavalink'
+        self.lavalink_jar = "Lavalink.jar"
+
+    def start_lavalink(self):
+        """Starts the Lavalink server using the specific Java path."""
+        jar_full_path = os.path.join(os.getcwd(), self.lavalink_dir, self.lavalink_jar)
+        
+        if not os.path.exists(jar_full_path):
+            print(f"❌ Music Cog: Could not find {self.lavalink_jar} in {self.lavalink_dir}. Skipping auto-start.")
+            return
+
+        print(f"☕ Attempting to start Lavalink with: {self.java_path}")
+        try:
+            # We verify the java path exists first
+            if not os.path.exists(self.java_path):
+                 print(f"❌ Music Cog: Java executable not found at {self.java_path}")
+                 return
+
+            # Start the process. 
+            # If a Lavalink instance is already running on port 2333, this new one will likely 
+            # fail to bind and exit silently, which is actually what we want (prevent duplicates).
+            subprocess.Popen(
+                [self.java_path, "-jar", self.lavalink_jar],
+                cwd=os.path.join(os.getcwd(), self.lavalink_dir),
+                stdout=subprocess.DEVNULL, # Hide output to keep console clean
+                stderr=subprocess.DEVNULL
+            )
+            # Give it a few seconds to initialize before we try to connect
+            time.sleep(5)
+        except Exception as e:
+            print(f"❌ Failed to start Lavalink process: {e}")
 
     async def cog_load(self):
-        """Start the connection process when the cog loads."""
-        self.bot.loop.create_task(self.connect_nodes())
+        """Connects to the local Lavalink server when the cog loads."""
+        # 1. Attempt to start the server
+        self.start_lavalink()
 
-    async def connect_nodes(self):
-        """Connects to the Lavalink Server."""
-        await self.bot.wait_until_ready()
-        try:
-            # Added resume_timeout=0 to prevent "ghost" sessions causing disconnects
-            node: wavelink.Node = wavelink.Node(
-                uri='http://localhost:2333', 
-                password='youshallnotpass',
-                resume_timeout=0 
+        # 2. Connect
+        # NOTE: This requires a Lavalink server running on localhost:2333
+        # Password default is usually 'youshallnotpass'
+        nodes = [
+            wavelink.Node(
+                identifier="local-node",
+                uri="http://localhost:2333",
+                password="youshallnotpass"
             )
-            await wavelink.Pool.connect(client=self.bot, nodes=[node])
-            print("DEBUG: Background connection to Lavalink successful.")
+        ]
+        
+        try:
+            await wavelink.Pool.connect(nodes=nodes, client=self.bot, cache_capacity=100)
+            print("✅ Music Cog: Connected to Lavalink Node!")
         except Exception as e:
-            logging.error(f"Failed to connect to Lavalink: {e}")
-            print(f"DEBUG: Background connection failed: {e}")
+            print(f"❌ Music Cog: Could not connect to Lavalink. Error: {e}")
 
-    def check_port(self, host, port):
-        """Helper function to check if a port is open."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(2)
-        result = sock.connect_ex((host, port))
-        sock.close()
-        return result == 0
+    @app_commands.command(name="play", description="Play a song from YouTube/Spotify")
+    @app_commands.describe(search="The song name or URL")
+    async def play(self, interaction: discord.Interaction, search: str):
+        """Plays a song."""
+        # 1. Check if user is in VC
+        if not interaction.user.voice:
+            return await interaction.response.send_message("❌ You aren't in a voice channel!", ephemeral=True)
 
-    @commands.Cog.listener()
-    async def on_wavelink_node_ready(self, payload: wavelink.NodeReadyEventPayload):
-        logging.info(f"Lavalink Node connected: {payload.node.identifier}")
-        print(f"Lavalink Node connected: {payload.node.identifier}")
-
-    @commands.Cog.listener()
-    async def on_wavelink_track_start(self, payload: wavelink.TrackStartEventPayload):
-        player: wavelink.Player = payload.player
-        if not player:
-            return
-        
-        # FORCE VOLUME TO 100% just in case
-        await player.set_volume(100)
-        logging.info(f"Track Started: {payload.track.title}")
-
-        original_requester = getattr(payload.track.extras, "requester", None)
-        
-        embed = discord.Embed(
-            title="Now Playing",
-            description=f"[{payload.track.title}]({payload.track.uri})",
-            color=discord.Color.blurple()
-        )
-        
-        if original_requester:
-            embed.set_footer(text=f"Requested by {original_requester}")
-        
-        if hasattr(player, 'home') and player.home:
-            channel = self.bot.get_channel(player.home)
-            if channel:
-                await channel.send(embed=embed)
-
-    @commands.Cog.listener()
-    async def on_wavelink_track_exception(self, payload: wavelink.TrackExceptionEventPayload):
-        """Log when a track fails to play."""
-        logging.error(f"Track Exception: {payload.exception}")
-        print(f"Track Exception: {payload.exception}")
-        
-        if payload.player and hasattr(payload.player, 'home'):
-             channel = self.bot.get_channel(payload.player.home)
-             if channel:
-                 await channel.send(f"⚠️ **Track Error:** The track failed to play. Reason: `{payload.exception}`")
-
-    @commands.Cog.listener()
-    async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload):
-        """Handle queue looping when a track ends."""
-        logging.info(f"Track Ended: {payload.track.title} - Reason: {payload.reason}")
-        
-        player = payload.player
-        if not player:
-            return
-
-        # If queue has more songs, play the next one
-        if not player.queue.is_empty:
-             next_track = player.queue.get()
-             await player.play(next_track)
-
-    @app_commands.command(name="play", description="Play a song from YouTube/SoundCloud/Spotify")
-    @app_commands.describe(query="The search query or URL")
-    async def play(self, interaction: discord.Interaction, query: str):
-        """Play a song from YouTube/SoundCloud/Spotify."""
         await interaction.response.defer()
-
-        if not wavelink.Pool.nodes:
-            return await interaction.followup.send("❌ Lavalink is not connected. I cannot play music until `java -jar Lavalink.jar` is running and connected.")
-
-        if not interaction.guild:
-            return await interaction.followup.send("This command can only be used in a server.")
-
-        user = cast(discord.Member, interaction.user)
-        if not user.voice:
-            return await interaction.followup.send("You need to be in a voice channel to play music!")
-
+        
+        # 2. Connect to VC if not already connected
         if not interaction.guild.voice_client:
             try:
-                # Removed self_deaf=True so it joins normally
-                # Added timeout=60 to give it more time to handshake
-                player: wavelink.Player = await user.voice.channel.connect(cls=wavelink.Player, self_deaf=False, timeout=60)
-                
-                # CRITICAL FIX: Force a "wake up" packet
-                await asyncio.sleep(0.5)
-                await player.set_volume(100)
-                
+                vc: wavelink.Player = await interaction.user.voice.channel.connect(cls=wavelink.Player)
             except Exception as e:
-                return await interaction.followup.send(f"I couldn't connect to the voice channel: {e}")
+                return await interaction.followup.send(f"❌ I couldn't join that channel: {e}")
         else:
-            player: wavelink.Player = cast(wavelink.Player, interaction.guild.voice_client)
+            vc: wavelink.Player = interaction.guild.voice_client
 
-        player.home = interaction.channel_id
-
-        # SWITCHED TO YTMSEARCH because ytsearch is broken by the signature error
-        if not re.match(r'https?://', query):
-            query = f"ytmsearch:{query}"
-
+        # 3. Search and Add to Queue
         try:
-            tracks: wavelink.Search = await wavelink.Playable.search(query)
+            tracks = await wavelink.Playable.search(search)
         except Exception as e:
-            error_msg = f"Error: {str(e)}"
-            print(f"DEBUG: Search failed for query '{query}': {e}")
-            traceback.print_exc() 
-            return await interaction.followup.send(f"An error occurred while searching. Check console for details.\n`{error_msg}`")
+            return await interaction.followup.send(f"❌ Search error: {e}")
 
         if not tracks:
-            return await interaction.followup.send("No tracks found with that query.")
-
+             return await interaction.followup.send("❌ No tracks found.")
+        
+        # Handle Playlists vs Single Tracks
         if isinstance(tracks, wavelink.Playlist):
-            added: int = await player.queue.put_wait(tracks)
-            await interaction.followup.send(f"Added playlist **{tracks.name}** ({added} songs) to the queue.")
-            if not player.playing:
-                 await player.play(player.queue.get())
+            added = 0
+            for track in tracks:
+                await vc.queue.put_wait(track)
+                added += 1
+            await interaction.followup.send(f"✅ Added playlist **{tracks.name}** ({added} songs) to queue.")
         else:
-            track: wavelink.Playable = tracks[0]
-            track.extras = {"requester": user.display_name}
-            
-            # DIRECT PLAY LOGIC: If idle, play immediately without queueing first
-            if not player.playing:
-                await player.play(track)
-                await interaction.followup.send(f"Playing **{track.title}**")
-            else:
-                await player.queue.put_wait(track)
-                await interaction.followup.send(f"Added **{track.title}** to the queue.")
+            track = tracks[0]
+            await vc.queue.put_wait(track)
+            await interaction.followup.send(f"✅ Added to queue: **{track.title}**")
 
-    @app_commands.command(name="skip", description="Skip the current song")
+        # 4. Start playing if idle
+        if not vc.playing:
+            try:
+                next_track = vc.queue.get()
+                await vc.play(next_track)
+                # await interaction.channel.send(f"🎵 Now Playing: **{next_track.title}**")
+            except Exception as e:
+                print(f"Error starting playback: {e}")
+
+    @app_commands.command(name="skip", description="Skips the current song.")
     async def skip(self, interaction: discord.Interaction):
-        """Skip the current song."""
-        if not interaction.guild.voice_client:
-            return await interaction.response.send_message("I am not currently connected.", ephemeral=True)
+        vc: wavelink.Player = interaction.guild.voice_client
+        if not vc or not vc.playing:
+            return await interaction.response.send_message("❌ Nothing is playing!", ephemeral=True)
         
-        player: wavelink.Player = cast(wavelink.Player, interaction.guild.voice_client)
-        
-        if not player.playing:
-            return await interaction.response.send_message("Nothing is playing.", ephemeral=True)
+        await vc.skip(force=True)
+        await interaction.response.send_message("⏭️ Skipped!", ephemeral=False)
 
-        await player.skip(force=True)
-        await interaction.response.send_message("Skipped! ⏭️")
-
-    @app_commands.command(name="stop", description="Stop music and clear the queue")
+    @app_commands.command(name="stop", description="Stops music and leaves.")
     async def stop(self, interaction: discord.Interaction):
-        """Stop music and clear the queue."""
-        if not interaction.guild.voice_client:
-            return await interaction.response.send_message("I am not currently connected.", ephemeral=True)
+        vc: wavelink.Player = interaction.guild.voice_client
+        if not vc:
+            return await interaction.response.send_message("❌ I'm not playing anything.", ephemeral=True)
         
-        player: wavelink.Player = cast(wavelink.Player, interaction.guild.voice_client)
-        await player.disconnect()
-        await interaction.response.send_message("Disconnected. 👋")
+        await vc.disconnect()
+        await interaction.response.send_message("Xx_Stopped_xX", ephemeral=False)
 
-    @app_commands.command(name="queue", description="Show the current queue")
+    @app_commands.command(name="volume", description="Sets the volume (0-100).")
+    async def volume(self, interaction: discord.Interaction, level: int):
+        vc: wavelink.Player = interaction.guild.voice_client
+        if not vc:
+            return await interaction.response.send_message("❌ Not connected.", ephemeral=True)
+        
+        vol = max(0, min(100, level))
+        await vc.set_volume(vol)
+        await interaction.response.send_message(f"🔊 Volume set to {vol}%")
+
+    @app_commands.command(name="queue", description="Shows the current queue.")
     async def queue(self, interaction: discord.Interaction):
-        """Show the current queue."""
-        if not interaction.guild.voice_client:
-            return await interaction.response.send_message("I am not currently connected.", ephemeral=True)
+        vc: wavelink.Player = interaction.guild.voice_client
+        if not vc or (not vc.playing and vc.queue.is_empty):
+             return await interaction.response.send_message("The queue is empty.", ephemeral=True)
         
-        player: wavelink.Player = cast(wavelink.Player, interaction.guild.voice_client)
+        embed = discord.Embed(title="🎵 Music Queue", color=discord.Color.from_str("#ff90aa"))
         
-        if player.queue.is_empty and not player.playing:
-            return await interaction.response.send_message("The queue is empty.", ephemeral=True)
-
-        embed = discord.Embed(title="Music Queue", color=discord.Color.green())
+        # Current
+        if vc.current:
+            embed.add_field(name="Now Playing", value=f"▶️ {vc.current.title} (`{vc.current.author}`)", inline=False)
         
-        if player.current:
-            embed.add_field(name="Now Playing", value=player.current.title, inline=False)
-
-        if not player.queue.is_empty:
-            upcoming = ""
-            for index, track in enumerate(player.queue):
-                upcoming += f"{index + 1}. {track.title}\n"
-                if index >= 9:
-                    upcoming += "... and more"
-                    break
+        # Up Next
+        upcoming = ""
+        for i, track in enumerate(vc.queue[:10], 1):
+            upcoming += f"**{i}.** {track.title}\n"
+        
+        if upcoming:
             embed.add_field(name="Up Next", value=upcoming, inline=False)
+        else:
+            embed.set_footer(text="Queue is empty.")
 
         await interaction.response.send_message(embed=embed)
-
-    @app_commands.command(name="node", description="Check Lavalink connection status")
-    async def node_status(self, interaction: discord.Interaction):
-        """Check the connection status of the Lavalink server."""
-        nodes = wavelink.Pool.nodes.values()
         
-        if not nodes:
-            return await interaction.response.send_message("❌ No Lavalink nodes connected. Please check your Java terminal.", ephemeral=True)
-
-        embed = discord.Embed(title="Lavalink Connection Status", color=discord.Color.green())
-        
-        for node in nodes:
-            status_emoji = "🟢" if node.status == wavelink.NodeStatus.CONNECTED else "🔴"
-            embed.add_field(
-                name=f"{status_emoji} Node: {node.identifier}",
-                value=f"**URI:** `{node.uri}`\n**Status:** {node.status}",
-                inline=False
-            )
+    @app_commands.command(name="nowplaying", description="Shows what is currently playing.")
+    async def nowplaying(self, interaction: discord.Interaction):
+        vc: wavelink.Player = interaction.guild.voice_client
+        if not vc or not vc.current:
+            return await interaction.response.send_message("❌ Nothing is playing right now.", ephemeral=True)
+            
+        embed = discord.Embed(title="Now Playing", description=f"[{vc.current.title}]({vc.current.uri})", color=discord.Color.from_str("#ff90aa"))
+        embed.add_field(name="Artist", value=vc.current.author, inline=True)
+        # Position formatting
+        position = int(vc.position / 1000)
+        length = int(vc.current.length / 1000)
+        embed.set_footer(text=f"{position // 60}:{position % 60:02d} / {length // 60}:{length % 60:02d}")
         
         await interaction.response.send_message(embed=embed)
-
-    @app_commands.command(name="debug_play", description="Diagnose audio playback issues step-by-step")
-    async def debug_play(self, interaction: discord.Interaction):
-        """Run a diagnostic check for the audio system."""
-        await interaction.response.defer()
-        
-        report = []
-        user = cast(discord.Member, interaction.user)
-        
-        # Step 1: Check User Voice State
-        if user.voice and user.voice.channel:
-            report.append(f"✅ User is in voice channel: **{user.voice.channel.name}**")
-        else:
-            report.append("❌ User is NOT in a voice channel.")
-            await interaction.followup.send("\n".join(report))
-            return
-
-        # Step 2: Check Bot Permissions
-        permissions = user.voice.channel.permissions_for(interaction.guild.me)
-        if permissions.connect and permissions.speak:
-            report.append("✅ Bot has Connect/Speak permissions.")
-        else:
-            report.append("❌ Bot is missing Connect or Speak permissions in that channel.")
-            await interaction.followup.send("\n".join(report))
-            return
-
-        # Step 3: Check Lavalink Node Connection (DEEP DIAGNOSTIC)
-        nodes = wavelink.Pool.nodes.values()
-        connected_nodes = [n for n in nodes if n.status == wavelink.NodeStatus.CONNECTED]
-        
-        if connected_nodes:
-            report.append(f"✅ Lavalink Node connected ({len(connected_nodes)} active).")
-        else:
-            report.append("⚠️ No active Lavalink nodes found. Digging deeper...")
-            is_open = self.check_port('localhost', 2333)
-            if is_open:
-                report.append("✅ **Port 2333 is OPEN.** Lavalink is running and reachable!")
-                report.append("❌ **Diagnosis:** Password mismatch. Check `application.yml` and `player.py` match.")
-            else:
-                report.append("❌ **Port 2333 is CLOSED.**")
-                report.append("❌ **Diagnosis:** Lavalink is NOT running or `application.yml` has the wrong port.")
-                await interaction.followup.send("\n".join(report))
-                return
-
-        # Step 4: Player Status Check (New)
-        if interaction.guild.voice_client:
-             player: wavelink.Player = cast(wavelink.Player, interaction.guild.voice_client)
-             report.append(f"ℹ️ Player Status: Connected to {player.channel.name}")
-             if player.playing:
-                 report.append(f"✅ Player says it is playing: **{player.current.title}**")
-                 report.append(f"ℹ️ Current Position: {player.position}ms (Volume: {player.volume}%)")
-                 if player.position > 0:
-                     report.append("✅ **Time is moving!** If no sound, check local Discord volume or Server Region.")
-                 else:
-                     report.append("⚠️ **Time is NOT moving.** Audio stream might be blocked.")
-             else:
-                 report.append("⚠️ Player is connected but NOT playing anything.")
-        else:
-            report.append("⚠️ Bot is not in VC. Run `/play` first.")
-
-        embed = discord.Embed(title="Audio System Diagnostic", description="\n".join(report), color=discord.Color.orange())
-        await interaction.followup.send(embed=embed)
 
 async def setup(bot):
-    await bot.add_cog(Player(bot))
+    await bot.add_cog(Music(bot))
