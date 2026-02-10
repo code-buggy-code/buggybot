@@ -17,6 +17,7 @@ logging.basicConfig(level=logging.INFO)
 # - __init__(bot)
 # - cog_load()
 # - connect_nodes()
+# - check_port(host, port)
 # - on_wavelink_node_ready(payload)
 # - on_wavelink_track_start(payload)
 # - play(interaction, query)
@@ -25,7 +26,6 @@ logging.basicConfig(level=logging.INFO)
 # - queue(interaction)
 # - node_status(interaction)
 # - debug_play(interaction)
-# - check_port(host, port) <--- NEW HELPER FUNCTION
 # setup(bot)
 
 class Player(commands.Cog):
@@ -40,9 +40,11 @@ class Player(commands.Cog):
         """Connects to the Lavalink Server."""
         await self.bot.wait_until_ready()
         try:
+            # Added resume_timeout=0 to prevent "ghost" sessions causing disconnects
             node: wavelink.Node = wavelink.Node(
                 uri='http://localhost:2333', 
-                password='youshallnotpass'
+                password='youshallnotpass',
+                resume_timeout=0 
             )
             await wavelink.Pool.connect(client=self.bot, nodes=[node])
             print("DEBUG: Background connection to Lavalink successful.")
@@ -53,7 +55,7 @@ class Player(commands.Cog):
     def check_port(self, host, port):
         """Helper function to check if a port is open."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(2) # 2 second timeout for the check
+        sock.settimeout(2)
         result = sock.connect_ex((host, port))
         sock.close()
         return result == 0
@@ -91,7 +93,6 @@ class Player(commands.Cog):
         """Play a song from YouTube/SoundCloud/Spotify."""
         await interaction.response.defer()
 
-        # Check for nodes FIRST to prevent hanging
         if not wavelink.Pool.nodes:
             return await interaction.followup.send("❌ Lavalink is not connected. I cannot play music until `java -jar Lavalink.jar` is running and connected.")
 
@@ -104,7 +105,9 @@ class Player(commands.Cog):
 
         if not interaction.guild.voice_client:
             try:
-                player: wavelink.Player = await user.voice.channel.connect(cls=wavelink.Player)
+                # Set self_deaf=True. This is CRITICAL.
+                # If a bot joins undeafened, sometimes Discord disconnects it if it doesn't send audio immediately.
+                player: wavelink.Player = await user.voice.channel.connect(cls=wavelink.Player, self_deaf=True)
             except Exception as e:
                 return await interaction.followup.send(f"I couldn't connect to the voice channel: {e}")
         else:
@@ -242,21 +245,17 @@ class Player(commands.Cog):
             report.append(f"✅ Lavalink Node connected ({len(connected_nodes)} active).")
         else:
             report.append("⚠️ No active Lavalink nodes found. Digging deeper...")
-            
-            # CHECK 1: Is the port even open?
             is_open = self.check_port('localhost', 2333)
             if is_open:
                 report.append("✅ **Port 2333 is OPEN.** Lavalink is running and reachable!")
-                # If port is open but connection failed, it's likely a password issue
                 report.append("❌ **Diagnosis:** Password mismatch. Check `application.yml` and `player.py` match.")
             else:
                 report.append("❌ **Port 2333 is CLOSED.**")
                 report.append("❌ **Diagnosis:** Lavalink is NOT running or `application.yml` has the wrong port.")
-                report.append("ℹ️ **Fix:** Make sure the black Java window is open and says 'Ready'.")
                 await interaction.followup.send("\n".join(report))
                 return
 
-        # Step 4: Test Search Query with verbose logging
+        # Step 4: Test Search Query
         report.append("🔍 Attempting test search for 'ytsearch:rick roll'...")
         try:
             tracks: wavelink.Search = await wavelink.Playable.search("ytsearch:rick roll")
