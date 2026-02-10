@@ -5,10 +5,10 @@ import wavelink
 import logging
 import subprocess
 import os
-import time
+import asyncio
 
 # Function List:
-# class Music(commands.Cog)
+# class Player(commands.Cog)
 # - __init__(bot)
 # - start_lavalink()
 # - cog_load()
@@ -20,7 +20,7 @@ import time
 # - nowplaying(interaction)
 # def setup(bot)
 
-class Music(commands.Cog):
+class Player(commands.Cog):
     """Music commands using Wavelink (Lavalink)"""
     
     def __init__(self, bot):
@@ -30,24 +30,22 @@ class Music(commands.Cog):
         self.lavalink_dir = "lavalink" # Assuming it is in a subfolder named 'lavalink'
         self.lavalink_jar = "Lavalink.jar"
 
-    def start_lavalink(self):
+    async def start_lavalink(self):
         """Starts the Lavalink server using the specific Java path."""
         jar_full_path = os.path.join(os.getcwd(), self.lavalink_dir, self.lavalink_jar)
         
         if not os.path.exists(jar_full_path):
-            print(f"❌ Music Cog: Could not find {self.lavalink_jar} in {self.lavalink_dir}. Skipping auto-start.")
+            print(f"❌ Player Cog: Could not find {self.lavalink_jar} in {self.lavalink_dir}. Skipping auto-start.")
             return
 
         print(f"☕ Attempting to start Lavalink with: {self.java_path}")
         try:
             # We verify the java path exists first
             if not os.path.exists(self.java_path):
-                 print(f"❌ Music Cog: Java executable not found at {self.java_path}")
+                 print(f"❌ Player Cog: Java executable not found at {self.java_path}")
                  return
 
             # Start the process. 
-            # If a Lavalink instance is already running on port 2333, this new one will likely 
-            # fail to bind and exit silently, which is actually what we want (prevent duplicates).
             subprocess.Popen(
                 [self.java_path, "-jar", self.lavalink_jar],
                 cwd=os.path.join(os.getcwd(), self.lavalink_dir),
@@ -55,14 +53,15 @@ class Music(commands.Cog):
                 stderr=subprocess.DEVNULL
             )
             # Give it a few seconds to initialize before we try to connect
-            time.sleep(5)
+            # MUST use asyncio.sleep here to avoid freezing the bot
+            await asyncio.sleep(5)
         except Exception as e:
             print(f"❌ Failed to start Lavalink process: {e}")
 
     async def cog_load(self):
         """Connects to the local Lavalink server when the cog loads."""
         # 1. Attempt to start the server
-        self.start_lavalink()
+        await self.start_lavalink()
 
         # 2. Connect
         # NOTE: This requires a Lavalink server running on localhost:2333
@@ -77,9 +76,9 @@ class Music(commands.Cog):
         
         try:
             await wavelink.Pool.connect(nodes=nodes, client=self.bot, cache_capacity=100)
-            print("✅ Music Cog: Connected to Lavalink Node!")
+            print("✅ Player Cog: Connected to Lavalink Node!")
         except Exception as e:
-            print(f"❌ Music Cog: Could not connect to Lavalink. Error: {e}")
+            print(f"❌ Player Cog: Could not connect to Lavalink. Error: {e}")
 
     @app_commands.command(name="play", description="Play a song from YouTube/Spotify")
     @app_commands.describe(search="The song name or URL")
@@ -198,4 +197,4 @@ class Music(commands.Cog):
         await interaction.response.send_message(embed=embed)
 
 async def setup(bot):
-    await bot.add_cog(Music(bot))
+    await bot.add_cog(Player(bot))
