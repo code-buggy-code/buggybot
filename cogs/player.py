@@ -18,6 +18,7 @@ import asyncio
 # - volume(interaction, level)
 # - queue(interaction)
 # - nowplaying(interaction)
+# - checkplayer(interaction) <--- RENAMED & UPDATED
 # def setup(bot)
 
 class Player(commands.Cog):
@@ -195,6 +196,48 @@ class Player(commands.Cog):
         embed.set_footer(text=f"{position // 60}:{position % 60:02d} / {length // 60}:{length % 60:02d}")
         
         await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="checkplayer", description="Diagnostics: Check Lavalink connection and search capability.")
+    async def checkplayer(self, interaction: discord.Interaction):
+        """Checks the status of the music player node and performs a test search."""
+        await interaction.response.defer()
+
+        node = wavelink.Pool.get_node("local-node")
+        
+        embed = discord.Embed(title="🎧 Player Diagnostics", color=discord.Color.from_str("#ff90aa"))
+
+        # 1. Node Connection
+        if not node:
+            embed.description = "❌ **Lavalink Node is NOT connected.**"
+            return await interaction.followup.send(embed=embed)
+
+        if node.status == wavelink.NodeStatus.CONNECTED:
+            embed.add_field(name="1. Lavalink Node", value=f"✅ Connected (`{node.identifier}`)", inline=False)
+        else:
+            embed.add_field(name="1. Lavalink Node", value=f"⚠️ Status: {node.status}", inline=False)
+
+        # 2. Search Capability (Find & Access)
+        try:
+            # Perform a test search (YouTube)
+            query = "ytsearch:Rick Astley Never Gonna Give You Up"
+            tracks = await wavelink.Playable.search(query)
+            
+            if tracks:
+                track = tracks[0]
+                embed.add_field(name="2. Search & Access", value=f"✅ **Success**\nFound: {track.title} (`{track.author}`)\nLength: {int(track.length/1000)}s", inline=False)
+            else:
+                embed.add_field(name="2. Search & Access", value="❌ **Failed** (No results found)", inline=False)
+        except Exception as e:
+             embed.add_field(name="2. Search & Access", value=f"❌ **Error**: {e}", inline=False)
+
+        # 3. Player State (Idle Check)
+        if interaction.guild.voice_client:
+             vc: wavelink.Player = interaction.guild.voice_client
+             embed.add_field(name="3. Voice Client", value=f"Connected to {vc.channel.mention} (Playing: {vc.playing})", inline=False)
+        else:
+             embed.add_field(name="3. Voice Client", value="Idle (Not in VC)", inline=False)
+
+        await interaction.followup.send(embed=embed)
 
 async def setup(bot):
     await bot.add_cog(Player(bot))
