@@ -8,12 +8,13 @@ import os
 import asyncio
 import sys
 import socket
+import aiohttp # We use this to download the file asynchronously
 
 # Function List:
 # class Player(commands.Cog)
 # - __init__(bot)
 # - is_port_in_use(port)
-# - check_and_update_lavalink() <--- UPDATED PATH
+# - download_redbot_lavalink() <--- NEW: INTEGRATED UPDATER
 # - start_lavalink()
 # - cog_load()
 # - play(interaction, search)
@@ -23,73 +24,78 @@ import socket
 # - queue(interaction)
 # - nowplaying(interaction)
 # - checkplayer(interaction)
+# - updatenode(interaction) <--- NEW: Force update command
 # - on_wavelink_track_start(payload)
 # - on_wavelink_track_end(payload)
 # - on_wavelink_track_exception(payload)
 # def setup(bot)
 
 class Player(commands.Cog):
-    """Music commands using Wavelink (Lavalink)"""
+    """Music commands using Wavelink and RedBot's Lavalink build."""
     
     def __init__(self, bot):
         self.bot = bot
+        # Config
         self.java_path = "/usr/lib/jvm/java-17-openjdk-arm64/bin/java"
         self.lavalink_dir = "lavalink" 
         self.lavalink_jar = "Lavalink.jar"
-        self.updater_script = "update_lavalink.py" # The name of the file
         self.host = "localhost"
         self.port = 2333
         self.password = "youshallnotpass"
+        # The official Red-DiscordBot jar source (Patched for YouTube)
+        self.download_url = "https://github.com/Cog-Creators/Lavalink-Jars/releases/latest/download/Lavalink.jar"
 
     def is_port_in_use(self, port: int) -> bool:
         """Checks if a port is already being used by another process."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             return s.connect_ex((self.host, port)) == 0
 
-    async def check_and_update_lavalink(self):
-        """Checks for the updater script INSIDE the lavalink folder and runs it."""
-        root_dir = os.getcwd()
-        # Look for script inside the 'lavalink' folder
-        updater_path = os.path.join(root_dir, self.lavalink_dir, self.updater_script)
+    async def download_redbot_lavalink(self):
+        """Downloads the latest Lavalink.jar from RedBot's repo."""
+        jar_path = os.path.join(os.getcwd(), self.lavalink_dir, self.lavalink_jar)
         
-        if os.path.exists(updater_path):
-            print(f"🔄 Player Cog: Found updater at {updater_path}. Running update check...")
-            try:
-                process = await asyncio.create_subprocess_exec(
-                    sys.executable, updater_path,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, stderr = await process.communicate()
-                
-                if process.returncode == 0:
-                    print("✅ Player Cog: Update script completed successfully.")
-                else:
-                    print(f"⚠️ Player Cog: Update script failed with code {process.returncode}.")
-                    print(f"Error: {stderr.decode()}")
-            except Exception as e:
-                print(f"❌ Player Cog: Failed to run updater script: {e}")
-        else:
-            print(f"ℹ️ Player Cog: Updater script not found at '{updater_path}'. Skipping update.")
+        # Ensure directory exists
+        if not os.path.exists(self.lavalink_dir):
+            os.makedirs(self.lavalink_dir)
+
+        print(f"⬇️  Player Cog: Downloading RedBot's Lavalink.jar...")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(self.download_url) as response:
+                    if response.status == 200:
+                        with open(jar_path, 'wb') as f:
+                            while True:
+                                chunk = await response.content.read(1024)
+                                if not chunk:
+                                    break
+                                f.write(chunk)
+                        print("✅ Player Cog: Download complete!")
+                        return True
+                    else:
+                        print(f"❌ Download failed with status: {response.status}")
+                        return False
+        except Exception as e:
+            print(f"❌ Download error: {e}")
+            return False
 
     async def start_lavalink(self):
-        """Starts the Lavalink server only if it's not already running."""
-        
-        # 1. Check if Lavalink is already running
+        """Starts the Lavalink server."""
+        # 1. Check Port
         if self.is_port_in_use(self.port):
-            print(f"⚡ Player Cog: Port {self.port} is busy. Lavalink is likely running. Skipping startup.")
+            print(f"⚡ Player Cog: Port {self.port} is busy. Connecting to existing Lavalink.")
             return
 
-        # 2. If not running, Update and Start
-        await self.check_and_update_lavalink()
-
+        # 2. Check existence / Download if missing
         jar_full_path = os.path.join(os.getcwd(), self.lavalink_dir, self.lavalink_jar)
-        
         if not os.path.exists(jar_full_path):
-            print(f"❌ Player Cog: {self.lavalink_jar} not found! Please ensure '{self.updater_script}' ran successfully.")
-            return
+            print("⚠️ Player Cog: Lavalink.jar not found. Downloading now...")
+            success = await self.download_redbot_lavalink()
+            if not success:
+                print("❌ Player Cog: Startup Aborted due to download failure.")
+                return
 
-        print(f"☕ Starting Lavalink Process...")
+        # 3. Start Process
+        print(f"☕ Player Cog: Starting RedBot's Lavalink...")
         try:
             subprocess.Popen(
                 [self.java_path, "-jar", self.lavalink_jar],
@@ -97,8 +103,7 @@ class Player(commands.Cog):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
-            # Give Java a moment to warm up
-            await asyncio.sleep(5)
+            await asyncio.sleep(5) # Let Java initialize
         except Exception as e:
             print(f"❌ Failed to start Lavalink: {e}")
 
@@ -154,10 +159,11 @@ class Player(commands.Cog):
         
         channel = getattr(player, 'home', None)
         if channel:
+            # If the RedBot jar fails, it usually means we need an update
             if "Must find action functions" in exception:
                  embed = discord.Embed(
-                    title="⚠️ Auto-Update Required",
-                    description="**Youtube updated their system!**\nPlease restart the bot to trigger the `update_lavalink.py` script.",
+                    title="⚠️ Youtube Error",
+                    description="It looks like the music engine needs an update. Try running `/updatenode`!",
                     color=discord.Color.red()
                 )
                  try: await channel.send(embed=embed)
@@ -170,6 +176,20 @@ class Player(commands.Cog):
              await player.play(player.queue.get())
 
     # --- COMMANDS ---
+
+    @app_commands.command(name="updatenode", description="Force updates the Lavalink jar (Admin only).")
+    async def updatenode(self, interaction: discord.Interaction):
+        """Forces a re-download of the Lavalink jar."""
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ You need Admin permissions.", ephemeral=True)
+        
+        await interaction.response.defer()
+        success = await self.download_redbot_lavalink()
+        
+        if success:
+            await interaction.followup.send("✅ **Update Complete!** Please restart the bot to apply the new music engine.")
+        else:
+            await interaction.followup.send("❌ Update failed. Check console logs.")
 
     @app_commands.command(name="play", description="Play a song from YouTube/Spotify")
     @app_commands.describe(search="The song name or URL")
