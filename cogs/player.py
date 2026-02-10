@@ -152,6 +152,16 @@ lavalink:
     # =========================================================================
 
     @commands.Cog.listener()
+    async def on_wavelink_track_start(self, payload: wavelink.TrackStartEventPayload):
+        """Callback when a track actually starts playing."""
+        player = payload.player
+        if player and player.channel:
+            # You can send a message to the channel where the command was invoked
+            # But we don't have the context here easily without storing it.
+            # Printing to console helps debugging "Silent Join" issues.
+            print(f"[Music] Started playing: {payload.track.title}")
+
+    @commands.Cog.listener()
     async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload):
         """Callback when a track finishes. Plays the next track in queue."""
         player = payload.player
@@ -163,8 +173,7 @@ lavalink:
             next_track = player.queue.get()
             await player.play(next_track)
         else:
-            # If queue is empty, disconnect after a delay (optional) or just wait
-            # await player.disconnect()
+            # Optional: Disconnect if empty
             pass
 
     @app_commands.command(name="play", description="Play a song from YouTube or other sources.")
@@ -182,26 +191,51 @@ lavalink:
         player = cast(wavelink.Player, interaction.guild.voice_client)
         if not player:
             try:
-                player = await interaction.user.voice.channel.connect(cls=wavelink.Player)
+                # IMPORTANT: self_deaf=True is crucial for some bots/servers
+                player = await interaction.user.voice.channel.connect(cls=wavelink.Player, self_deaf=True)
             except Exception as e:
                 await interaction.followup.send(f"❌ Could not connect. Run `/checkplayer` first. Error: {e}")
                 return
 
+        # SEARCH LOGIC: Redbot style fallback
+        # If it's not a URL, assume it's a YouTube search
+        if not urllib.parse.urlparse(query).scheme:
+            query = f"ytsearch:{query}"
+
         # Search for Track
-        tracks = await wavelink.Playable.search(query)
+        try:
+            tracks = await wavelink.Playable.search(query)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Search Error: {e}")
+            return
+
         if not tracks:
             await interaction.followup.send(f"❌ No tracks found for `{query}`.")
             return
 
-        track = tracks[0] # Get the first result
-
-        # Add to Queue or Play Immediately
-        if player.playing:
-            await player.queue.put_wait(track)
-            await interaction.followup.send(f"📝 Added to queue: **{track.title}**")
+        # wavelink.Playable.search returns a list or a Playlist
+        if isinstance(tracks, wavelink.Playlist):
+            # If it's a playlist, add all to queue
+            added = 0
+            for track in tracks:
+                if player.playing:
+                    await player.queue.put_wait(track)
+                else:
+                    await player.play(track)
+                    # Only the first one plays immediately, rest go to queue
+                added += 1
+            await interaction.followup.send(f"✅ Added playlist **{tracks.name}** ({added} songs) to queue.")
         else:
-            await player.play(track)
-            await interaction.followup.send(f"▶️ Playing: **{track.title}**")
+            # It's a list of tracks, pick the first one
+            track = tracks[0]
+
+            # Add to Queue or Play Immediately
+            if player.playing:
+                await player.queue.put_wait(track)
+                await interaction.followup.send(f"📝 Added to queue: **{track.title}**")
+            else:
+                await player.play(track)
+                await interaction.followup.send(f"▶️ Playing: **{track.title}**")
 
     @app_commands.command(name="skip", description="Skip the current song.")
     async def skip(self, interaction: discord.Interaction):
