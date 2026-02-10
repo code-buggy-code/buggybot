@@ -71,6 +71,9 @@ class Player(commands.Cog):
         if not player:
             return
         
+        # FORCE VOLUME TO 100% just in case
+        await player.set_volume(100)
+
         original_requester = getattr(payload.track.extras, "requester", None)
         
         embed = discord.Embed(
@@ -105,9 +108,15 @@ class Player(commands.Cog):
 
         if not interaction.guild.voice_client:
             try:
-                # Set self_deaf=True. This is CRITICAL.
-                # If a bot joins undeafened, sometimes Discord disconnects it if it doesn't send audio immediately.
-                player: wavelink.Player = await user.voice.channel.connect(cls=wavelink.Player, self_deaf=True)
+                # Removed self_deaf=True so it joins normally
+                # Added timeout=60 to give it more time to handshake
+                player: wavelink.Player = await user.voice.channel.connect(cls=wavelink.Player, self_deaf=False, timeout=60)
+                
+                # CRITICAL FIX: Force a "wake up" packet
+                # Sometimes wavelink/discord needs a nudge to start the UDP stream
+                await asyncio.sleep(0.5)
+                await player.set_volume(100)
+                
             except Exception as e:
                 return await interaction.followup.send(f"I couldn't connect to the voice channel: {e}")
         else:
