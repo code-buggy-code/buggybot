@@ -24,6 +24,29 @@ class MusicPlayer(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    async def cog_load(self):
+        """Called when the Cog is loaded. Attempts to connect to Lavalink automatically."""
+        self.bot.loop.create_task(self.connect_nodes())
+
+    async def connect_nodes(self):
+        """Connect to the Lavalink node if the server is running."""
+        await self.bot.wait_until_ready()
+        
+        if wavelink.Pool.nodes:
+            return
+
+        node = wavelink.Node(
+            identifier="AutoNode",
+            uri=LAVALINK_URI,
+            password=LAVALINK_PASS
+        )
+        
+        try:
+            await wavelink.Pool.connect(nodes=[node], client=self.bot, cache_capacity=100)
+            print("[Music] ✅ Automatically connected to Lavalink node.")
+        except Exception:
+            print("[Music] ⚠️ Could not auto-connect to Lavalink. Run /checkplayer to start it.")
+
     # =========================================================================
     #  SECTION 1: SERVER MANAGEMENT & LAUNCHER LOGIC
     # =========================================================================
@@ -48,7 +71,8 @@ class MusicPlayer(commands.Cog):
 
     async def update_lavalink(self):
         """Downloads the latest Lavalink.jar."""
-        if not os.path.exists(JAR_NAME):
+        # We check size to ensure it's not a corrupted 0kb file
+        if not os.path.exists(JAR_NAME) or os.path.getsize(JAR_NAME) < 1000:
             print(f"[Bot] Downloading {JAR_NAME}...")
             try:
                 opener = urllib.request.build_opener()
@@ -61,18 +85,26 @@ class MusicPlayer(commands.Cog):
         return True
 
     async def check_config(self):
-        """Creates application.yml if missing."""
-        if not os.path.exists(CONFIG_NAME):
-            print(f"[Bot] Creating default {CONFIG_NAME}...")
-            default_config = """
+        """
+        Creates or Overwrites application.yml with Lavalink v4 + YouTube Plugin config.
+        We overwrite every time to ensure the plugin config is up to date.
+        """
+        print(f"[Bot] Updating {CONFIG_NAME} with YouTube Plugin config...")
+        
+        # This config includes the 'dev.lavalink.youtube' plugin 
+        # which is REQUIRED for YouTube support in Lavalink v4+
+        v4_config = """
 server:
   port: 2333
   address: 0.0.0.0
 lavalink:
+  plugins:
+    - dependency: "dev.lavalink.youtube:youtube-plugin:1.11.1"
+      repository: "https://maven.lavalink.dev/releases"
   server:
     password: "youshallnotpass"
     sources:
-      youtube: true
+      # The youtube plugin handles youtube/youtube_music
       bandcamp: true
       soundcloud: true
       twitch: true
@@ -84,9 +116,20 @@ lavalink:
     opusEncodingQuality: 10
     resamplingQuality: LOW
     trackStuckThresholdMs: 10000
+plugins:
+  youtube:
+    enabled: true
+    allowSearch: true
+    allowDirectVideoIds: true
+    allowDirectPlaylistIds: true
+    clients:
+      - MUSIC
+      - ANDROID_TESTSUITE
+      - WEB
+      - TVHTML5EMBEDDED
 """
-            with open(CONFIG_NAME, "w") as f:
-                f.write(default_config)
+        with open(CONFIG_NAME, "w") as f:
+            f.write(v4_config)
 
     async def launch_java_process(self):
         """Starts the Java process."""
@@ -94,6 +137,7 @@ lavalink:
         
         cmd = ["java", "-jar", JAR_NAME]
         try:
+            print("[Bot] Starting Java Process (This may take 30s to download plugins)...")
             if platform.system() == "Windows":
                  subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE)
             else:
@@ -103,46 +147,52 @@ lavalink:
             print(f"[Bot] Failed to launch Java: {e}")
             return False
 
-    @app_commands.command(name="checkplayer", description="Diagnostics: Restarts Lavalink and connects.")
+    @app_commands.command(name="checkplayer", description="Diagnostics: Always restarts Lavalink and reconnects.")
     async def checkplayer(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
         
-        # Check active connection
+        # Check active connection just for logging, but don't stop
         nodes = wavelink.Pool.nodes.values()
         active = [n for n in nodes if n.status == wavelink.NodeStatus.CONNECTED]
-        if active:
-            await interaction.followup.send(f"✅ **Player is online.** ({len(active)} node(s))")
-            return
+        
+        status_msg = f"✅ **Player was online** ({len(active)} node(s))." if active else "⚠️ **Player offline.**"
+        await interaction.followup.send(f"{status_msg}\n🔄 **Initiating full restart sequence...**")
 
-        await interaction.followup.send("🔄 **Player offline.** Restarting system...")
-
+        # 1. Stop Old Server
         await self.stop_existing_process()
+        
+        # 2. Download Update (only if missing or tiny)
         if not await self.update_lavalink():
             await interaction.followup.send("❌ Update failed.")
             return
+            
+        # 3. Ensure Config is correct
         await self.check_config()
         
+        # 4. Start Java
         if not await self.launch_java_process():
             await interaction.followup.send("❌ Java launch failed.")
             return
 
-        # Wait for port
+        # 5. Wait for port (Increased timeout for plugin download)
         connected_to_port = False
-        for i in range(30):
+        await interaction.edit_original_response(content="⏳ **Server Starting...** (Downloading YouTube plugins, please wait ~45s)...")
+        
+        for i in range(60): # 60 seconds timeout
             if self.is_port_in_use(PORT):
                 connected_to_port = True
                 break
             await asyncio.sleep(1)
 
         if not connected_to_port:
-            await interaction.followup.send("❌ Server launched but port didn't open.")
+            await interaction.followup.send("❌ **Timeout:** Server launched but port didn't open. Check the opened Java window for errors.")
             return
 
-        # Connect Wavelink
+        # 6. Connect Wavelink
         node = wavelink.Node(identifier="AutoNode", uri=LAVALINK_URI, password=LAVALINK_PASS)
         try:
             await wavelink.Pool.connect(nodes=[node], client=self.bot, cache_capacity=100)
-            await interaction.followup.send("✅ **System Restored!** You can now use `/play`.")
+            await interaction.followup.send("✅ **System Restored!** YouTube Plugin enabled. Try `/play` now.")
         except Exception as e:
             await interaction.followup.send(f"❌ Connection Error: `{e}`")
 
@@ -153,56 +203,48 @@ lavalink:
 
     @commands.Cog.listener()
     async def on_wavelink_track_start(self, payload: wavelink.TrackStartEventPayload):
-        """Callback when a track actually starts playing."""
         player = payload.player
-        if player and player.channel:
-            # You can send a message to the channel where the command was invoked
-            # But we don't have the context here easily without storing it.
-            # Printing to console helps debugging "Silent Join" issues.
+        if player:
             print(f"[Music] Started playing: {payload.track.title}")
 
     @commands.Cog.listener()
+    async def on_wavelink_track_exception(self, payload: wavelink.TrackExceptionEventPayload):
+        print(f"[Music] ❌ Track Exception: {payload.exception}")
+        
+    @commands.Cog.listener()
     async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload):
-        """Callback when a track finishes. Plays the next track in queue."""
         player = payload.player
-        if not player:
-            return
-
-        # If queue is not empty, play next
+        if not player: return
         if not player.queue.is_empty:
             next_track = player.queue.get()
             await player.play(next_track)
-        else:
-            # Optional: Disconnect if empty
-            pass
 
     @app_commands.command(name="play", description="Play a song from YouTube or other sources.")
     async def play(self, interaction: discord.Interaction, query: str):
         if not interaction.guild: return
-
-        # Check if user is in a voice channel
         if not interaction.user.voice:
             await interaction.response.send_message("❌ You must be in a voice channel!", ephemeral=True)
             return
 
+        if not wavelink.Pool.nodes:
+            await interaction.response.send_message("❌ Player server disconnected. Run `/checkplayer`.", ephemeral=True)
+            return
+
         await interaction.response.defer()
 
-        # Get or Connect Player
         player = cast(wavelink.Player, interaction.guild.voice_client)
         if not player:
             try:
-                # IMPORTANT: self_deaf=True is crucial for some bots/servers
                 player = await interaction.user.voice.channel.connect(cls=wavelink.Player, self_deaf=True)
+                await player.set_volume(100)
             except Exception as e:
-                await interaction.followup.send(f"❌ Could not connect. Run `/checkplayer` first. Error: {e}")
+                await interaction.followup.send(f"❌ Connection Error: {e}")
                 return
 
-        # SEARCH LOGIC: Redbot style fallback
-        # If it's not a URL, assume it's a YouTube search
+        # Auto-add ytsearch if not a URL
         if not urllib.parse.urlparse(query).scheme:
             query = f"ytsearch:{query}"
 
-        # Search for Track
         try:
             tracks = await wavelink.Playable.search(query)
         except Exception as e:
@@ -210,26 +252,18 @@ lavalink:
             return
 
         if not tracks:
-            await interaction.followup.send(f"❌ No tracks found for `{query}`.")
+            await interaction.followup.send(f"❌ No tracks found for `{query}`. (YouTube plugin might still be loading)")
             return
 
-        # wavelink.Playable.search returns a list or a Playlist
         if isinstance(tracks, wavelink.Playlist):
-            # If it's a playlist, add all to queue
-            added = 0
             for track in tracks:
                 if player.playing:
                     await player.queue.put_wait(track)
                 else:
                     await player.play(track)
-                    # Only the first one plays immediately, rest go to queue
-                added += 1
-            await interaction.followup.send(f"✅ Added playlist **{tracks.name}** ({added} songs) to queue.")
+            await interaction.followup.send(f"✅ Added playlist **{tracks.name}** to queue.")
         else:
-            # It's a list of tracks, pick the first one
             track = tracks[0]
-
-            # Add to Queue or Play Immediately
             if player.playing:
                 await player.queue.put_wait(track)
                 await interaction.followup.send(f"📝 Added to queue: **{track.title}**")
@@ -243,7 +277,6 @@ lavalink:
         if not player or not player.playing:
             await interaction.response.send_message("❌ Nothing is playing.", ephemeral=True)
             return
-        
         await player.skip(force=True)
         await interaction.response.send_message("⏭️ Skipped.")
 
@@ -254,37 +287,28 @@ lavalink:
             await player.disconnect()
             await interaction.response.send_message("⏹️ Disconnected.")
         else:
-            await interaction.response.send_message("❌ I'm not connected.", ephemeral=True)
+            await interaction.response.send_message("❌ Not connected.", ephemeral=True)
 
     @app_commands.command(name="volume", description="Set volume (0-100).")
     async def volume(self, interaction: discord.Interaction, value: int):
         player = cast(wavelink.Player, interaction.guild.voice_client)
-        if not player:
-            await interaction.response.send_message("❌ Not connected.", ephemeral=True)
-            return
-
-        vol = max(0, min(100, value))
-        await player.set_volume(vol)
-        await interaction.response.send_message(f"🔊 Volume set to {vol}%")
+        if player:
+            vol = max(0, min(100, value))
+            await player.set_volume(vol)
+            await interaction.response.send_message(f"🔊 Volume set to {vol}%")
 
     @app_commands.command(name="queue", description="Show the current queue.")
     async def queue(self, interaction: discord.Interaction):
         player = cast(wavelink.Player, interaction.guild.voice_client)
         if not player or player.queue.is_empty:
-            await interaction.response.send_message("The queue is empty.", ephemeral=True)
+            await interaction.response.send_message("Queue is empty.", ephemeral=True)
             return
-
-        embed = discord.Embed(title="Current Queue")
         
-        # Show first 10 tracks
-        track_list = ""
+        embed = discord.Embed(title="Current Queue")
+        desc = ""
         for i, track in enumerate(player.queue[:10], start=1):
-            track_list += f"{i}. {track.title}\n"
-            
-        if len(player.queue) > 10:
-            track_list += f"... and {len(player.queue) - 10} more."
-            
-        embed.description = track_list
+            desc += f"{i}. {track.title}\n"
+        embed.description = desc
         await interaction.response.send_message(embed=embed)
 
 async def setup(bot: commands.Bot):
