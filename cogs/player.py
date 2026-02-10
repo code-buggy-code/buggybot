@@ -73,6 +73,7 @@ class Player(commands.Cog):
         
         # FORCE VOLUME TO 100% just in case
         await player.set_volume(100)
+        logging.info(f"Track Started: {payload.track.title}")
 
         original_requester = getattr(payload.track.extras, "requester", None)
         
@@ -113,7 +114,6 @@ class Player(commands.Cog):
                 player: wavelink.Player = await user.voice.channel.connect(cls=wavelink.Player, self_deaf=False, timeout=60)
                 
                 # CRITICAL FIX: Force a "wake up" packet
-                # Sometimes wavelink/discord needs a nudge to start the UDP stream
                 await asyncio.sleep(0.5)
                 await player.set_volume(100)
                 
@@ -141,24 +141,19 @@ class Player(commands.Cog):
         if isinstance(tracks, wavelink.Playlist):
             added: int = await player.queue.put_wait(tracks)
             await interaction.followup.send(f"Added playlist **{tracks.name}** ({added} songs) to the queue.")
+            if not player.playing:
+                 await player.play(player.queue.get())
         else:
             track: wavelink.Playable = tracks[0]
             track.extras = {"requester": user.display_name}
-            await player.queue.put_wait(track)
-            await interaction.followup.send(f"Added **{track.title}** to the queue.")
-
-        # FORCE PLAY if not playing
-        if not player.playing:
-            # Explicitly play the track we just added to the queue
-            # This ensures the audio stream actually starts
-            try:
-                # Retrieve from queue but put it back if play fails for some reason
-                next_track = player.queue.get() 
-                await player.play(next_track)
-            except Exception as e:
-                 print(f"DEBUG: Failed to force play: {e}")
-                 # If queue was empty or something failed, just ignore
-                 pass
+            
+            # DIRECT PLAY LOGIC: If idle, play immediately without queueing first
+            if not player.playing:
+                await player.play(track)
+                await interaction.followup.send(f"Playing **{track.title}**")
+            else:
+                await player.queue.put_wait(track)
+                await interaction.followup.send(f"Added **{track.title}** to the queue.")
 
     @app_commands.command(name="skip", description="Skip the current song")
     async def skip(self, interaction: discord.Interaction):
@@ -274,16 +269,21 @@ class Player(commands.Cog):
                 await interaction.followup.send("\n".join(report))
                 return
 
-        # Step 4: Test Search Query
-        report.append("🔍 Attempting test search for 'ytsearch:rick roll'...")
-        try:
-            tracks: wavelink.Search = await wavelink.Playable.search("ytsearch:rick roll")
-            if tracks:
-                report.append(f"✅ Search successful. Found: {tracks[0].title}")
-            else:
-                report.append("⚠️ Search returned no results.")
-        except Exception as e:
-            report.append(f"❌ Search failed with error: {str(e)}")
+        # Step 4: Player Status Check (New)
+        if interaction.guild.voice_client:
+             player: wavelink.Player = cast(wavelink.Player, interaction.guild.voice_client)
+             report.append(f"ℹ️ Player Status: Connected to {player.channel.name}")
+             if player.playing:
+                 report.append(f"✅ Player says it is playing: **{player.current.title}**")
+                 report.append(f"ℹ️ Current Position: {player.position}ms (Volume: {player.volume}%)")
+                 if player.position > 0:
+                     report.append("✅ **Time is moving!** If no sound, check local Discord volume or Server Region.")
+                 else:
+                     report.append("⚠️ **Time is NOT moving.** Audio stream might be blocked.")
+             else:
+                 report.append("⚠️ Player is connected but NOT playing anything.")
+        else:
+            report.append("⚠️ Bot is not in VC. Run `/play` first.")
 
         embed = discord.Embed(title="Audio System Diagnostic", description="\n".join(report), color=discord.Color.orange())
         await interaction.followup.send(embed=embed)
