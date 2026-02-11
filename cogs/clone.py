@@ -21,7 +21,7 @@ from typing import Literal, Optional
 # - on_raw_reaction_add(payload)
 # - on_message_delete(message)
 # - clone(interaction, action, receive_channel, source_id, min_reactions, attachments_only, return_replies) [Slash]
-# - postclone(interaction, source, destination) [Slash]
+# - postclone(interaction, source_id, destination_id) [Slash]
 # setup(bot)
 
 class Clone(commands.Cog):
@@ -462,26 +462,52 @@ class Clone(commands.Cog):
 
             await interaction.response.send_message(text[:2000], ephemeral=True)
 
-    @app_commands.command(name="postclone", description="Clone the last 100 messages from source to destination.")
+    @app_commands.command(name="postclone", description="Clone the last 100 messages from a source ID to a destination ID (Cross-Server).")
     @app_commands.describe(
-        source="The channel to copy FROM",
-        destination="The channel to send TO"
+        source_id="The Channel ID to copy FROM",
+        destination_id="The Channel ID to send TO"
     )
     @app_commands.default_permissions(administrator=True)
-    async def postclone(self, interaction: discord.Interaction, source: discord.TextChannel, destination: discord.TextChannel):
+    async def postclone(self, interaction: discord.Interaction, source_id: str, destination_id: str):
         """Copies the last 100 messages from source to destination via webhook."""
         await interaction.response.defer(ephemeral=True)
-        
-        webhook = await self.get_webhook(destination)
-        
-        if not webhook:
-            return await interaction.followup.send(f"❌ Could not create a webhook for {destination.mention}.", ephemeral=True)
 
-        # Check permissions for source
-        if not source.permissions_for(interaction.guild.me).read_message_history:
+        try:
+            s_id = int(source_id)
+            d_id = int(destination_id)
+        except ValueError:
+            return await interaction.followup.send("❌ IDs must be numbers.", ephemeral=True)
+
+        # Fetch Channels (Try cache first, then API)
+        source = self.bot.get_channel(s_id)
+        if not source:
+            try: source = await self.bot.fetch_channel(s_id)
+            except: pass
+        
+        destination = self.bot.get_channel(d_id)
+        if not destination:
+            try: destination = await self.bot.fetch_channel(d_id)
+            except: pass
+
+        # Validations
+        if not source or not isinstance(source, discord.TextChannel):
+            return await interaction.followup.send(f"❌ Could not find source text channel (ID: {s_id}). Ensure I am in that server.", ephemeral=True)
+        
+        if not destination or not isinstance(destination, discord.TextChannel):
+            return await interaction.followup.send(f"❌ Could not find destination text channel (ID: {d_id}). Ensure I am in that server.", ephemeral=True)
+
+        # Check permissions
+        if not source.permissions_for(source.guild.me).read_message_history:
              return await interaction.followup.send(f"❌ I cannot read message history in {source.mention}.", ephemeral=True)
 
-        messages = [msg async for msg in source.history(limit=100, oldest_first=True)]
+        webhook = await self.get_webhook(destination)
+        if not webhook:
+            return await interaction.followup.send(f"❌ Could not create a webhook for {destination.mention}. Check my permissions there.", ephemeral=True)
+
+        # Fetch latest 100 messages
+        messages = [msg async for msg in source.history(limit=100)]
+        # Reverse them to post oldest -> newest
+        messages = list(reversed(messages))
         
         count = 0
         for msg in messages:
@@ -491,8 +517,8 @@ class Clone(commands.Cog):
 
             content = msg.content
             
-            # Resolve mentions in text so they display nicely without pinging
-            content = await self.resolve_mentions(content, interaction.guild)
+            # Resolve mentions using the SOURCE guild so names are correct
+            content = await self.resolve_mentions(content, source.guild)
 
             # Collect Media Links (Attachments & Stickers)
             media_links = []
