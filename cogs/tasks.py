@@ -9,12 +9,12 @@ from typing import Literal
 # List of functions/classes in this file:
 # class TaskView(discord.ui.View):
 #   - __init__(self, cog, user_id, total, state=None, message_id=None)
-#   - get_emoji_bar(self)
-#   - update_message(self, interaction, finished=False, congratulation=None)
+#   - get_emoji_bar(self) [UPDATED]
+#   - update_message(self, interaction, finished=False, congratulation=None) [UPDATED]
 #   - update_db(self)
 #   - get_next_index(self)
 #   - check_completion(self, interaction)
-#   - finish_logic(self, interaction)
+#   - finish_logic(self, interaction) [UPDATED]
 #   - done_button(self, interaction, button)
 #   - skip_button(self, interaction, button)
 #   - undo_button(self, interaction, button)
@@ -37,7 +37,7 @@ class TaskView(discord.ui.View):
         self.cog = cog
         self.user_id = user_id
         self.total = total
-        # State Codes: 0 = White (Todo), 1 = Green (Done), 2 = Blue (Skipped)
+        # State Codes: 0 = White (Todo), 1 = Green (Done), 2 = Blue (Skipped Manual), 3 = Blue (Skipped Auto/Closed)
         self.state = state if state else [0] * total
         self.message_id = message_id
         self.history = [] # Stack for Undo
@@ -52,6 +52,11 @@ class TaskView(discord.ui.View):
         
         visual_state = []
         
+        # Sort state for visualization: 
+        # Manual Skipped (2) -> Done (1) -> Todo (0) -> Auto Skipped/Closed (3)
+        sort_key = {2: 0, 1: 1, 0: 2, 3: 3}
+        sorted_state = sorted(self.state, key=lambda x: sort_key.get(x, 4))
+
         # Create a visual representation by repeating task states proportionally
         current_visual_count = 0
         for i in range(self.total):
@@ -59,7 +64,8 @@ class TaskView(discord.ui.View):
             target_visual_count = int((i + 1) * total_visual_blocks / self.total)
             blocks_for_this_task = target_visual_count - current_visual_count
             
-            visual_state.extend([self.state[i]] * blocks_for_this_task)
+            # Use the sorted state here so colors are grouped
+            visual_state.extend([sorted_state[i]] * blocks_for_this_task)
             current_visual_count += blocks_for_this_task
             
         # Safety check to ensure exactly 32 blocks
@@ -81,6 +87,7 @@ class TaskView(discord.ui.View):
             val = visual_state[i]
             if val == 1: sym = SYM_DONE
             elif val == 2: sym = SYM_SKIP
+            elif val == 3: sym = SYM_SKIP # 3 (Auto Skip) is also Blue
             else: sym = SYM_TODO
             
             if i % 2 == 0:
@@ -91,7 +98,8 @@ class TaskView(discord.ui.View):
         return f"{row0}\n{row1}"
 
     async def update_message(self, interaction, finished=False, congratulation=None):
-        completed_tasks = self.state.count(1) + self.state.count(2)
+        # Count 1 (Done), 2 (Manual Skip), 3 (Auto Skip)
+        completed_tasks = self.state.count(1) + self.state.count(2) + self.state.count(3)
         content = f"<@{self.user_id}>'s tasks: {completed_tasks}/{self.total}\n{self.get_emoji_bar()}"
         
         view = self
@@ -132,8 +140,9 @@ class TaskView(discord.ui.View):
             await self.update_message(interaction)
 
     async def finish_logic(self, interaction):
-        # 1. Convert remaining '0' (Todo) to '2' (Skipped)
-        self.state = [2 if x == 0 else x for x in self.state]
+        # 1. Convert remaining '0' (Todo) to '3' (Auto Skipped/Closed)
+        # We use 3 instead of 2 so they can be sorted to the right side visually
+        self.state = [3 if x == 0 else x for x in self.state]
         
         # 2. Calculate score (Only '1's count towards the percentage)
         greens = [x for x in self.state if x == 1]
@@ -185,7 +194,7 @@ class TaskView(discord.ui.View):
             return await self.finish_logic(interaction)
 
         self.history.append((idx, 0))
-        self.state[idx] = 2 # Blue (Skipped)
+        self.state[idx] = 2 # Blue (Skipped Manual)
         await self.check_completion(interaction)
 
     @discord.ui.button(label="Undo", style=discord.ButtonStyle.secondary, custom_id="bb_undo")
@@ -343,7 +352,7 @@ class Tasks(commands.Cog, name="tasks"):
                 state=state
             )
             
-            content = f"<@{interaction.user.id}>'s tasks: {state.count(1) + state.count(2)}/{number}\n{view.get_emoji_bar()}"
+            content = f"<@{interaction.user.id}>'s tasks: {state.count(1) + state.count(2) + state.count(3)}/{number}\n{view.get_emoji_bar()}"
             # Send Publicly
             await interaction.response.send_message(content, view=view)
             
@@ -385,7 +394,7 @@ class Tasks(commands.Cog, name="tasks"):
             state=doc['state']
         )
 
-        content = f"<@{interaction.user.id}>'s tasks: {doc['state'].count(1) + doc['state'].count(2)}/{doc['total']}\n{view.get_emoji_bar()}"
+        content = f"<@{interaction.user.id}>'s tasks: {doc['state'].count(1) + doc['state'].count(2) + doc['state'].count(3)}/{doc['total']}\n{view.get_emoji_bar()}"
         
         await interaction.response.send_message(content, view=view)
         
