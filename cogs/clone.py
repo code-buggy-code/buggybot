@@ -21,6 +21,7 @@ from typing import Literal, Optional
 # - on_raw_reaction_add(payload)
 # - on_message_delete(message)
 # - clone(interaction, action, receive_channel, source_id, min_reactions, attachments_only, return_replies) [Slash]
+# - postclone(interaction) [Slash] <--- NEW COMMAND
 # setup(bot)
 
 class Clone(commands.Cog):
@@ -460,6 +461,62 @@ class Clone(commands.Cog):
                     text += f" - Source: **{s_name}**{flag_text}\n"
 
             await interaction.response.send_message(text[:2000], ephemeral=True)
+
+    @app_commands.command(name="postclone", description="Clone the last 100 messages to this channel via webhook.")
+    @app_commands.default_permissions(administrator=True)
+    async def postclone(self, interaction: discord.Interaction):
+        """Copies the last 100 messages from the current channel to the bottom via webhook."""
+        await interaction.response.defer(ephemeral=True)
+        
+        channel = interaction.channel
+        webhook = await self.get_webhook(channel)
+        
+        if not webhook:
+            return await interaction.followup.send("❌ Could not create a webhook for this channel.", ephemeral=True)
+
+        messages = [msg async for msg in channel.history(limit=100, oldest_first=True)]
+        
+        count = 0
+        for msg in messages:
+            # Skip empty messages (system pins etc)
+            if not msg.content and not msg.attachments and not msg.stickers:
+                continue
+
+            content = msg.content
+            
+            # Resolve mentions in text so they display nicely without pinging
+            content = await self.resolve_mentions(content, interaction.guild)
+
+            # Collect Media Links (Attachments & Stickers)
+            media_links = []
+            if msg.attachments:
+                media_links.extend([a.url for a in msg.attachments])
+            if msg.stickers:
+                media_links.extend([s.url for s in msg.stickers])
+
+            # Append links to content so they embed naturally
+            if media_links:
+                if content:
+                    content += "\n" + "\n".join(media_links)
+                else:
+                    content = "\n".join(media_links)
+            
+            if not content: continue
+
+            try:
+                await webhook.send(
+                    content=content,
+                    username=msg.author.display_name,
+                    avatar_url=msg.author.display_avatar.url,
+                    allowed_mentions=discord.AllowedMentions.none()
+                )
+                count += 1
+                # Small sleep to be polite to the API
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                print(f"Postclone error on msg {msg.id}: {e}")
+
+        await interaction.followup.send(f"✅ Successfully cloned {count} messages to the bottom!", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(Clone(bot))
