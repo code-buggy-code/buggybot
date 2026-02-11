@@ -21,7 +21,7 @@ from typing import Literal, Optional
 # - on_raw_reaction_add(payload)
 # - on_message_delete(message)
 # - clone(interaction, action, receive_channel, source_id, min_reactions, attachments_only, return_replies) [Slash]
-# - postclone(interaction) [Slash] <--- NEW COMMAND
+# - postclone(interaction, source, destination) [Slash]
 # setup(bot)
 
 class Clone(commands.Cog):
@@ -462,19 +462,26 @@ class Clone(commands.Cog):
 
             await interaction.response.send_message(text[:2000], ephemeral=True)
 
-    @app_commands.command(name="postclone", description="Clone the last 100 messages to this channel via webhook.")
+    @app_commands.command(name="postclone", description="Clone the last 100 messages from source to destination.")
+    @app_commands.describe(
+        source="The channel to copy FROM",
+        destination="The channel to send TO"
+    )
     @app_commands.default_permissions(administrator=True)
-    async def postclone(self, interaction: discord.Interaction):
-        """Copies the last 100 messages from the current channel to the bottom via webhook."""
+    async def postclone(self, interaction: discord.Interaction, source: discord.TextChannel, destination: discord.TextChannel):
+        """Copies the last 100 messages from source to destination via webhook."""
         await interaction.response.defer(ephemeral=True)
         
-        channel = interaction.channel
-        webhook = await self.get_webhook(channel)
+        webhook = await self.get_webhook(destination)
         
         if not webhook:
-            return await interaction.followup.send("❌ Could not create a webhook for this channel.", ephemeral=True)
+            return await interaction.followup.send(f"❌ Could not create a webhook for {destination.mention}.", ephemeral=True)
 
-        messages = [msg async for msg in channel.history(limit=100, oldest_first=True)]
+        # Check permissions for source
+        if not source.permissions_for(interaction.guild.me).read_message_history:
+             return await interaction.followup.send(f"❌ I cannot read message history in {source.mention}.", ephemeral=True)
+
+        messages = [msg async for msg in source.history(limit=100, oldest_first=True)]
         
         count = 0
         for msg in messages:
@@ -516,7 +523,7 @@ class Clone(commands.Cog):
             except Exception as e:
                 print(f"Postclone error on msg {msg.id}: {e}")
 
-        await interaction.followup.send(f"✅ Successfully cloned {count} messages to the bottom!", ephemeral=True)
+        await interaction.followup.send(f"✅ Successfully cloned {count} messages from {source.mention} to {destination.mention}!", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(Clone(bot))
