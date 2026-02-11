@@ -3,7 +3,7 @@ from discord import app_commands
 from discord.ext import commands
 import asyncio
 import re
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 # Function/Class List:
 # class Clone(commands.Cog)
@@ -47,16 +47,22 @@ class Clone(commands.Cog):
         self.bot.db.save_collection("clone_history", history)
 
     async def get_webhook(self, channel):
-        """Finds or creates a webhook for the bot in the channel."""
-        if not isinstance(channel, discord.TextChannel):
+        """Finds or creates a webhook for the bot in the channel (or parent if thread)."""
+        target_channel = channel
+        # Webhooks belong to the parent channel, not the thread itself
+        if isinstance(channel, discord.Thread):
+            target_channel = channel.parent
+        
+        # Ensure we are looking at a valid text-capable channel
+        if not isinstance(target_channel, discord.TextChannel) and not isinstance(target_channel, discord.VoiceChannel):
             return None
             
-        webhooks = await channel.webhooks()
+        webhooks = await target_channel.webhooks()
         for wh in webhooks:
             # We reuse our own webhook if found
             if wh.user == self.bot.user or wh.name == "BuggyClone":
                 return wh
-        return await channel.create_webhook(name="BuggyClone")
+        return await target_channel.create_webhook(name="BuggyClone")
 
     async def resolve_mentions(self, content, guild):
         """
@@ -188,16 +194,22 @@ class Clone(commands.Cog):
         if not webhook: return # Could not create webhook
         
         try:
+            # Prepare arguments for sending
+            send_kwargs = {
+                "content": final_content,
+                "username": message.author.display_name,
+                "avatar_url": message.author.display_avatar.url,
+                "embeds": clean_embeds,
+                "wait": True,
+                "allowed_mentions": discord.AllowedMentions.none()
+            }
+            
+            # If receiver is a thread, we must specify it in the webhook send
+            if isinstance(receiver, discord.Thread):
+                send_kwargs["thread"] = receiver
+
             # Send via Webhook to impersonate
-            # allowed_mentions=discord.AllowedMentions.none() prevents any lingering pings
-            cloned_msg = await webhook.send(
-                content=final_content,
-                username=message.author.display_name,
-                avatar_url=message.author.display_avatar.url,
-                embeds=clean_embeds,
-                wait=True,
-                allowed_mentions=discord.AllowedMentions.none()
-            )
+            cloned_msg = await webhook.send(**send_kwargs)
             
             # Save History for deletions and replies
             history = self.get_history()
@@ -464,8 +476,8 @@ class Clone(commands.Cog):
 
     @app_commands.command(name="postclone", description="Clone the last 100 messages from a source ID to a destination ID (Cross-Server).")
     @app_commands.describe(
-        source_id="The Channel ID to copy FROM",
-        destination_id="The Channel ID to send TO (Defaults to current channel)"
+        source_id="The Channel/Thread ID to copy FROM",
+        destination_id="The Channel/Thread ID to send TO (Defaults to current channel)"
     )
     @app_commands.default_permissions(administrator=True)
     async def postclone(self, interaction: discord.Interaction, source_id: str, destination_id: Optional[str] = None):
@@ -478,13 +490,13 @@ class Clone(commands.Cog):
         except ValueError:
             return await interaction.followup.send("❌ Source ID must be a number.", ephemeral=True)
 
-        # Fetch Source Channel
+        # Fetch Source Channel/Thread
         source = self.bot.get_channel(s_id)
         if not source:
             try: source = await self.bot.fetch_channel(s_id)
             except: pass
         
-        # Parse/Fetch Destination Channel
+        # Parse/Fetch Destination Channel/Thread
         if destination_id:
             try:
                 d_id = int(destination_id)
@@ -498,11 +510,14 @@ class Clone(commands.Cog):
             destination = interaction.channel
 
         # Validations
-        if not source or not isinstance(source, discord.TextChannel):
-            return await interaction.followup.send(f"❌ Could not find source text channel (ID: {s_id}). Ensure I am in that server.", ephemeral=True)
+        # Allow TextChannels, Threads, and VoiceChannels (Text in Voice)
+        allowed_types = (discord.TextChannel, discord.Thread, discord.VoiceChannel, discord.StageChannel)
         
-        if not destination or not isinstance(destination, discord.TextChannel):
-            return await interaction.followup.send(f"❌ Destination must be a Text Channel.", ephemeral=True)
+        if not source or not isinstance(source, allowed_types):
+            return await interaction.followup.send(f"❌ Could not find valid source channel (ID: {s_id}). Ensure I am in that server.", ephemeral=True)
+        
+        if not destination or not isinstance(destination, allowed_types):
+            return await interaction.followup.send(f"❌ Destination must be a text-capable channel or thread.", ephemeral=True)
 
         # Check permissions
         if not source.permissions_for(source.guild.me).read_message_history:
@@ -524,7 +539,6 @@ class Clone(commands.Cog):
             sources_to_process = []
             
             # Check for Forwarded Messages (Snapshots - discord.py 2.4+)
-            # We use getattr to be safe if library is older
             snapshots = getattr(msg, 'message_snapshots', [])
             if snapshots:
                 sources_to_process.extend(snapshots)
@@ -563,8 +577,6 @@ class Clone(commands.Cog):
 
                 try:
                     # We use the ORIGINAL author (the one who forwarded it) as the speaker
-                    # This fulfills "as if they are normal messages"
-                    
                     author_name = "Unknown"
                     author_avatar = None
                     
@@ -572,16 +584,22 @@ class Clone(commands.Cog):
                         author_name = src.author.display_name
                         author_avatar = src.author.display_avatar.url
                     else:
-                        # Fallback to the message sender if snapshot lacks author info (unlikely but safe)
                         author_name = msg.author.display_name
                         author_avatar = msg.author.display_avatar.url
 
-                    await webhook.send(
-                        content=content,
-                        username=author_name,
-                        avatar_url=author_avatar,
-                        allowed_mentions=discord.AllowedMentions.none()
-                    )
+                    # Prepare args
+                    send_kwargs = {
+                        "content": content,
+                        "username": author_name,
+                        "avatar_url": author_avatar,
+                        "allowed_mentions": discord.AllowedMentions.none()
+                    }
+                    
+                    # IMPORTANT: If destination is a thread, we must explicitly target it
+                    if isinstance(destination, discord.Thread):
+                        send_kwargs["thread"] = destination
+
+                    await webhook.send(**send_kwargs)
                     count += 1
                     # Small sleep to be polite to the API
                     await asyncio.sleep(0.5)
