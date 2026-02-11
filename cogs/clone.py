@@ -465,36 +465,44 @@ class Clone(commands.Cog):
     @app_commands.command(name="postclone", description="Clone the last 100 messages from a source ID to a destination ID (Cross-Server).")
     @app_commands.describe(
         source_id="The Channel ID to copy FROM",
-        destination_id="The Channel ID to send TO"
+        destination_id="The Channel ID to send TO (Defaults to current channel)"
     )
     @app_commands.default_permissions(administrator=True)
-    async def postclone(self, interaction: discord.Interaction, source_id: str, destination_id: str):
+    async def postclone(self, interaction: discord.Interaction, source_id: str, destination_id: Optional[str] = None):
         """Copies the last 100 messages from source to destination via webhook."""
         await interaction.response.defer(ephemeral=True)
 
+        # Parse Source ID
         try:
             s_id = int(source_id)
-            d_id = int(destination_id)
         except ValueError:
-            return await interaction.followup.send("❌ IDs must be numbers.", ephemeral=True)
+            return await interaction.followup.send("❌ Source ID must be a number.", ephemeral=True)
 
-        # Fetch Channels (Try cache first, then API)
+        # Fetch Source Channel
         source = self.bot.get_channel(s_id)
         if not source:
             try: source = await self.bot.fetch_channel(s_id)
             except: pass
         
-        destination = self.bot.get_channel(d_id)
-        if not destination:
-            try: destination = await self.bot.fetch_channel(d_id)
-            except: pass
+        # Parse/Fetch Destination Channel
+        if destination_id:
+            try:
+                d_id = int(destination_id)
+                destination = self.bot.get_channel(d_id)
+                if not destination:
+                    try: destination = await self.bot.fetch_channel(d_id)
+                    except: pass
+            except ValueError:
+                 return await interaction.followup.send("❌ Destination ID must be a number.", ephemeral=True)
+        else:
+            destination = interaction.channel
 
         # Validations
         if not source or not isinstance(source, discord.TextChannel):
             return await interaction.followup.send(f"❌ Could not find source text channel (ID: {s_id}). Ensure I am in that server.", ephemeral=True)
         
         if not destination or not isinstance(destination, discord.TextChannel):
-            return await interaction.followup.send(f"❌ Could not find destination text channel (ID: {d_id}). Ensure I am in that server.", ephemeral=True)
+            return await interaction.followup.send(f"❌ Destination must be a Text Channel.", ephemeral=True)
 
         # Check permissions
         if not source.permissions_for(source.guild.me).read_message_history:
@@ -511,43 +519,74 @@ class Clone(commands.Cog):
         
         count = 0
         for msg in messages:
-            # Skip empty messages (system pins etc)
-            if not msg.content and not msg.attachments and not msg.stickers:
-                continue
-
-            content = msg.content
+            # Prepare a list of "sources" to process from this message
+            # This handles standard messages AND forwarded messages (Snapshots)
+            sources_to_process = []
             
-            # Resolve mentions using the SOURCE guild so names are correct
-            content = await self.resolve_mentions(content, source.guild)
+            # Check for Forwarded Messages (Snapshots - discord.py 2.4+)
+            # We use getattr to be safe if library is older
+            snapshots = getattr(msg, 'message_snapshots', [])
+            if snapshots:
+                sources_to_process.extend(snapshots)
+            else:
+                # No snapshots, just use the message itself
+                sources_to_process.append(msg)
 
-            # Collect Media Links (Attachments & Stickers)
-            media_links = []
-            if msg.attachments:
-                media_links.extend([a.url for a in msg.attachments])
-            if msg.stickers:
-                media_links.extend([s.url for s in msg.stickers])
+            for src in sources_to_process:
+                # Extract content
+                content = src.content
+                
+                # Check for attachments/stickers
+                # Message objects have .attachments list
+                # Snapshot objects also have .attachments list (proxy objects)
+                src_attachments = getattr(src, 'attachments', [])
+                media_links = [a.url for a in src_attachments]
 
-            # Append links to content so they embed naturally
-            if media_links:
-                if content:
-                    content += "\n" + "\n".join(media_links)
-                else:
-                    content = "\n".join(media_links)
-            
-            if not content: continue
+                # Stickers (Only on Message objects typically)
+                src_stickers = getattr(src, 'stickers', [])
+                media_links.extend([s.url for s in src_stickers])
 
-            try:
-                await webhook.send(
-                    content=content,
-                    username=msg.author.display_name,
-                    avatar_url=msg.author.display_avatar.url,
-                    allowed_mentions=discord.AllowedMentions.none()
-                )
-                count += 1
-                # Small sleep to be polite to the API
-                await asyncio.sleep(0.5)
-            except Exception as e:
-                print(f"Postclone error on msg {msg.id}: {e}")
+                if not content and not media_links:
+                    continue
+
+                # Resolve mentions using the SOURCE guild context so names are correct
+                content = await self.resolve_mentions(content, source.guild)
+
+                # Append links to content so they embed naturally
+                if media_links:
+                    if content:
+                        content += "\n" + "\n".join(media_links)
+                    else:
+                        content = "\n".join(media_links)
+                
+                if not content: continue
+
+                try:
+                    # We use the ORIGINAL author (the one who forwarded it) as the speaker
+                    # This fulfills "as if they are normal messages"
+                    
+                    author_name = "Unknown"
+                    author_avatar = None
+                    
+                    if hasattr(src, 'author'):
+                        author_name = src.author.display_name
+                        author_avatar = src.author.display_avatar.url
+                    else:
+                        # Fallback to the message sender if snapshot lacks author info (unlikely but safe)
+                        author_name = msg.author.display_name
+                        author_avatar = msg.author.display_avatar.url
+
+                    await webhook.send(
+                        content=content,
+                        username=author_name,
+                        avatar_url=author_avatar,
+                        allowed_mentions=discord.AllowedMentions.none()
+                    )
+                    count += 1
+                    # Small sleep to be polite to the API
+                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    print(f"Postclone error on msg {msg.id}: {e}")
 
         await interaction.followup.send(f"✅ Successfully cloned {count} messages from {source.mention} to {destination.mention}!", ephemeral=True)
 
