@@ -27,12 +27,13 @@ from spotipy.oauth2 import SpotifyClientCredentials
 # - process_spotify_link(url, guild_id)
 # - search_youtube_official(query)
 # - check_token_validity_task()
+# - license_reminder_task() <--- NEW
 # - checkmusic(interaction) [Slash]
 # - ytauth(interaction) [Slash]
 # - ytcode(interaction, code) [Slash]
 # - playlist(interaction, playlist) [Slash]
 # - musicchannel(interaction, channel) [Slash]
-# - removesong(interaction, query) [Slash] <--- NEW
+# - removesong(interaction, query) [Slash]
 # - on_message(message)
 # setup(bot)
 
@@ -48,9 +49,11 @@ class Music(commands.Cog):
         self.load_music_services()
         self.bot.loop.create_task(self.load_youtube_service())
         self.check_token_validity_task.start()
+        self.license_reminder_task.start()
 
     def cog_unload(self):
         self.check_token_validity_task.cancel()
+        self.license_reminder_task.cancel()
 
     def load_config(self, guild_id):
         """Loads music config for a specific guild from DB."""
@@ -230,6 +233,48 @@ class Music(commands.Cog):
     async def before_check_token(self):
         await self.bot.wait_until_ready()
 
+    @tasks.loop(hours=1)
+    async def license_reminder_task(self):
+        """Checks if it's been 6 days since renewal to ping the user."""
+        global_config = self.bot.db.get_collection("global_music_settings")
+        # Handle the list vs dict structure safely
+        if isinstance(global_config, list): 
+             if global_config: global_config = global_config[0]
+             else: return
+
+        # Check if reminder is needed
+        if not global_config.get('reminder_timestamp') or global_config.get('reminder_sent'):
+            return
+
+        remind_ts = global_config['reminder_timestamp']
+        
+        # If current time is past the reminder timestamp
+        if datetime.datetime.now().timestamp() >= remind_ts:
+            user_id = global_config.get('reminder_user_id')
+            if user_id:
+                try:
+                    user = await self.bot.fetch_user(user_id)
+                    await user.send(
+                        "⚠️ **YouTube License Reminder!**\n"
+                        "It has been 6 days since you renewed the YouTube license. "
+                        "It expires in roughly 24 hours.\n\n"
+                        "Please run `/ytauth` and then `/ytcode` again soon to keep the music playing!"
+                    )
+                except Exception as e:
+                    print(f"Failed to DM user for license reminder: {e}")
+            
+            # Mark as sent so we don't spam
+            global_config['reminder_sent'] = True
+            
+            # We must wrap it back in a list if the DB expects it (based on other methods)
+            # But the save method typically handles the structure passed to it.
+            # safe save:
+            self.bot.db.save_collection("global_music_settings", global_config)
+
+    @license_reminder_task.before_loop
+    async def before_reminder(self):
+        await self.bot.wait_until_ready()
+
     # --- SLASH COMMANDS (Top Level) ---
 
     @app_commands.command(name="checkmusic", description="Checks all music API statuses.")
@@ -295,12 +340,24 @@ class Music(commands.Cog):
             
             # Save Global Token
             global_config = self.bot.db.get_collection("global_music_settings")
-            if isinstance(global_config, list): global_config = {}
+            # Ensure we get the dict object correctly
+            if isinstance(global_config, list):
+                 if global_config: global_config = global_config[0]
+                 else: global_config = {}
+            
             global_config['youtube_token_json'] = self.auth_flow.credentials.to_json()
+            
+            # NEW: Set reminder for 6 days from now
+            # 6 days * 24 hours * 60 mins * 60 secs
+            reminder_time = datetime.datetime.now().timestamp() + (6 * 24 * 60 * 60)
+            global_config['reminder_timestamp'] = reminder_time
+            global_config['reminder_user_id'] = interaction.user.id
+            global_config['reminder_sent'] = False
+            
             self.bot.db.save_collection("global_music_settings", global_config)
             
             await self.load_youtube_service()
-            await interaction.response.send_message("✅ **Success!** License renewed and saved.", ephemeral=True)
+            await interaction.response.send_message("✅ **Success!** License renewed and saved. I will ping you in 6 days to renew it again!", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
