@@ -53,8 +53,9 @@ class Clone(commands.Cog):
         if isinstance(channel, discord.Thread):
             target_channel = channel.parent
         
-        # Ensure we are looking at a valid text-capable channel
-        if not isinstance(target_channel, discord.TextChannel) and not isinstance(target_channel, discord.VoiceChannel):
+        # Ensure we are looking at a valid text-capable channel (Text, Voice, Stage, Forum)
+        valid_types = (discord.TextChannel, discord.VoiceChannel, discord.StageChannel, discord.ForumChannel)
+        if not isinstance(target_channel, valid_types):
             return None
             
         webhooks = await target_channel.webhooks()
@@ -477,7 +478,7 @@ class Clone(commands.Cog):
     @app_commands.command(name="postclone", description="Clone the last 100 messages from a source ID to a destination ID (Cross-Server).")
     @app_commands.describe(
         source_id="The Channel/Thread ID to copy FROM",
-        destination_id="The Channel/Thread ID to send TO (Defaults to current channel)"
+        destination_id="The Channel/Thread/Forum ID to send TO (Defaults to current channel)"
     )
     @app_commands.default_permissions(administrator=True)
     async def postclone(self, interaction: discord.Interaction, source_id: str, destination_id: Optional[str] = None):
@@ -496,7 +497,7 @@ class Clone(commands.Cog):
             try: source = await self.bot.fetch_channel(s_id)
             except: pass
         
-        # Parse/Fetch Destination Channel/Thread
+        # Parse/Fetch Destination Channel/Thread/Forum
         if destination_id:
             try:
                 d_id = int(destination_id)
@@ -510,16 +511,32 @@ class Clone(commands.Cog):
             destination = interaction.channel
 
         # Validations
-        # Allow TextChannels, Threads, and VoiceChannels (Text in Voice)
-        allowed_types = (discord.TextChannel, discord.Thread, discord.VoiceChannel, discord.StageChannel)
+        # Sources: Text, Thread, Voice, Stage (Cannot "read history" from a Forum Root)
+        allowed_source_types = (discord.TextChannel, discord.Thread, discord.VoiceChannel, discord.StageChannel)
         
-        if not source or not isinstance(source, allowed_types):
-            return await interaction.followup.send(f"❌ Could not find valid source channel (ID: {s_id}). Ensure I am in that server.", ephemeral=True)
+        # Destinations: Text, Thread, Voice, Stage, Forum (Can post to all)
+        allowed_dest_types = (discord.TextChannel, discord.Thread, discord.VoiceChannel, discord.StageChannel, discord.ForumChannel)
         
-        if not destination or not isinstance(destination, allowed_types):
-            return await interaction.followup.send(f"❌ Destination must be a text-capable channel or thread.", ephemeral=True)
+        if not source or not isinstance(source, allowed_source_types):
+            if isinstance(source, discord.ForumChannel):
+                 return await interaction.followup.send("❌ You cannot clone from a Forum Channel root. Please use the ID of a specific Post (Thread) inside the forum.", ephemeral=True)
+            return await interaction.followup.send(f"❌ Could not find valid source channel (ID: {s_id}). Ensure I am in that server and it has message history.", ephemeral=True)
+        
+        if not destination or not isinstance(destination, allowed_dest_types):
+            return await interaction.followup.send(f"❌ Destination must be a text-capable channel, thread, or forum.", ephemeral=True)
 
-        # Check permissions
+        # Special Handling for Forum Destinations: Create a new Thread/Post first
+        if isinstance(destination, discord.ForumChannel):
+            try:
+                # Create the post
+                start_content = f"📂 **Cloning Session**\nFrom: {source.mention}\nRunning..."
+                thread_with_msg = await destination.create_thread(name=f"Clone: {source.name}", content=start_content)
+                # Redirect destination to the new thread
+                destination = thread_with_msg.thread
+            except Exception as e:
+                return await interaction.followup.send(f"❌ Failed to create a new post in the destination forum: {e}", ephemeral=True)
+
+        # Check permissions for source
         if not source.permissions_for(source.guild.me).read_message_history:
              return await interaction.followup.send(f"❌ I cannot read message history in {source.mention}.", ephemeral=True)
 
@@ -595,7 +612,7 @@ class Clone(commands.Cog):
                         "allowed_mentions": discord.AllowedMentions.none()
                     }
                     
-                    # IMPORTANT: If destination is a thread, we must explicitly target it
+                    # IMPORTANT: If destination is a thread (or the one we just made in the forum), target it
                     if isinstance(destination, discord.Thread):
                         send_kwargs["thread"] = destination
 
