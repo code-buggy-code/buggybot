@@ -14,15 +14,15 @@ from typing import Literal, Optional, Union, List, Tuple
 # - save_history(history)
 # - get_webhook(channel)
 # - resolve_mentions(content, guild)
-# - _process_message_for_clone(message, guild_context) [New Helper]
+# - _process_message_for_clone(message, guild_context)
 # - on_message(message)
 # - handle_cloning(message)
 # - execute_clone(message, setup)
 # - handle_return_reply(message)
 # - on_raw_reaction_add(payload)
 # - on_message_delete(message)
-# - clone(interaction, action, receive_channel, source_id, min_reactions, attachments_only, return_replies) [Slash]
-# - postclone(interaction, source_id, destination_id) [Slash]
+# - clone(interaction, action, receive_channel, source_id, min_reactions, attachments_only, return_replies)
+# - postclone(interaction, source_id, destination_id)
 # setup(bot)
 
 class Clone(commands.Cog):
@@ -204,9 +204,13 @@ class Clone(commands.Cog):
             # Category Match
             elif message.channel.category and s['source_id'] == message.channel.category.id:
                 is_source = True
+
+            # Server Match
+            elif s['source_id'] == message.guild.id:
+                is_source = True
             
             if is_source:
-                # Check Ignore List (Channels to skip within a category)
+                # Check Ignore List (Channels to skip within a category/server)
                 if message.channel.id in s.get('ignore_channels', []):
                     continue
                 
@@ -281,8 +285,10 @@ class Clone(commands.Cog):
                 source_chan = self.bot.get_channel(entry['source_channel_id'])
                 if not source_chan: continue
                 
-                # Check if this setup matches the source channel ID or its category
-                if s['source_id'] == source_chan.id or (source_chan.category and s['source_id'] == source_chan.category.id):
+                # Check if this setup matches the source channel ID, its category, or the server
+                if s['source_id'] == source_chan.id or \
+                   (source_chan.category and s['source_id'] == source_chan.category.id) or \
+                   (s['source_id'] == source_chan.guild.id):
                      relevant_setup = s
                      break
         
@@ -328,12 +334,13 @@ class Clone(commands.Cog):
             min_reacts = s.get('min_reactions', 0)
             if min_reacts <= 0: continue
 
-            # Is this the source?
-            is_source = (s['source_id'] == channel.id) or (channel.category and s['source_id'] == channel.category.id)
+            # Is this the source? (Channel, Category, or Server)
+            is_source = (s['source_id'] == channel.id) or \
+                        (channel.category and s['source_id'] == channel.category.id) or \
+                        (s['source_id'] == channel.guild.id)
+            
             if is_source:
                 if channel.id in s.get('ignore_channels', []): continue
-                if s.get('attachments_only', False):
-                    pass
 
                 try:
                     message = await channel.fetch_message(msg_id)
@@ -341,6 +348,7 @@ class Clone(commands.Cog):
                     if s.get('attachments_only', False) and not message.attachments:
                         continue
 
+                    # This explicitly sums the count of ALL reactions on the message
                     total = sum(r.count for r in message.reactions)
                     
                     if total >= min_reacts:
@@ -373,7 +381,7 @@ class Clone(commands.Cog):
     @app_commands.describe(
         action="What would you like to do?",
         receive_channel="[Add/Remove] Where to send cloned messages",
-        source_id="[Add/Remove] ID of Source Channel or Category",
+        source_id="[Add/Remove] ID of Source Channel, Category, or Server",
         min_reactions="[Add] Reactions needed to clone (0=Instant)",
         attachments_only="[Add] Only clone messages with files?",
         return_replies="[Add] Allow replies from receiver back to source?"
@@ -488,6 +496,8 @@ class Clone(commands.Cog):
                     sid = s['source_id']
                     if sid in current_guild_map:
                         s_name = current_guild_map[sid]
+                    elif sid == interaction.guild_id:
+                        s_name = f"Server: {interaction.guild.name}"
                     else:
                         global_chan = self.bot.get_channel(sid)
                         s_name = global_chan.name if global_chan else f"ID:{sid}"
