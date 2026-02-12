@@ -152,16 +152,22 @@ class Stickies(commands.Cog):
         """Handles sticky message triggering."""
         if not message.guild: return
         
-        # Allow purge announcements to trigger stickies, but ignore other bot messages (especially self)
-        if message.author.bot:
-            if not message.content.startswith("🧹 **Nightly Purge Complete.**"):
-                return
+        # Safety Lock Check: Prevent the sticky message itself from triggering an infinite loop
+        # If we are currently in the middle of sending the sticky, ignore messages
+        if message.channel.id in self.reposting:
+            return
+
+        # Ignore OTHER bots, but allow our own bot (buggybot) to trigger the sticky to move down
+        if message.author.bot and message.author.id != self.bot.user.id:
+            return
 
         stickies = self.get_stickies()
         sticky_data = next((s for s in stickies if s['channel_id'] == message.channel.id), None)
         
         if sticky_data:
             if not sticky_data.get('active', True): return
+            
+            # Final safeguard: Make absolutely sure the message isn't the sticky message itself
             if sticky_data.get('last_message_id') == message.id: return
 
             await self.handle_sticky(message)
