@@ -7,7 +7,6 @@ import asyncio
 import re
 import datetime
 import sys
-import traceback
 
 # music APIs
 from google.oauth2.credentials import Credentials
@@ -17,11 +16,26 @@ from google_auth_oauthlib.flow import Flow
 from spotipy import Spotify
 from spotipy.oauth2 import SpotifyClientCredentials
 
-# Try importing yt_dlp
-try:
-    import yt_dlp
-except ImportError:
-    yt_dlp = None
+# Function/Class List:
+# class Music(commands.Cog)
+# - __init__(bot)
+# - cog_unload()
+# - load_config(guild_id)
+# - save_config(guild_id, config)
+# - load_youtube_service()
+# - load_music_services()
+# - process_spotify_link(url, guild_id)
+# - search_youtube_official(query)
+# - check_token_validity_task()
+# - license_reminder_task() <--- NEW
+# - checkmusic(interaction) [Slash]
+# - ytauth(interaction) [Slash]
+# - ytcode(interaction, code) [Slash]
+# - playlist(interaction, playlist) [Slash]
+# - musicchannel(interaction, channel) [Slash]
+# - removesong(interaction, query) [Slash]
+# - on_message(message)
+# setup(bot)
 
 class Music(commands.Cog):
     def __init__(self, bot):
@@ -31,36 +45,21 @@ class Music(commands.Cog):
         self.spotify = None
         self.auth_flow = None
         
-        # --- Local Cache / yt-dlp Config ---
-        self.download_dir = "music_cache"
-        self.server_playlist_url = os.getenv("SERVER_PLAYLIST_URL", None) 
-        if not os.path.exists(self.download_dir):
-            os.makedirs(self.download_dir)
-            
-        if yt_dlp is None:
-            print("WARNING: yt-dlp is not installed. Playback features will fail.")
-        # -----------------------------------
-
         # Start services
         self.load_music_services()
         self.bot.loop.create_task(self.load_youtube_service())
         self.check_token_validity_task.start()
         self.license_reminder_task.start()
-        
-        # Start Local Cache Tasks
-        self.sync_server_playlist.start()
-        self.manage_cache.start()
 
     def cog_unload(self):
         self.check_token_validity_task.cancel()
         self.license_reminder_task.cancel()
-        self.sync_server_playlist.cancel()
-        self.manage_cache.cancel()
 
     def load_config(self, guild_id):
         """Loads music config for a specific guild from DB."""
+        # Using "music_config" collection (Dict of {guild_id: config})
         data = self.bot.db.get_collection("music_config")
-        if isinstance(data, list): data = {} 
+        if isinstance(data, list): data = {} # Migration safety
         
         return data.get(str(guild_id), {
             "playlist_id": "",
@@ -79,13 +78,16 @@ class Music(commands.Cog):
         """Loads the YouTube API service from stored token."""
         self.youtube = None
         
+        # Token is global, not per-server
         global_config = self.bot.db.get_collection("global_music_settings")
+        # If it returns a list (default empty), make it a dict
         if isinstance(global_config, list): 
             if global_config: global_config = global_config[0]
             else: global_config = {}
 
         token_json = global_config.get('youtube_token_json')
         
+        # Fallback to local file if DB is empty
         if not token_json and os.path.exists('token.json'):
             try:
                 with open('token.json', 'r') as f:
@@ -101,6 +103,7 @@ class Music(commands.Cog):
                     try:
                         creds.refresh(Request())
                         global_config['youtube_token_json'] = creds.to_json()
+                        # Save Global settings
                         self.bot.db.save_collection("global_music_settings", global_config)
                     except: 
                         return False
@@ -113,7 +116,9 @@ class Music(commands.Cog):
         return False
 
     def load_music_services(self):
-        """Loads Spotify service only."""
+        """Loads Spotify service only (YTM removed)."""
+        # 1. Spotify
+        # Load from spotify.json
         spotify_id = None
         spotify_secret = None
         
@@ -142,6 +147,7 @@ class Music(commands.Cog):
 
         try:
             loop = asyncio.get_running_loop()
+            # Perform a standard YouTube Search
             request = self.youtube.search().list(
                 part="snippet",
                 maxResults=1,
@@ -151,6 +157,7 @@ class Music(commands.Cog):
             response = await loop.run_in_executor(None, request.execute)
             
             if response.get('items'):
+                # Return the video ID of the first result
                 return response['items'][0]['id']['videoId']
         except Exception as e:
             print(f"YouTube Search Error: {e}")
@@ -169,21 +176,29 @@ class Music(commands.Cog):
         if errors:
             return "Setup Errors:\n" + "\n".join([f"- {e}" for e in errors])
 
+        # Logic: Link is already regex-verified by on_message, so we can trust it.
+        # We strip query parameters just to be safe.
         clean_url = url.split("?")[0]
+        
         loop = asyncio.get_running_loop()
 
         try:
+            # 1. Get Track Info from Spotify
             try:
                 track = await loop.run_in_executor(None, self.spotify.track, clean_url)
             except Exception as e:
                 return f"Spotify Error: {e}"
 
+            # Make search query
             search_query = f"{track['artists'][0]['name']} - {track['name']}"
+
+            # 2. Search on YouTube (Official API)
             video_id = await self.search_youtube_official(search_query)
 
             if not video_id: 
                 return f"Could not find '{search_query}' on YouTube."
 
+            # 3. Add to YouTube Playlist
             try:
                 req = self.youtube.playlistItems().insert(
                     part="snippet",
@@ -209,6 +224,7 @@ class Music(commands.Cog):
 
     @tasks.loop(hours=24)
     async def check_token_validity_task(self):
+        """Daily check for token validity."""
         valid = await self.load_youtube_service()
         status = "Valid" if valid else "Expired/Broken"
         print(f"[music] Daily Token Check: {status}")
@@ -219,15 +235,20 @@ class Music(commands.Cog):
 
     @tasks.loop(hours=1)
     async def license_reminder_task(self):
+        """Checks if it's been 6 days since renewal to ping the user."""
         global_config = self.bot.db.get_collection("global_music_settings")
+        # Handle the list vs dict structure safely
         if isinstance(global_config, list): 
              if global_config: global_config = global_config[0]
              else: return
 
+        # Check if reminder is needed
         if not global_config.get('reminder_timestamp') or global_config.get('reminder_sent'):
             return
 
         remind_ts = global_config['reminder_timestamp']
+        
+        # If current time is past the reminder timestamp
         if datetime.datetime.now().timestamp() >= remind_ts:
             user_id = global_config.get('reminder_user_id')
             if user_id:
@@ -236,129 +257,46 @@ class Music(commands.Cog):
                     await user.send(
                         "⚠️ **YouTube License Reminder!**\n"
                         "It has been 6 days since you renewed the YouTube license. "
-                        "Please run `/ytauth` and `/ytcode` soon."
+                        "It expires in roughly 24 hours.\n\n"
+                        "Please run `/ytauth` and then `/ytcode` again soon to keep the music playing!"
                     )
                 except Exception as e:
-                    print(f"Failed to DM user: {e}")
+                    print(f"Failed to DM user for license reminder: {e}")
             
+            # Mark as sent so we don't spam
             global_config['reminder_sent'] = True
+            
+            # We must wrap it back in a list if the DB expects it (based on other methods)
+            # But the save method typically handles the structure passed to it.
+            # safe save:
             self.bot.db.save_collection("global_music_settings", global_config)
 
     @license_reminder_task.before_loop
     async def before_reminder(self):
         await self.bot.wait_until_ready()
 
-    @tasks.loop(hours=1)
-    async def sync_server_playlist(self):
-        if not self.server_playlist_url:
-            return
-        await self.download_content(self.server_playlist_url, play_mode=False)
-
-    @sync_server_playlist.before_loop
-    async def before_sync(self):
-        await self.bot.wait_until_ready()
-
-    @tasks.loop(seconds=30)
-    async def manage_cache(self):
-        pass
-
-    # --- HELPERS (YT-DLP) ---
-
-    async def download_content(self, query, play_mode=True):
-        if yt_dlp is None:
-            return None
-
-        archive_path = os.path.join(self.download_dir, 'archive.txt')
-        cookies_path = os.path.abspath(os.path.join(os.getcwd(), "..", "cookies.txt"))
-        
-        cookie_args = {}
-        if os.path.exists(cookies_path):
-            cookie_args['cookiefile'] = cookies_path
-        elif os.path.exists("cookies.txt"):
-            cookie_args['cookiefile'] = "cookies.txt"
-
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': os.path.join(self.download_dir, '%(title)s - %(uploader)s.%(ext)s'),
-            'postprocessors': [
-                {'key': 'FFmpegExtractAudio', 'preferredcodec': 'opus', 'preferredquality': '0'},
-                {'key': 'EmbedThumbnail'},
-                {'key': 'FFmpegMetadata', 'add_metadata': True},
-            ],
-            'writethumbnail': True,
-            'download_archive': archive_path,
-            'ignoreerrors': False,
-            'noplaylist': False,
-            'nocheckcertificate': True,
-            'source_address': '0.0.0.0',
-            'retries': 5,
-            **cookie_args
-        }
-
-        if not re.match(r'https?://', query):
-            search_query = f"ytsearch:{query}"
-        else:
-            search_query = query
-
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await asyncio.to_thread(ydl.extract_info, search_query, download=True)
-
-            if not info:
-                return None
-
-            results = []
-
-            def process_entry(entry):
-                title = entry.get('title', 'Unknown Title')
-                uploader = entry.get('uploader', 'Unknown Uploader')
-                vid_id = entry.get('id')
-                try:
-                    pre_filename = ydl.prepare_filename(entry)
-                    base_name = os.path.splitext(pre_filename)[0]
-                    final_filename = f"{base_name}.opus"
-                except Exception:
-                    final_filename = entry.get('filepath')
-
-                return {
-                    'title': title,
-                    'id': vid_id,
-                    'url': final_filename, 
-                    'uploader': uploader
-                }
-
-            if 'entries' in info:
-                entries = [e for e in info['entries'] if e]
-                if search_query.startswith("ytsearch:"):
-                    results.append(process_entry(entries[0]))
-                else:
-                    for entry in entries:
-                        results.append(process_entry(entry))
-            else:
-                results.append(process_entry(info))
-
-            return results
-
-        except Exception as e:
-            print(f"Error downloading with yt-dlp: {e}")
-            return None
-
-    # --- SLASH COMMANDS ---
+    # --- SLASH COMMANDS (Top Level) ---
 
     @app_commands.command(name="checkmusic", description="Checks all music API statuses.")
     @app_commands.default_permissions(administrator=True)
     async def checkmusic(self, interaction: discord.Interaction):
+        """Checks all music API statuses."""
         is_valid = await self.load_youtube_service()
+        
         yt_msg = f"✅ **YouTube License Valid!**" if is_valid else "❌ **YouTube License Broken.**"
         spot_msg = "✅ **Spotify Ready!**" if self.spotify else "❌ **Spotify Not Loaded.**"
+        
         await interaction.response.send_message(f"{yt_msg}\n{spot_msg}", ephemeral=True)
 
     @app_commands.command(name="ytauth", description="Starts the OAuth flow to renew YouTube license.")
     @app_commands.default_permissions(administrator=True)
     async def ytauth(self, interaction: discord.Interaction):
+        """Starts the OAuth flow to renew YouTube license."""
+        # 1. Reload Spotify
         self.load_music_services()
         spot_status = "✅ **Spotify reloaded!**" if self.spotify else "❌ **Spotify NOT found!**"
 
+        # 2. Start YouTube Flow
         if not os.path.exists('client_secret.json'):
              return await interaction.response.send_message(f"{spot_status}\n❌ Missing `client_secret.json`!", ephemeral=True)
         
@@ -370,9 +308,14 @@ class Music(commands.Cog):
             )
             auth_url, _ = self.auth_flow.authorization_url(prompt='consent')
             
-            cmd_mention = "` /ytcode <code> `" 
+            # Helper to find command ID for clickable link
+            cmd_mention = "` /ytcode <code> `" # Fallback
+            
+            # Try to find the command in the tree or cache
+            # Note: IDs are only available after sync.
             ytcode_cmd = discord.utils.get(self.bot.tree.get_commands(), name="ytcode")
             if ytcode_cmd:
+                # We try to use the cache from main.py if it exists
                 if hasattr(self.bot, 'cmd_cache') and interaction.guild_id in self.bot.cmd_cache:
                     cmd_id = self.bot.cmd_cache[interaction.guild_id].get("ytcode")
                     if cmd_id:
@@ -388,19 +331,24 @@ class Music(commands.Cog):
     @app_commands.describe(code="The code from the Auth Link")
     @app_commands.default_permissions(administrator=True)
     async def ytcode(self, interaction: discord.Interaction, code: str):
+        """Completes the YouTube renewal with the code."""
         if not self.auth_flow:
             return await interaction.response.send_message("❌ Run `/ytauth` first!", ephemeral=True)
         
         try:
             self.auth_flow.fetch_token(code=code)
             
+            # Save Global Token
             global_config = self.bot.db.get_collection("global_music_settings")
+            # Ensure we get the dict object correctly
             if isinstance(global_config, list):
                  if global_config: global_config = global_config[0]
                  else: global_config = {}
             
             global_config['youtube_token_json'] = self.auth_flow.credentials.to_json()
             
+            # NEW: Set reminder for 6 days from now
+            # 6 days * 24 hours * 60 mins * 60 secs
             reminder_time = datetime.datetime.now().timestamp() + (6 * 24 * 60 * 60)
             global_config['reminder_timestamp'] = reminder_time
             global_config['reminder_user_id'] = interaction.user.id
@@ -409,15 +357,16 @@ class Music(commands.Cog):
             self.bot.db.save_collection("global_music_settings", global_config)
             
             await self.load_youtube_service()
-            await interaction.response.send_message("✅ **Success!** License renewed and saved.", ephemeral=True)
+            await interaction.response.send_message("✅ **Success!** License renewed and saved. I will ping you in 6 days to renew it again!", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
-    @app_commands.command(name="serverplaylist", description="Set the YouTube Playlist Link or ID.")
+    @app_commands.command(name="playlist", description="Set the YouTube Playlist Link or ID.")
     @app_commands.describe(playlist="The YouTube Playlist Link or ID")
     @app_commands.default_permissions(administrator=True)
-    async def serverplaylist(self, interaction: discord.Interaction, playlist: str):
+    async def playlist(self, interaction: discord.Interaction, playlist: str):
         """Set the YouTube Playlist Link or ID."""
+        # Extract ID if a full link is provided
         match = re.search(r'list=([a-zA-Z0-9_-]+)', playlist)
         
         if match:
@@ -428,291 +377,140 @@ class Music(commands.Cog):
         config = self.load_config(interaction.guild_id)
         config['playlist_id'] = clean_id
         self.save_config(interaction.guild_id, config)
-        
-        # Also update the sync URL so the bot downloads it
-        self.server_playlist_url = playlist
-        await interaction.response.send_message(f"✅ Server Playlist ID set to: `{clean_id}`\nℹ️ Syncing content...", ephemeral=True)
-        # Trigger sync
-        if self.sync_server_playlist.is_running():
-            self.sync_server_playlist.restart()
-        else:
-            self.sync_server_playlist.start()
+        await interaction.response.send_message(f"✅ Playlist set to ID: `{clean_id}`", ephemeral=True)
 
     @app_commands.command(name="musicchannel", description="Set the music sharing channel.")
     @app_commands.describe(channel="The channel for music links")
     @app_commands.default_permissions(administrator=True)
     async def musicchannel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        """Set the music sharing channel."""
         config = self.load_config(interaction.guild_id)
         config['music_channel_id'] = channel.id
         self.save_config(interaction.guild_id, config)
         await interaction.response.send_message(f"✅ music channel set to {channel.mention}.", ephemeral=True)
 
-    @app_commands.command(name="playlist", description="List cached songs (Downloaded)")
-    async def playlist(self, interaction: discord.Interaction):
-        """Lists all songs in the music_cache directory."""
-        if not os.path.exists(self.download_dir):
-            await interaction.response.send_message("No music cache found.", ephemeral=True)
-            return
-
-        try:
-            files = []
-            for f in os.listdir(self.download_dir):
-                if f.endswith('.opus') or f.endswith('.webm') or f.endswith('.mp3') or f.endswith('.m4a'):
-                    full_path = os.path.join(self.download_dir, f)
-                    files.append((f, os.path.getmtime(full_path)))
-            
-            files.sort(key=lambda x: x[1], reverse=True)
-            
-            if not files:
-                await interaction.response.send_message("The playlist is empty.", ephemeral=True)
-                return
-
-            output = "**Cached Songs:**\n"
-            for i, (filename, _) in enumerate(files):
-                name_without_ext = os.path.splitext(filename)[0]
-                line = f"{i+1}. {name_without_ext}\n"
-                if len(output) + len(line) > 1900:
-                    output += "... (truncated)"
-                    break
-                output += line
-            
-            await interaction.response.send_message(output)
-        except Exception as e:
-            await interaction.response.send_message(f"Error listing playlist: {e}", ephemeral=True)
-
-    @app_commands.command(name="remove", description="Remove a song from the playlist and local cache.")
-    @app_commands.describe(query="Playlist Index number (from /playlist) OR YouTube URL/ID")
+    @app_commands.command(name="removesong", description="Remove a song from the playlist by URL or ID.")
+    @app_commands.describe(query="The YouTube URL or Video ID to remove")
     @app_commands.default_permissions(administrator=True)
-    async def remove(self, interaction: discord.Interaction, query: str):
-        """Removes a song from the local cache AND the server playlist."""
+    async def removesong(self, interaction: discord.Interaction, query: str):
+        """Remove a song from the playlist by URL or ID."""
         await interaction.response.defer(ephemeral=True)
-        log = []
         
-        # 1. IDENTIFY TARGETS (Local File & API Video ID)
-        target_filename = None
-        target_video_id = None
-        target_title = None
+        if not self.youtube:
+            return await interaction.followup.send("❌ YouTube API not loaded.")
 
-        # Check if input is a Number (Index)
-        if query.isdigit():
-            index = int(query)
-            if os.path.exists(self.download_dir):
-                files = []
-                for f in os.listdir(self.download_dir):
-                    if f.endswith('.opus') or f.endswith('.webm') or f.endswith('.mp3') or f.endswith('.m4a'):
-                        full_path = os.path.join(self.download_dir, f)
-                        files.append((f, os.path.getmtime(full_path)))
-                files.sort(key=lambda x: x[1], reverse=True)
-                
-                if 1 <= index <= len(files):
-                    target_filename = files[index-1][0]
-                    log.append(f"ℹ️ Found local file at index {index}: `{target_filename}`")
-                    # Try to guess title from filename for API search
-                    # Filename format: Title - Uploader.opus
-                    name_part = os.path.splitext(target_filename)[0]
-                    # This is a loose guess, but useful for searching the playlist
-                    target_title = name_part.split(' - ')[0] if ' - ' in name_part else name_part
-                else:
-                    return await interaction.followup.send(f"❌ Invalid index {index}. Check `/playlist`.")
+        config = self.load_config(interaction.guild_id)
+        playlist_id = config.get('playlist_id')
         
-        # Check if input is URL/ID (or if we didn't use index)
-        if not target_filename:
-            # Check for YouTube URL/ID regex
-            yt_match = re.search(r'(?:v=|\/)([a-zA-Z0-9_-]{11})', query)
-            if yt_match:
-                target_video_id = yt_match.group(1)
-            elif len(query) == 11:
-                target_video_id = query
-            
-            if target_video_id:
-                log.append(f"ℹ️ Parsed Video ID: `{target_video_id}`")
+        if not playlist_id:
+            return await interaction.followup.send("❌ No playlist configured.")
 
-        # 2. PERFORM DELETION - LOCAL
-        if target_filename:
-            try:
-                os.remove(os.path.join(self.download_dir, target_filename))
-                log.append(f"✅ Deleted local file: `{target_filename}`")
-            except Exception as e:
-                log.append(f"❌ Failed to delete local file: {e}")
-        elif target_video_id:
-            # Try to find a local file that matches the ID? 
-            # We don't have ID in filenames easily, so we might skip or do a fuzzy search if we fetch API title first.
-            pass 
-
-        # 3. PERFORM DELETION - API (Server Playlist)
-        if self.youtube:
-            config = self.load_config(interaction.guild_id)
-            playlist_id = config.get('playlist_id')
-            
-            if playlist_id:
-                loop = asyncio.get_running_loop()
-                try:
-                    # We need to find the Playlist Item ID. 
-                    # If we have target_video_id, scan for that.
-                    # If we have target_title (from filename), scan for that.
-                    
-                    request = self.youtube.playlistItems().list(
-                        part="id,snippet",
-                        playlistId=playlist_id,
-                        maxResults=50
-                    )
-                    
-                    found_item_id = None
-                    deleted_title = "?"
-                    
-                    while request and not found_item_id:
-                        response = await loop.run_in_executor(None, request.execute)
-                        
-                        for item in response.get('items', []):
-                            snippet = item['snippet']
-                            # Match by ID
-                            if target_video_id and snippet['resourceId']['videoId'] == target_video_id:
-                                found_item_id = item['id']
-                                deleted_title = snippet['title']
-                                break
-                            # Match by Title (Fuzzy/Exact)
-                            if target_title and (target_title in snippet['title'] or snippet['title'] in target_title):
-                                found_item_id = item['id']
-                                deleted_title = snippet['title']
-                                # If we found it via title, we can also now try to delete local file if we hadn't already
-                                if not target_filename: 
-                                    # Logic to find file by title would go here, but omitting for complexity
-                                    pass
-                                break
-                        
-                        if found_item_id: break
-                        request = self.youtube.playlistItems().list_next(request, response)
-                    
-                    if found_item_id:
-                        del_req = self.youtube.playlistItems().delete(id=found_item_id)
-                        await loop.run_in_executor(None, del_req.execute)
-                        log.append(f"✅ Removed **{deleted_title}** from Server Playlist (API).")
-                    else:
-                        log.append("⚠️ Could not find song in Server Playlist (API).")
-                
-                except Exception as e:
-                    log.append(f"❌ API Error: {e}")
-            else:
-                log.append("ℹ️ No Server Playlist configured (API skipped).")
+        # Extract Video ID
+        video_id = None
+        # Regex for standard/short/music youtube links to grab ID
+        yt_match = re.search(r'(?:v=|\/)([a-zA-Z0-9_-]{11})', query)
+        if yt_match:
+            video_id = yt_match.group(1)
         else:
-            log.append("ℹ️ YouTube API not loaded (API skipped).")
-
-        # Conclusion
-        if not log:
-            log.append("❌ Could not identify song by Index or URL.")
+            # Maybe it is just the ID? (11 chars)
+            if len(query) == 11:
+                video_id = query
         
-        await interaction.followup.send("\n".join(log))
+        if not video_id:
+             return await interaction.followup.send("❌ Could not parse Video ID from query.")
 
-    @app_commands.command(name="play", description="Download and play a song/playlist (Uses yt-dlp)")
-    @app_commands.describe(query="The song to search for or URL")
-    async def play(self, interaction: discord.Interaction, query: str):
-        if yt_dlp is None:
-            await interaction.response.send_message("Missing 'yt-dlp'. Cannot play.", ephemeral=True)
-            return
+        loop = asyncio.get_running_loop()
 
-        await interaction.response.defer()
-        
-        results = await self.download_content(query, play_mode=True)
-        
-        if not results:
-            await interaction.followup.send("Failed to find or download content.")
-            return
-
-        if not interaction.guild.voice_client:
-            if interaction.user.voice:
-                await interaction.user.voice.channel.connect()
-            else:
-                await interaction.followup.send("You are not in a voice channel.")
-                return
-
-        count = len(results)
-        first_song = results[0]
-        
-        if count > 1:
-            await interaction.followup.send(f"Queued {count} songs (Cached locally).")
-        else:
-            await interaction.followup.send(f"Queued **{first_song['title']}** (Cached locally).")
-
-        player_cog = self.bot.get_cog("Player")
-        if player_cog:
-            for track in results:
-                if hasattr(player_cog, 'add_to_queue'):
-                    await player_cog.add_to_queue(interaction.guild.id, track['url'], interaction)
-                else:
-                    print("Error: Player cog missing add_to_queue method")
-        else:
-             print("Player cog not loaded.")
-
-    @app_commands.command(name="test_play", description="Debug: Try to play a song and report detailed errors")
-    @app_commands.describe(query="The song to test")
-    async def test_play(self, interaction: discord.Interaction, query: str = "never gonna give you up"):
-        await interaction.response.defer()
-        log = ["**Diagnostic Playback Test**"]
-        
+        # Search Playlist for this Video ID
         try:
-            if yt_dlp is None:
-                log.append("❌ `yt_dlp` library not found.")
-                await interaction.followup.send("\n".join(log))
-                return
-            log.append("✅ `yt_dlp` library present.")
-            log.append(f"ℹ️ Download dir: `{self.download_dir}` (Exists: {os.path.exists(self.download_dir)})")
+            request = self.youtube.playlistItems().list(
+                part="id,snippet",
+                playlistId=playlist_id,
+                maxResults=50
+            )
             
-            if not interaction.user.voice:
-                log.append("❌ You are not in a voice channel.")
-                await interaction.followup.send("\n".join(log))
-                return
+            target_item_id = None
+            video_title = "?"
             
-            permissions = interaction.user.voice.channel.permissions_for(interaction.guild.me)
-            if not permissions.connect or not permissions.speak:
-                log.append(f"❌ Missing permissions (Connect: {permissions.connect}, Speak: {permissions.speak})")
-                await interaction.followup.send("\n".join(log))
-                return
-
-            vc = interaction.guild.voice_client
-            if not vc:
-                try:
-                    vc = await interaction.user.voice.channel.connect()
-                    log.append("✅ Connected to voice channel.")
-                except Exception as e:
-                    log.append(f"❌ Failed to connect: {e}")
-                    await interaction.followup.send("\n".join(log))
-                    return
-            else:
-                log.append("✅ Already connected to voice.")
-
-            log.append(f"ℹ️ Attempting download for: `{query}`")
-            results = await self.download_content(query, play_mode=True)
+            # Simple pagination handling
+            while request:
+                response = await loop.run_in_executor(None, request.execute)
+                
+                for item in response.get('items', []):
+                    # Check if this item's video ID matches our target
+                    if item['snippet']['resourceId']['videoId'] == video_id:
+                        target_item_id = item['id']
+                        video_title = item['snippet']['title']
+                        break
+                
+                if target_item_id:
+                    break
+                    
+                request = self.youtube.playlistItems().list_next(request, response)
             
-            if not results:
-                log.append("❌ `download_content` returned None.")
-                await interaction.followup.send("\n".join(log))
-                return
+            if not target_item_id:
+                return await interaction.followup.send(f"❌ Video ID `{video_id}` not found in the playlist.")
             
-            log.append(f"✅ Download successful. Got {len(results)} results.")
-            first = results[0]
-            log.append(f"ℹ️ File: `{first['url']}`")
-            if os.path.exists(first['url']):
-                log.append("✅ File exists on disk.")
-            else:
-                log.append(f"❌ File missing from disk at: `{first['url']}`")
-
-            player_cog = self.bot.get_cog("Player")
-            if player_cog:
-                log.append("✅ Player cog loaded.")
-                if hasattr(player_cog, 'add_to_queue'):
-                    log.append("ℹ️ Calling `add_to_queue`...")
-                    try:
-                        await player_cog.add_to_queue(interaction.guild.id, first['url'], interaction)
-                        log.append("✅ `add_to_queue` executed.")
-                    except Exception as e:
-                        log.append(f"❌ Error in `add_to_queue`: {e}")
-                else:
-                    log.append("❌ Player cog missing `add_to_queue`.")
-            else:
-                log.append("❌ Player cog not loaded.")
-
-            await interaction.followup.send("\n".join(log))
+            # Delete it
+            del_req = self.youtube.playlistItems().delete(id=target_item_id)
+            await loop.run_in_executor(None, del_req.execute)
+            
+            await interaction.followup.send(f"✅ Removed **{video_title}** from the playlist.")
 
         except Exception as e:
-            log.append(f"❌ **Unexpected Error:** {e}")
-            log.append(f"
+            await interaction.followup.send(f"❌ Error removing song: {e}")
+
+    # --- LISTENER ---
+
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        if message.author.bot or not message.guild: return
+        
+        config = self.load_config(message.guild.id)
+        
+        # Check if in music channel
+        # If music_channel_id is 0, we allow all channels.
+        if config['music_channel_id'] != 0 and message.channel.id != config['music_channel_id']:
+            return
+            
+        content = message.content
+
+        # Regex Definitions
+        spotify_match = re.search(r'(https?://(?:open\.|www\.)?spotify\.com/(?:track|album|playlist|artist)/[a-zA-Z0-9_-]+)', content)
+        yt_music_match = re.search(r'https?://music\.youtube\.com/watch\?v=([a-zA-Z0-9_-]+)', content)
+        yt_standard_match = re.search(r'https?://(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]+)', content)
+        yt_short_match = re.search(r'https?://youtu\.be/([a-zA-Z0-9_-]+)', content)
+
+        # 1. Handle Spotify
+        if spotify_match:
+            result = await self.process_spotify_link(spotify_match.group(1), message.guild.id)
+            if result is True:
+                await message.add_reaction("🎵")
+            else:
+                await message.channel.send(f"⚠️ **Error:** Spotify link failed.\n`{result}`", delete_after=10)
+
+        # 2. Handle YouTube (Music, Standard, Short)
+        elif self.youtube and (yt_music_match or yt_standard_match or yt_short_match):
+            # Extract Video ID based on which one matched
+            v_id = None
+            if yt_music_match: v_id = yt_music_match.group(1)
+            elif yt_standard_match: v_id = yt_standard_match.group(1)
+            elif yt_short_match: v_id = yt_short_match.group(1)
+
+            if v_id:
+                try:
+                    self.youtube.playlistItems().insert(
+                        part="snippet",
+                        body={
+                            "snippet": {
+                                "playlistId": config['playlist_id'],
+                                "resourceId": {"kind": "youtube#video", "videoId": v_id}
+                            }
+                        }
+                    ).execute()
+                    await message.add_reaction("🎵")
+                except Exception as e:
+                    await message.channel.send(f"⚠️ **Error:** YouTube link failed.\n`{e}`", delete_after=10)
+
+async def setup(bot):
+    await bot.add_cog(Music(bot))
