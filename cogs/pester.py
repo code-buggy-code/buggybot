@@ -28,7 +28,7 @@ from typing import Literal
 # - pptime(interaction, timing, number, unit) [Slash Command]
 # setup(bot)
 
-PETAL_ID = 1433003746719170560
+PETAL_ID = 696554565528715285
 
 class PesterButton(discord.ui.Button):
     def __init__(self, label, custom_id, ping_text):
