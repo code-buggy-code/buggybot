@@ -155,7 +155,7 @@ class Purge(commands.Cog):
     @app_commands.default_permissions(manage_messages=True)
     async def purge(self, interaction: discord.Interaction, 
                     scope: Literal["Channel", "Category", "Server"],
-                    since: Literal["Past Hour", "Today", "Until Message"],
+                    since: Literal["Past Hour", "Today", "Until Message", "All"],
                     user: Optional[discord.User] = None,
                     keep_media: bool = False,
                     keep_links: bool = False,
@@ -186,6 +186,9 @@ class Purge(commands.Cog):
                 after_date = ref_msg.created_at - datetime.timedelta(microseconds=1)
             except:
                 return await interaction.followup.send("❌ Could not find that message in this channel to calculate time.", ephemeral=True)
+                
+        elif since == "All":
+            after_date = None
 
         # 2. Determine Target Channels
         target_channels = []
