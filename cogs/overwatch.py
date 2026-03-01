@@ -23,8 +23,7 @@ class Overwatch(commands.Cog):
         self.bot = bot
         self.data_file = "overwatch_data.json"
         self.config_file = "overwatch_config.json"
-        # FIX: The Oracle machine needs your router's PUBLIC IP, not the 192.168 local IP.
-        # Replace YOUR_PUBLIC_IP with the actual IP you get when you Google "what is my ip" on the iMac.
+        # Updated to your specific Public IP
         self.api_base = "http://68.100.203.50:8080/overfast/players"
         self.load_data()
 
@@ -167,10 +166,12 @@ class Overwatch(commands.Cog):
                     except discord.Forbidden:
                         role_msg = "\n*(Note: Could not assign the linked role due to missing permissions.)*"
 
-            # Check Privacy Status
+            # Check Privacy Status robustly (ignoring case)
             is_private = False
-            if profile_data and profile_data.get("privacy") != "public":
-                is_private = True
+            if profile_data:
+                privacy_val = str(profile_data.get("privacy", "private")).lower()
+                if privacy_val != "public":
+                    is_private = True
 
             # If it's private, tell them it linked successfully but give them the instructions to make it public
             if is_private:
@@ -237,7 +238,7 @@ class Overwatch(commands.Cog):
         elif error:
             await interaction.followup.send(f"❌ **API Error:**\n{error}")
             return
-        elif profile_data.get("privacy") != "public":
+        elif str(profile_data.get("privacy", "private")).lower() != "public":
             await interaction.followup.send("⚠️ This profile is currently set to private. Please make it public in-game.")
             return
 
