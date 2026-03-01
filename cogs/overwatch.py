@@ -43,8 +43,10 @@ class Overwatch(commands.Cog):
         formatted_tag = battletag.replace("#", "-")
         url = f"{self.api_base}/{formatted_tag}/summary"
         
+        # Adding standard Accept headers to look more legitimate
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json"
         }
         
         try:
@@ -53,7 +55,14 @@ class Overwatch(commands.Cog):
                     if response.status == 200:
                         return await response.json(), None
                     elif response.status == 404:
-                        return None, "not_found" # Normal "profile doesn't exist" response
+                        error_text = await response.text()
+                        try:
+                            # The real OverFast API returns a JSON dict for 404s (e.g., {"error": "Player not found"})
+                            json.loads(error_text)
+                            return None, "not_found" # Normal "profile doesn't exist" response
+                        except json.JSONDecodeError:
+                            # If it's HTML, Cloudflare or Nginx is stealth-blocking the Oracle Datacenter IP
+                            return None, f"Firewall Block (Fake 404 HTML):\n`{error_text[:200]}`"
                     else:
                         error_text = await response.text()
                         error_msg = f"HTTP Error {response.status}\nDetails: `{error_text[:200]}`"
@@ -117,10 +126,9 @@ class Overwatch(commands.Cog):
             
             # If the API explicitly blocks us, or fails to connect
             if error and error != "not_found":
-                await interaction.followup.send(f"❌ **API Error while fetching {link}:**\n{error}", ephemeral=True)
+                await interaction.followup.send(f"❌ **API Connection Error while fetching {link}:**\n{error}", ephemeral=True)
                 return
 
-            # FIX: OverFast API uses "privacy": "public", not "is_public"
             is_private = False
             if profile_data and profile_data.get("privacy") != "public":
                 is_private = True
