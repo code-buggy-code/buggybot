@@ -1,3 +1,14 @@
+# Function List:
+# 1. __init__
+# 2. load_data
+# 3. save_data
+# 4. save_config
+# 5. fetch_profile
+# 6. overwatch (Command)
+# 7. overrole (Command)
+# 8. on_member_remove (Listener)
+# 9. setup
+
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -12,7 +23,9 @@ class Overwatch(commands.Cog):
         self.bot = bot
         self.data_file = "overwatch_data.json"
         self.config_file = "overwatch_config.json"
-        self.api_base = "http://192.168.0.161:8080/overfast/players"
+        # FIX: The Oracle machine needs your router's PUBLIC IP, not the 192.168 local IP.
+        # Replace YOUR_PUBLIC_IP with the actual IP you get when you Google "what is my ip" on the iMac.
+        self.api_base = "http://68.100.203.50:8080/overfast/players"
         self.load_data()
 
     def load_data(self):
@@ -170,7 +183,8 @@ class Overwatch(commands.Cog):
                     f"3. Click the Social tab\n"
                     f"4. Find Career Profile Visibility\n"
                     f"5. Switch it to Public\n\n"
-                    f"*If you've already set your profile to public but it still isn't showing, this is a caching issue. Log into https://overwatch.blizzard.com/en-us/ and search for your own profile — this forces a cache refresh and should make your stats visible shortly after (wait about 10 minutes).*")
+                    f"*If you've already set your profile to public but it still isn't showing, this is a caching issue. Log into https://overwatch.blizzard.com/en-us/ and search for your own profile — this forces a cache refresh and should make your stats visible shortly after (wait about 10 minutes).*"
+                )
                 await interaction.followup.send(private_msg, ephemeral=True)
                 return
             else:
