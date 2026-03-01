@@ -5,6 +5,7 @@ import aiohttp
 import json
 import os
 import asyncio
+import socket  # Added to force IPv4
 
 class Overwatch(commands.Cog):
     def __init__(self, bot):
@@ -43,25 +44,28 @@ class Overwatch(commands.Cog):
         formatted_tag = battletag.replace("#", "-")
         url = f"{self.api_base}/{formatted_tag}/summary"
         
-        # Adding standard Accept headers to look more legitimate
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json"
         }
         
         try:
-            async with aiohttp.ClientSession(headers=headers) as session:
+            # FORCE IPv4: Oracle Cloud IPv6 addresses are frequently shadow-banned by Cloudflare/APIs
+            connector = aiohttp.TCPConnector(family=socket.AF_INET)
+            
+            async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
                 async with session.get(url, timeout=10) as response:
                     if response.status == 200:
                         return await response.json(), None
                     elif response.status == 404:
                         error_text = await response.text()
                         try:
-                            # The real OverFast API returns a JSON dict for 404s (e.g., {"error": "Player not found"})
-                            json.loads(error_text)
-                            return None, "not_found" # Normal "profile doesn't exist" response
+                            # The real OverFast API returns a JSON dict for 404s
+                            error_json = json.loads(error_text)
+                            api_msg = error_json.get("error", "Unknown API Error")
+                            return None, f"not_found_json:{api_msg}" 
                         except json.JSONDecodeError:
-                            # If it's HTML, Cloudflare or Nginx is stealth-blocking the Oracle Datacenter IP
+                            # If it's HTML, Cloudflare or Nginx is stealth-blocking the Datacenter IP
                             return None, f"Firewall Block (Fake 404 HTML):\n`{error_text[:200]}`"
                     else:
                         error_text = await response.text()
@@ -125,32 +129,21 @@ class Overwatch(commands.Cog):
             profile_data, error = await self.fetch_profile(link)
             
             # If the API explicitly blocks us, or fails to connect
-            if error and error != "not_found":
+            if error and not error.startswith("not_found_json:"):
                 await interaction.followup.send(f"❌ **API Connection Error while fetching {link}:**\n{error}", ephemeral=True)
                 return
 
-            is_private = False
-            if profile_data and profile_data.get("privacy") != "public":
-                is_private = True
-
-            # If the profile doesn't exist (404) OR is set to private
-            if error == "not_found" or is_private:
-                error_msg = (
-                    f"**Profile Not Found / Private**\n"
-                    f"Linked `{link}`. Cannot find profile, or career profile is private — please follow these steps to make it public:\n\n"
-                    f"1. Launch Overwatch and press Esc\n"
-                    f"2. Click Options\n"
-                    f"3. Click the Social tab\n"
-                    f"4. Find Career Profile Visibility\n"
-                    f"5. Switch it to Public\n\n"
-                    f"*If you've already set your profile to public but it still isn't showing, this is a caching issue. Log into https://overwatch.blizzard.com/en-us/ and search for your own profile — this forces a cache refresh and should make your stats visible shortly after (wait about 10 minutes).*")
-                await interaction.followup.send(error_msg, ephemeral=True)
+            # If the profile doesn't exist (404 JSON)
+            if error and error.startswith("not_found_json:"):
+                api_msg = error.split(":", 1)[1]
+                await interaction.followup.send(f"❌ **Profile Not Found**\nAPI Message: `{api_msg}`\nCould not find `{link}`. Please check your spelling and capitalization.", ephemeral=True)
                 return
-            
-            # Success
+
+            # Success (Link them in the database)
             self.users[user_id] = link
             self.save_data()
             
+            # Hand out the Role
             role_msg = ""
             role_id = self.config.get("linked_role_id")
             if role_id:
@@ -161,8 +154,28 @@ class Overwatch(commands.Cog):
                     except discord.Forbidden:
                         role_msg = "\n*(Note: Could not assign the linked role due to missing permissions.)*"
 
-            await interaction.followup.send(f"✅ Successfully linked your profile to **{link}**!{role_msg}", ephemeral=True)
-            return
+            # Check Privacy Status
+            is_private = False
+            if profile_data and profile_data.get("privacy") != "public":
+                is_private = True
+
+            # If it's private, tell them it linked successfully but give them the instructions to make it public
+            if is_private:
+                private_msg = (
+                    f"✅ Successfully linked your profile to **{link}**!{role_msg}\n\n"
+                    f"🔒 **HOWEVER, YOUR PROFILE IS PRIVATE.**\n"
+                    f"We cannot show your stats until you follow these steps to make it public:\n"
+                    f"1. Launch Overwatch and press Esc\n"
+                    f"2. Click Options\n"
+                    f"3. Click the Social tab\n"
+                    f"4. Find Career Profile Visibility\n"
+                    f"5. Switch it to Public\n\n"
+                    f"*If you've already set your profile to public but it still isn't showing, this is a caching issue. Log into https://overwatch.blizzard.com/en-us/ and search for your own profile — this forces a cache refresh and should make your stats visible shortly after (wait about 10 minutes).*")
+                await interaction.followup.send(private_msg, ephemeral=True)
+                return
+            else:
+                await interaction.followup.send(f"✅ Successfully linked your profile to **{link}**!{role_msg}", ephemeral=True)
+                return
 
         # 3. HANDLE LIST
         if show_list:
@@ -204,7 +217,7 @@ class Overwatch(commands.Cog):
         battletag = self.users[target_id]
         profile_data, error = await self.fetch_profile(battletag)
 
-        if error == "not_found":
+        if error and error.startswith("not_found_json:"):
             await interaction.followup.send("⚠️ Profile not found. The profile may have been deleted or the BattleTag changed.")
             return
         elif error:
