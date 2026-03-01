@@ -106,6 +106,9 @@ class Overwatch(commands.Cog):
         if link:
             await interaction.response.defer(ephemeral=True)
             
+            # Remove any accidental spaces the user might type
+            link = link.replace(" ", "")
+            
             if "#" not in link:
                 await interaction.followup.send("⚠️ Invalid format. Please include your BattleTag identifier (e.g. `Player#1234`).", ephemeral=True)
                 return
@@ -117,8 +120,13 @@ class Overwatch(commands.Cog):
                 await interaction.followup.send(f"❌ **API Error while fetching {link}:**\n{error}", ephemeral=True)
                 return
 
+            # FIX: OverFast API uses "privacy": "public", not "is_public"
+            is_private = False
+            if profile_data and profile_data.get("privacy") != "public":
+                is_private = True
+
             # If the profile doesn't exist (404) OR is set to private
-            if error == "not_found" or (profile_data and not profile_data.get("is_public", False)):
+            if error == "not_found" or is_private:
                 error_msg = (
                     f"**Profile Not Found / Private**\n"
                     f"Linked `{link}`. Cannot find profile, or career profile is private — please follow these steps to make it public:\n\n"
@@ -194,7 +202,7 @@ class Overwatch(commands.Cog):
         elif error:
             await interaction.followup.send(f"❌ **API Error:**\n{error}")
             return
-        elif not profile_data.get("is_public", False):
+        elif profile_data.get("privacy") != "public":
             await interaction.followup.send("⚠️ This profile is currently set to private. Please make it public in-game.")
             return
 
