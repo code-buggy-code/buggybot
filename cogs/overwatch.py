@@ -39,15 +39,29 @@ class Overwatch(commands.Cog):
             json.dump(self.config, f, indent=4)
 
     async def fetch_profile(self, battletag: str):
-        """Fetches the profile summary from the OverFast API."""
+        """Fetches the profile summary and returns (data, error_message)."""
         formatted_tag = battletag.replace("#", "-")
         url = f"{self.api_base}/{formatted_tag}/summary"
         
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                if response.status == 200:
-                    return await response.json()
-                return None
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        
+        try:
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.get(url, timeout=10) as response:
+                    if response.status == 200:
+                        return await response.json(), None
+                    elif response.status == 404:
+                        return None, "not_found" # Normal "profile doesn't exist" response
+                    else:
+                        error_text = await response.text()
+                        error_msg = f"HTTP Error {response.status}\nDetails: `{error_text[:200]}`"
+                        return None, error_msg
+        except asyncio.TimeoutError:
+            return None, "Request timed out. The server host (Oracle) might be blocked by the API's Cloudflare protection."
+        except Exception as e:
+            return None, f"An unexpected error occurred: `{e}`"
 
     @app_commands.command(name="overwatch", description="View Overwatch stats, or link/unlink your BattleTag.")
     @app_commands.rename(show_list="list")
@@ -92,19 +106,23 @@ class Overwatch(commands.Cog):
         if link:
             await interaction.response.defer(ephemeral=True)
             
-            # Format verification (Must contain #)
             if "#" not in link:
                 await interaction.followup.send("⚠️ Invalid format. Please include your BattleTag identifier (e.g. `Player#1234`).", ephemeral=True)
                 return
 
-            profile_data = await self.fetch_profile(link)
+            profile_data, error = await self.fetch_profile(link)
             
-            # Not found or private
-            if not profile_data or not profile_data.get("is_public", False):
+            # If the API explicitly blocks us, or fails to connect
+            if error and error != "not_found":
+                await interaction.followup.send(f"❌ **API Error while fetching {link}:**\n{error}", ephemeral=True)
+                return
+
+            # If the profile doesn't exist (404) OR is set to private
+            if error == "not_found" or (profile_data and not profile_data.get("is_public", False)):
                 error_msg = (
                     f"**Profile Not Found / Private**\n"
                     f"Linked `{link}`. Cannot find profile, or career profile is private — please follow these steps to make it public:\n\n"
-                    f"1. Launch Overwatch 2 and press Esc\n"
+                    f"1. Launch Overwatch and press Esc\n"
                     f"2. Click Options\n"
                     f"3. Click the Social tab\n"
                     f"4. Find Career Profile Visibility\n"
@@ -144,14 +162,12 @@ class Overwatch(commands.Cog):
                 display_name = member.display_name if member else f"Unknown User ({uid})"
                 entries.append((display_name, btag))
             
-            # Sort alphabetically by display name (case-insensitive)
             entries.sort(key=lambda x: x[0].lower())
             
             list_text = "**Registered Overwatch Players:**\n\n"
             for name, btag in entries:
                 list_text += f"**{name}**\n└ ID: `{btag}`\n"
             
-            # Send as embed to prevent wall of text looking ugly
             embed = discord.Embed(description=list_text, color=discord.Color.orange())
             await interaction.followup.send(embed=embed)
             return
@@ -170,10 +186,16 @@ class Overwatch(commands.Cog):
         await interaction.response.defer()
         
         battletag = self.users[target_id]
-        profile_data = await self.fetch_profile(battletag)
+        profile_data, error = await self.fetch_profile(battletag)
 
-        if not profile_data:
-            await interaction.followup.send("⚠️ An error occurred fetching the stats. The profile may have been made private or deleted.")
+        if error == "not_found":
+            await interaction.followup.send("⚠️ Profile not found. The profile may have been deleted or the BattleTag changed.")
+            return
+        elif error:
+            await interaction.followup.send(f"❌ **API Error:**\n{error}")
+            return
+        elif not profile_data.get("is_public", False):
+            await interaction.followup.send("⚠️ This profile is currently set to private. Please make it public in-game.")
             return
 
         # Build Stats Embed
@@ -186,15 +208,12 @@ class Overwatch(commands.Cog):
         if profile_data.get("avatar"):
             embed.set_thumbnail(url=profile_data["avatar"])
         
-        # General Info
         title = profile_data.get("title", "No Title")
         endorsement = profile_data.get("endorsement", {}).get("level", 1)
         embed.add_field(name="Profile Info", value=f"**Title:** {title}\n**Endorsement:** Level {endorsement}", inline=False)
 
-        # Competitive Stats (if available)
         comp_data = profile_data.get("competitive")
         if comp_data:
-            # Check PC or Console stats
             platform_stats = comp_data.get("pc") or comp_data.get("console")
             if platform_stats:
                 ranks = []
@@ -218,10 +237,8 @@ class Overwatch(commands.Cog):
     @app_commands.command(name="overrole", description="Assign a specific role to all users linked with the bot")
     @app_commands.default_permissions(manage_roles=True)
     async def overrole(self, interaction: discord.Interaction, role: discord.Role):
-        # Prevent timeout for potentially long operations
         await interaction.response.defer(ephemeral=True)
 
-        # Save the role to config so it is permanent and applies to new users
         self.config["linked_role_id"] = role.id
         self.save_config()
 
@@ -239,12 +256,11 @@ class Overwatch(commands.Cog):
                     try:
                         await member.add_roles(role)
                         assigned_count += 1
-                        # Tiny sleep to avoid Discord API rate-limits if giving roles to hundreds of people
                         await asyncio.sleep(0.5) 
                     except discord.Forbidden:
                         failed_count += 1
             else:
-                failed_count += 1 # Member not in server anymore
+                failed_count += 1
         
         msg = f"✅ Success! Linked role set to {role.mention} and assigned to **{assigned_count}** existing users."
         if failed_count > 0:
