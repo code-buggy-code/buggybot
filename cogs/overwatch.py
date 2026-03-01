@@ -12,7 +12,7 @@ class Overwatch(commands.Cog):
         self.bot = bot
         self.data_file = "overwatch_data.json"
         self.config_file = "overwatch_config.json"
-        self.api_base = "https://overfast-api.tekrop.fr/players"
+        self.api_base = "http://192.168.0.161:8080/overfast/players"
         self.load_data()
 
     def load_data(self):
