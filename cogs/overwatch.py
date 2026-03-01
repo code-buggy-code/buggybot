@@ -175,6 +175,7 @@ class Overwatch(commands.Cog):
 
             # If it's private, tell them it linked successfully but give them the instructions to make it public
             if is_private:
+                debug_dump = str(profile_data)[:400]
                 private_msg = (
                     f"✅ Successfully linked your profile to **{link}**!{role_msg}\n\n"
                     f"🔒 **HOWEVER, YOUR PROFILE IS PRIVATE.**\n"
@@ -184,7 +185,7 @@ class Overwatch(commands.Cog):
                     f"3. Click the Social tab\n"
                     f"4. Find Career Profile Visibility\n"
                     f"5. Switch it to Public\n\n"
-                    f"*If you've already set your profile to public but it still isn't showing, this is a caching issue. Log into https://overwatch.blizzard.com/en-us/ and search for your own profile — this forces a cache refresh and should make your stats visible shortly after (wait about 10 minutes).*"
+                    f"*DEBUG INFO: The bot received this data from the proxy: `{debug_dump}`*"
                 )
                 await interaction.followup.send(private_msg, ephemeral=True)
                 return
@@ -239,7 +240,8 @@ class Overwatch(commands.Cog):
             await interaction.followup.send(f"❌ **API Error:**\n{error}")
             return
         elif str(profile_data.get("privacy", "private")).lower() != "public":
-            await interaction.followup.send("⚠️ This profile is currently set to private. Please make it public in-game.")
+            debug_dump = str(profile_data)[:400]
+            await interaction.followup.send(f"⚠️ This profile is currently set to private. Please make it public in-game.\n\n*DEBUG INFO: `{debug_dump}`*")
             return
 
         # Build Stats Embed
