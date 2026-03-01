@@ -168,11 +168,11 @@ class Overwatch(commands.Cog):
                     except discord.Forbidden:
                         role_msg = "\n*(Note: Could not assign the linked role due to missing permissions.)*"
 
-            # Check Privacy Status robustly (ignoring case)
+            # Check Privacy Status robustly: If the API doesn't send the "privacy" key, assume it's public since we got the data!
             is_private = False
             if profile_data:
-                privacy_val = str(profile_data.get("privacy", "private")).lower()
-                if privacy_val != "public":
+                privacy_val = str(profile_data.get("privacy", "public")).lower()
+                if privacy_val == "private":
                     is_private = True
 
             # If it's private, tell them it linked successfully but give them the instructions to make it public
@@ -241,7 +241,7 @@ class Overwatch(commands.Cog):
         elif error:
             await interaction.followup.send(f"❌ **API Error:**\n{error}")
             return
-        elif str(profile_data.get("privacy", "private")).lower() != "public":
+        elif str(profile_data.get("privacy", "public")).lower() == "private":
             debug_dump = str(profile_data)[:400]
             await interaction.followup.send(f"⚠️ This profile is currently set to private. Please make it public in-game.\n\n*DEBUG INFO: `{debug_dump}`*")
             return
