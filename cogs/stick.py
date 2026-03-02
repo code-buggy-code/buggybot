@@ -27,12 +27,13 @@ class Stickies(commands.Cog):
         self.description = "Manage sticky messages."
         self.pending_tasks = {} # {channel_id: asyncio.Task}
         self.reposting = set()  # {channel_id} - Safety lock to prevent race conditions
+        self.in_memory_last_stickies = {} # {channel_id: message_id} - Prevents spam loop
 
     # --- HELPERS ---
 
     def get_stickies(self):
         """Returns active sticky messages."""
-        return self.bot.db.get_collection("sticky_messages")
+        return self.bot.db.get_collection("sticky_messages") or []
 
     def save_stickies(self, stickies):
         """Saves sticky messages."""
@@ -40,7 +41,7 @@ class Stickies(commands.Cog):
 
     def get_sticky_settings(self):
         """Returns server-specific sticky settings (timings)."""
-        return self.bot.db.get_collection("sticky_settings")
+        return self.bot.db.get_collection("sticky_settings") or []
 
     def save_sticky_settings(self, settings):
         """Saves sticky settings."""
@@ -49,25 +50,26 @@ class Stickies(commands.Cog):
     async def send_sticky(self, channel):
         """Actually sends the sticky message."""
         # Safety Lock: Prevent concurrent sends in the same channel
-        # This prevents the "triggers itself once" race condition where the bot sees its own new sticky
         if channel.id in self.reposting:
             return
 
         self.reposting.add(channel.id)
         try:
             stickies = self.get_stickies()
-            sticky_data = next((s for s in stickies if s['channel_id'] == channel.id), None)
+            sticky_data = next((s for s in stickies if int(s.get('channel_id', 0)) == channel.id), None)
             
             if not sticky_data: return
 
-            # Check if the last message is already the sticky to avoid double posting
-            if channel.last_message_id == sticky_data.get('last_message_id'):
+            # Check in-memory cache first to avoid DB latency issues causing double posting
+            if channel.last_message_id == self.in_memory_last_stickies.get(channel.id) or \
+               channel.last_message_id == sticky_data.get('last_message_id'):
                  return
 
             # Delete old sticky
-            if sticky_data.get('last_message_id'):
+            old_id = self.in_memory_last_stickies.get(channel.id) or sticky_data.get('last_message_id')
+            if old_id:
                 try:
-                    old_msg = await channel.fetch_message(sticky_data['last_message_id'])
+                    old_msg = await channel.fetch_message(old_id)
                     await old_msg.delete()
                 except (discord.NotFound, discord.HTTPException):
                     pass
@@ -76,6 +78,9 @@ class Stickies(commands.Cog):
             try:
                 embed = discord.Embed(description=sticky_data['content'], color=discord.Color(0xff90aa))
                 new_msg = await channel.send(embed=embed)
+                
+                # UPDATE IN-MEMORY CACHE IMMEDIATELY
+                self.in_memory_last_stickies[channel.id] = new_msg.id
                 
                 sticky_data['last_message_id'] = new_msg.id
                 sticky_data['last_posted_at'] = datetime.datetime.now().timestamp()
@@ -106,13 +111,13 @@ class Stickies(commands.Cog):
     async def handle_sticky(self, message):
         """Resends the sticky message to the bottom."""
         stickies = self.get_stickies()
-        sticky_data = next((s for s in stickies if s['channel_id'] == message.channel.id), None)
+        sticky_data = next((s for s in stickies if int(s.get('channel_id', 0)) == message.channel.id), None)
         
         if not sticky_data: return
 
         # Get Settings for delay
         settings = self.get_sticky_settings()
-        guild_setting = next((s for s in settings if s['guild_id'] == message.guild.id), None)
+        guild_setting = next((s for s in settings if int(s.get('guild_id', 0)) == message.guild.id), None)
         
         delay = 0
         mode = "after" # Default behavior
@@ -162,12 +167,16 @@ class Stickies(commands.Cog):
             return
 
         stickies = self.get_stickies()
-        sticky_data = next((s for s in stickies if s['channel_id'] == message.channel.id), None)
+        sticky_data = next((s for s in stickies if int(s.get('channel_id', 0)) == message.channel.id), None)
         
         if sticky_data:
             if not sticky_data.get('active', True): return
             
-            # Final safeguard: Make absolutely sure the message isn't the sticky message itself
+            # SPAM FIX: Check against our instant in-memory cache first!
+            if self.in_memory_last_stickies.get(message.channel.id) == message.id:
+                return
+            
+            # Final safeguard fallback to database check
             if sticky_data.get('last_message_id') == message.id: return
 
             await self.handle_sticky(message)
@@ -187,7 +196,7 @@ class Stickies(commands.Cog):
         
         if action == "List":
             stickies = self.get_stickies()
-            current_guild_stickies = [s for s in stickies if s.get('guild_id') == interaction.guild_id]
+            current_guild_stickies = [s for s in stickies if int(s.get('guild_id', 0)) == interaction.guild_id]
 
             if not current_guild_stickies:
                 return await interaction.response.send_message("📝 No sticky messages found for this server.", ephemeral=True)
@@ -197,7 +206,7 @@ class Stickies(commands.Cog):
 
             # Check for deleted channels and filter them out
             for s in current_guild_stickies:
-                channel = interaction.guild.get_channel(s['channel_id'])
+                channel = interaction.guild.get_channel(int(s.get('channel_id', 0)))
                 if channel:
                     valid_stickies.append(s)
                 else:
@@ -205,22 +214,22 @@ class Stickies(commands.Cog):
 
             # If we found stickies belonging to deleted channels, purge them from the database
             if needs_save:
-                valid_channel_ids = [s['channel_id'] for s in valid_stickies]
-                stickies = [s for s in stickies if s.get('guild_id') != interaction.guild_id or s['channel_id'] in valid_channel_ids]
+                valid_channel_ids = [int(s.get('channel_id', 0)) for s in valid_stickies]
+                stickies = [s for s in stickies if int(s.get('guild_id', 0)) != interaction.guild_id or int(s.get('channel_id', 0)) in valid_channel_ids]
                 self.save_stickies(stickies)
 
             if not valid_stickies:
                 return await interaction.response.send_message("📝 No sticky messages found for this server.", ephemeral=True)
 
             def get_sort_key(s):
-                channel = interaction.guild.get_channel(s['channel_id'])
+                channel = interaction.guild.get_channel(int(s.get('channel_id', 0)))
                 return channel.position if channel else float('inf')
 
             valid_stickies.sort(key=get_sort_key)
 
             text = "**📌 Active Sticky Messages:**\n"
             for s in valid_stickies:
-                channel = interaction.guild.get_channel(s['channel_id'])
+                channel = interaction.guild.get_channel(int(s.get('channel_id', 0)))
                 chan_mention = channel.mention # Safe since we verified it exists above
                 content_preview = s['content'].replace("\n", " ")
                 status = " (Paused)" if not s.get('active', True) else ""
@@ -231,7 +240,7 @@ class Stickies(commands.Cog):
         
         if action == "Remove":
             stickies = self.get_stickies()
-            target = next((s for s in stickies if s['channel_id'] == interaction.channel_id), None)
+            target = next((s for s in stickies if int(s.get('channel_id', 0)) == interaction.channel_id), None)
             
             if target:
                 if target.get('last_message_id'):
@@ -240,7 +249,11 @@ class Stickies(commands.Cog):
                         await old_msg.delete()
                     except: pass
                 
-                stickies = [s for s in stickies if s['channel_id'] != interaction.channel_id]
+                # Clear from memory cache if it exists
+                if interaction.channel_id in self.in_memory_last_stickies:
+                    del self.in_memory_last_stickies[interaction.channel_id]
+
+                stickies = [s for s in stickies if int(s.get('channel_id', 0)) != interaction.channel_id]
                 self.save_stickies(stickies)
                 await interaction.response.send_message("✅ Sticky message removed.", ephemeral=True)
             else:
@@ -251,7 +264,7 @@ class Stickies(commands.Cog):
             return await interaction.response.send_message(f"❌ You must provide a message to {action} a sticky!", ephemeral=True)
 
         content = message.replace("\\n", "\n")
-        existing = next((s for s in self.get_stickies() if s['channel_id'] == interaction.channel_id), None)
+        existing = next((s for s in self.get_stickies() if int(s.get('channel_id', 0)) == interaction.channel_id), None)
 
         if action == "Add":
             if existing:
@@ -273,6 +286,10 @@ class Stickies(commands.Cog):
             try:
                 embed = discord.Embed(description=content, color=discord.Color(0xff90aa))
                 msg = await interaction.channel.send(embed=embed)
+                
+                # Ensure the first message is cached immediately
+                self.in_memory_last_stickies[interaction.channel_id] = msg.id
+                
                 new_sticky['last_message_id'] = msg.id
                 self.bot.db.update_doc("sticky_messages", "channel_id", interaction.channel_id, new_sticky)
                 await interaction.response.send_message("✅ Sticky message added!", ephemeral=True)
@@ -292,7 +309,7 @@ class Stickies(commands.Cog):
         total_seconds = number * multiplier
         
         settings = self.get_sticky_settings()
-        settings = [s for s in settings if s['guild_id'] != interaction.guild_id]
+        settings = [s for s in settings if int(s.get('guild_id', 0)) != interaction.guild_id]
         settings.append({"guild_id": interaction.guild_id, "delay": total_seconds, "mode": timing.value})
         self.save_sticky_settings(settings)
         
