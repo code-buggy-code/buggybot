@@ -147,10 +147,10 @@ class Overwatch(commands.Cog):
                 await interaction.followup.send(f"❌ **API Connection Error while fetching {link}:**\n{error}", ephemeral=True)
                 return
 
-            # If the profile doesn't exist (404 JSON)
+            # If the profile doesn't exist OR is private (404 JSON)
             if error and error.startswith("not_found_json:"):
                 api_msg = error.split(":", 1)[1]
-                await interaction.followup.send(f"❌ **Profile Not Found**\nAPI Message: `{api_msg}`\nCould not find `{link}`. Please check your spelling and capitalization.", ephemeral=True)
+                await interaction.followup.send(f"❌ **Profile Not Found or is Private**\nAPI Message: `{api_msg}`\nIf `{link}` is correct, it is likely set to Private in-game. Please make it Public in the Social tab.", ephemeral=True)
                 return
 
             # Success (Link them in the database)
@@ -168,32 +168,9 @@ class Overwatch(commands.Cog):
                     except discord.Forbidden:
                         role_msg = "\n*(Note: Could not assign the linked role due to missing permissions.)*"
 
-            # Check Privacy Status robustly: If the API doesn't send the "privacy" key, assume it's public since we got the data!
-            is_private = False
-            if profile_data:
-                privacy_val = str(profile_data.get("privacy", "public")).lower()
-                if privacy_val == "private":
-                    is_private = True
-
-            # If it's private, tell them it linked successfully but give them the instructions to make it public
-            if is_private:
-                debug_dump = str(profile_data)[:400]
-                private_msg = (
-                    f"✅ Successfully linked your profile to **{link}**!{role_msg}\n\n"
-                    f"🔒 **HOWEVER, YOUR PROFILE IS PRIVATE.**\n"
-                    f"We cannot show your stats until you follow these steps to make it public:\n"
-                    f"1. Launch Overwatch and press Esc\n"
-                    f"2. Click Options\n"
-                    f"3. Click the Social tab\n"
-                    f"4. Find Career Profile Visibility\n"
-                    f"5. Switch it to Public\n\n"
-                    f"*DEBUG INFO: The bot received this data from the proxy: `{debug_dump}`*"
-                )
-                await interaction.followup.send(private_msg, ephemeral=True)
-                return
-            else:
-                await interaction.followup.send(f"✅ Successfully linked your profile to **{link}**!{role_msg}", ephemeral=True)
-                return
+            # Since we got profile_data (Status 200), we know 100% it is public!
+            await interaction.followup.send(f"✅ Successfully linked your profile to **{link}**!{role_msg}", ephemeral=True)
+            return
 
         # 3. HANDLE LIST
         if show_list:
@@ -236,14 +213,10 @@ class Overwatch(commands.Cog):
         profile_data, error = await self.fetch_profile(battletag)
 
         if error and error.startswith("not_found_json:"):
-            await interaction.followup.send("⚠️ Profile not found. The profile may have been deleted or the BattleTag changed.")
+            await interaction.followup.send("⚠️ Profile not found or is currently Private. Please ensure it is public in-game.")
             return
         elif error:
             await interaction.followup.send(f"❌ **API Error:**\n{error}")
-            return
-        elif str(profile_data.get("privacy", "public")).lower() == "private":
-            debug_dump = str(profile_data)[:400]
-            await interaction.followup.send(f"⚠️ This profile is currently set to private. Please make it public in-game.\n\n*DEBUG INFO: `{debug_dump}`*")
             return
 
         # Build Stats Embed
