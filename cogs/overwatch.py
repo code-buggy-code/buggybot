@@ -90,7 +90,7 @@ class Overwatch(commands.Cog):
         except Exception as e:
             return None, f"An unexpected error occurred: `{e}`"
 
-    @app_commands.command(name="overwatch", description="View Overwatch stats, or link/unlink your BattleTag.")
+    @app_commands.command(name="overwatch", description="View Overwatch stats, or link/unlink your BattleTag.", extras={'public': True})
     @app_commands.rename(show_list="list")
     @app_commands.describe(
         link="Link your BattleTag (e.g., Player#1234)",
