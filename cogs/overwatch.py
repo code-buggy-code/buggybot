@@ -86,7 +86,7 @@ class Overwatch(commands.Cog):
                         error_msg = f"HTTP Error {response.status}\nDetails: `{error_text[:200]}`"
                         return None, error_msg
         except asyncio.TimeoutError:
-            return None, "Request timed out. The server host (Oracle) might be blocked by the API's Cloudflare protection."
+            return None, "Request timed out. <@1433003746719170560>, check the server under ur bed."
         except Exception as e:
             return None, f"An unexpected error occurred: `{e}`"
 
