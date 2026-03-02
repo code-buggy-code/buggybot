@@ -1,284 +1,301 @@
+# Function List:
+# 1. __init__
+# 2. load_data
+# 3. save_data
+# 4. save_config
+# 5. fetch_profile
+# 6. overwatch (Command)
+# 7. overrole (Command)
+# 8. on_member_remove (Listener)
+# 9. setup
+
 import discord
 from discord.ext import commands
 from discord import app_commands
+import aiohttp
+import json
+import os
 import asyncio
-import datetime
-from typing import Literal
+import socket  # Added to force IPv4
 
-# Function/Class List:
-# class Stickies(commands.Cog)
-# - __init__(bot)
-# - get_stickies()
-# - save_stickies(stickies)
-# - get_sticky_settings()
-# - save_sticky_settings(settings)
-# - send_sticky(channel)
-# - sticky_task(channel, delay)
-# - handle_sticky(message)
-# - on_message(message)
-# - on_message_delete(message)
-# - sticky(interaction, action, message) [Slash]
-# - stickytime(interaction, timing, number, unit) [Slash]
-# setup(bot)
-
-class Stickies(commands.Cog):
+class Overwatch(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.description = "Manage sticky messages."
-        self.pending_tasks = {} # {channel_id: asyncio.Task}
-        self.reposting = set()  # {channel_id} - Safety lock to prevent race conditions
+        self.data_file = "overwatch_data.json"
+        self.config_file = "overwatch_config.json"
+        # Updated to your specific Public IP
+        self.api_base = "http://68.100.203.50:8080/overfast/players"
+        self.load_data()
 
-    # --- HELPERS ---
+    def load_data(self):
+        """Loads the saved user data from the JSON file."""
+        if not os.path.exists(self.data_file):
+            with open(self.data_file, "w") as f:
+                json.dump({}, f)
+        with open(self.data_file, "r") as f:
+            self.users = json.load(f)
+            
+        if not os.path.exists(self.config_file):
+            with open(self.config_file, "w") as f:
+                json.dump({}, f)
+        with open(self.config_file, "r") as f:
+            self.config = json.load(f)
 
-    def get_stickies(self):
-        """Returns active sticky messages."""
-        return self.bot.db.get_collection("sticky_messages")
+    def save_data(self):
+        """Saves the current user data to the JSON file."""
+        with open(self.data_file, "w") as f:
+            json.dump(self.users, f, indent=4)
 
-    def save_stickies(self, stickies):
-        """Saves sticky messages."""
-        self.bot.db.save_collection("sticky_messages", stickies)
+    def save_config(self):
+        """Saves the configuration to the JSON file."""
+        with open(self.config_file, "w") as f:
+            json.dump(self.config, f, indent=4)
 
-    def get_sticky_settings(self):
-        """Returns server-specific sticky settings (timings)."""
-        return self.bot.db.get_collection("sticky_settings")
-
-    def save_sticky_settings(self, settings):
-        """Saves sticky settings."""
-        self.bot.db.save_collection("sticky_settings", settings)
-
-    async def send_sticky(self, channel):
-        """Actually sends the sticky message."""
-        # Safety Lock: Prevent concurrent sends in the same channel
-        # This prevents the "triggers itself once" race condition where the bot sees its own new sticky
-        if channel.id in self.reposting:
-            return
-
-        self.reposting.add(channel.id)
+    async def fetch_profile(self, battletag: str):
+        """Fetches the profile summary and returns (data, error_message)."""
+        formatted_tag = battletag.replace("#", "-")
+        url = f"{self.api_base}/{formatted_tag}/summary"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Cache-Control": "no-cache", # Forces the proxy and API to bypass the cache
+            "Pragma": "no-cache"
+        }
+        
         try:
-            stickies = self.get_stickies()
-            sticky_data = next((s for s in stickies if s['channel_id'] == channel.id), None)
+            # FORCE IPv4: Oracle Cloud IPv6 addresses are frequently shadow-banned by Cloudflare/APIs
+            connector = aiohttp.TCPConnector(family=socket.AF_INET)
             
-            if not sticky_data: return
+            async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
+                async with session.get(url, timeout=10) as response:
+                    if response.status == 200:
+                        return await response.json(), None
+                    elif response.status == 404:
+                        error_text = await response.text()
+                        try:
+                            # The real OverFast API returns a JSON dict for 404s
+                            error_json = json.loads(error_text)
+                            api_msg = error_json.get("error", "Unknown API Error")
+                            return None, f"not_found_json:{api_msg}" 
+                        except json.JSONDecodeError:
+                            # If it's HTML, Cloudflare or Nginx is stealth-blocking the Datacenter IP
+                            return None, f"Firewall Block (Fake 404 HTML):\n`{error_text[:200]}`"
+                    else:
+                        error_text = await response.text()
+                        error_msg = f"HTTP Error {response.status}\nDetails: `{error_text[:200]}`"
+                        return None, error_msg
+        except asyncio.TimeoutError:
+            return None, "Request timed out. <@1433003746719170560>, check the server under ur bed."
+        except Exception as e:
+            return None, f"An unexpected error occurred: `{e}`"
 
-            # Check if the last message is already the sticky to avoid double posting
-            if channel.last_message_id == sticky_data.get('last_message_id'):
-                 return
-
-            # Delete old sticky
-            if sticky_data.get('last_message_id'):
-                try:
-                    old_msg = await channel.fetch_message(sticky_data['last_message_id'])
-                    await old_msg.delete()
-                except (discord.NotFound, discord.HTTPException):
-                    pass
-            
-            # Send new sticky
-            try:
-                embed = discord.Embed(description=sticky_data['content'], color=discord.Color(0xff90aa))
-                new_msg = await channel.send(embed=embed)
-                
-                sticky_data['last_message_id'] = new_msg.id
-                sticky_data['last_posted_at'] = datetime.datetime.now().timestamp()
-                sticky_data['active'] = True
-
-                self.bot.db.update_doc("sticky_messages", "channel_id", channel.id, sticky_data)
-
-            except Exception as e:
-                print(f"Failed to send sticky: {e}")
-        finally:
-            # Always release the lock so the next message can trigger it
-            self.reposting.discard(channel.id)
-
-    async def sticky_task(self, channel, delay):
-        """Waits for delay then sends sticky."""
-        try:
-            await asyncio.sleep(delay)
-            # Re-fetch channel to ensure freshness
-            if not channel: return
-            
-            await self.send_sticky(channel)
-        except asyncio.CancelledError:
-            pass
-        finally:
-            if channel.id in self.pending_tasks:
-                del self.pending_tasks[channel.id]
-
-    async def handle_sticky(self, message):
-        """Resends the sticky message to the bottom."""
-        stickies = self.get_stickies()
-        sticky_data = next((s for s in stickies if s['channel_id'] == message.channel.id), None)
-        
-        if not sticky_data: return
-
-        # Get Settings for delay
-        settings = self.get_sticky_settings()
-        guild_setting = next((s for s in settings if s['guild_id'] == message.guild.id), None)
-        
-        delay = 0
-        mode = "after" # Default behavior
-        if guild_setting:
-            delay = guild_setting.get('delay', 0)
-            mode = guild_setting.get('mode', 'after')
-
-        now = datetime.datetime.now().timestamp()
-
-        # LOGIC 1: BEFORE (Cooldown)
-        if mode == "before" and delay > 0:
-            last_posted = sticky_data.get('last_posted_at', 0)
-            if (now - last_posted) < delay:
-                return
-            # If cooldown passed, send immediately
-            await self.send_sticky(message.channel)
-
-        # LOGIC 2: AFTER (Delay/Silence)
-        elif mode == "after":
-            if delay > 0:
-                # Cancel existing task (reset timer)
-                if message.channel.id in self.pending_tasks:
-                    self.pending_tasks[message.channel.id].cancel()
-                
-                # Start new task
-                self.pending_tasks[message.channel.id] = asyncio.create_task(
-                    self.sticky_task(message.channel, delay)
-                )
-            else:
-                # No delay, send immediately
-                await self.send_sticky(message.channel)
-
-    # --- EVENTS ---
-
-    @commands.Cog.listener()
-    async def on_message(self, message):
-        """Handles sticky message triggering."""
-        if not message.guild: return
-        
-        # Safety Lock Check: Prevent the sticky message itself from triggering an infinite loop
-        # If we are currently in the middle of sending the sticky, ignore messages
-        if message.channel.id in self.reposting:
-            return
-
-        # Ignore OTHER bots, but allow our own bot (buggybot) to trigger the sticky to move down
-        if message.author.bot and message.author.id != self.bot.user.id:
-            return
-
-        stickies = self.get_stickies()
-        sticky_data = next((s for s in stickies if s['channel_id'] == message.channel.id), None)
-        
-        if sticky_data:
-            if not sticky_data.get('active', True): return
-            
-            # Final safeguard: Make absolutely sure the message isn't the sticky message itself
-            if sticky_data.get('last_message_id') == message.id: return
-
-            await self.handle_sticky(message)
-
-    @commands.Cog.listener()
-    async def on_message_delete(self, message):
-        """Prevents log spam if a sticky is deleted by the bot logic."""
-        pass
-
-    # --- SLASH COMMANDS ---
-
-    @app_commands.command(name="sticky", description="Manage sticky messages.")
-    @app_commands.describe(action="Choose an action", message="The message content (Required for Add)")
-    @app_commands.default_permissions(administrator=True)
-    async def sticky(self, interaction: discord.Interaction, action: Literal["Add", "List", "Remove"], message: str = None):
-        """Manage sticky messages."""
-        
-        if action == "List":
-            stickies = self.get_stickies()
-            current_guild_stickies = [s for s in stickies if s.get('guild_id') == interaction.guild_id]
-
-            if not current_guild_stickies:
-                return await interaction.response.send_message("📝 No sticky messages found for this server.", ephemeral=True)
-
-            def get_sort_key(s):
-                channel = interaction.guild.get_channel(s['channel_id'])
-                return channel.position if channel else float('inf')
-
-            current_guild_stickies.sort(key=get_sort_key)
-
-            text = "**📌 Active Sticky Messages:**\n"
-            for s in current_guild_stickies:
-                channel = interaction.guild.get_channel(s['channel_id'])
-                chan_mention = channel.mention if channel else f"ID:{s['channel_id']} (Deleted)"
-                content_preview = s['content'].replace("\n", " ")
-                status = " (Paused)" if not s.get('active', True) else ""
-                if len(content_preview) > 50: content_preview = content_preview[:47] + "..."
-                text += f"• {chan_mention}{status}: {content_preview}\n"
-            
-            return await interaction.response.send_message(text, ephemeral=True)
-        
-        if action == "Remove":
-            stickies = self.get_stickies()
-            target = next((s for s in stickies if s['channel_id'] == interaction.channel_id), None)
-            
-            if target:
-                if target.get('last_message_id'):
-                    try:
-                        old_msg = await interaction.channel.fetch_message(target['last_message_id'])
-                        await old_msg.delete()
-                    except: pass
-                
-                stickies = [s for s in stickies if s['channel_id'] != interaction.channel_id]
-                self.save_stickies(stickies)
-                await interaction.response.send_message("✅ Sticky message removed.", ephemeral=True)
-            else:
-                await interaction.response.send_message("❌ No sticky message found in this channel.", ephemeral=True)
-            return
-
-        if not message:
-            return await interaction.response.send_message(f"❌ You must provide a message to {action} a sticky!", ephemeral=True)
-
-        content = message.replace("\\n", "\n")
-        existing = next((s for s in self.get_stickies() if s['channel_id'] == interaction.channel_id), None)
-
-        if action == "Add":
-            if existing:
-                return await interaction.response.send_message("⚠️ A sticky message already exists in this channel. Remove it first to set a new one.", ephemeral=True)
-            
-            new_sticky = {
-                "channel_id": interaction.channel_id,
-                "guild_id": interaction.guild_id,
-                "content": content,
-                "last_message_id": None,
-                "last_posted_at": datetime.datetime.now().timestamp(),
-                "active": True
-            }
-            
-            stickies = self.get_stickies()
-            stickies.append(new_sticky)
-            self.save_stickies(stickies)
-
-            try:
-                embed = discord.Embed(description=content, color=discord.Color(0xff90aa))
-                msg = await interaction.channel.send(embed=embed)
-                new_sticky['last_message_id'] = msg.id
-                self.bot.db.update_doc("sticky_messages", "channel_id", interaction.channel_id, new_sticky)
-                await interaction.response.send_message("✅ Sticky message added!", ephemeral=True)
-            except Exception as e:
-                await interaction.response.send_message(f"❌ Failed to send sticky: {e}", ephemeral=True)
-
-    @app_commands.command(name="stickytime", description="Configure server-wide sticky message timing.")
-    @app_commands.describe(timing="Mode: 'before' (Cooldown) or 'after' (Delay)", number="Time amount", unit="Time unit")
-    @app_commands.choices(
-        timing=[app_commands.Choice(name="Before (Cooldown)", value="before"), app_commands.Choice(name="After (Delay)", value="after")],
-        unit=[app_commands.Choice(name="Seconds", value="seconds"), app_commands.Choice(name="Minutes", value="minutes")]
+    @app_commands.command(name="overwatch", description="View Overwatch stats, or link/unlink your BattleTag.", extras={'public': True})
+    @app_commands.rename(show_list="list")
+    @app_commands.describe(
+        link="Link your BattleTag (e.g., Player#1234)",
+        unlink="Unlink your currently registered BattleTag",
+        user="View another user's Overwatch stats",
+        show_list="View an alphabetical list of all registered users"
     )
-    @app_commands.default_permissions(administrator=True)
-    async def stickytime(self, interaction: discord.Interaction, timing: app_commands.Choice[str], number: int, unit: app_commands.Choice[str]):
-        """Configure server-wide sticky message timing."""
-        multiplier = 60 if unit.value == 'minutes' else 1
-        total_seconds = number * multiplier
+    async def overwatch(
+        self,
+        interaction: discord.Interaction,
+        link: str = None,
+        unlink: bool = False,
+        user: discord.Member = None,
+        show_list: bool = False
+    ):
+        user_id = str(interaction.user.id)
+
+        # 1. HANDLE UNLINK
+        if unlink:
+            if user_id in self.users:
+                del self.users[user_id]
+                self.save_data()
+                
+                role_msg = ""
+                role_id = self.config.get("linked_role_id")
+                if role_id:
+                    role = interaction.guild.get_role(role_id)
+                    if role and role in interaction.user.roles:
+                        try:
+                            await interaction.user.remove_roles(role)
+                        except discord.Forbidden:
+                            role_msg = "\n*(Note: Could not remove the linked role due to missing permissions.)*"
+
+                await interaction.response.send_message(f"✅ Your Overwatch profile has been unlinked successfully.{role_msg}", ephemeral=True)
+            else:
+                await interaction.response.send_message("⚠️ You do not have an Overwatch profile linked.", ephemeral=True)
+            return
+
+        # 2. HANDLE LINK
+        if link:
+            await interaction.response.defer(ephemeral=True)
+            
+            # Remove any accidental spaces the user might type
+            link = link.replace(" ", "")
+            
+            if "#" not in link:
+                await interaction.followup.send("⚠️ Invalid format. Please include your BattleTag identifier (e.g. `Player#1234`).", ephemeral=True)
+                return
+
+            profile_data, error = await self.fetch_profile(link)
+            
+            # If the API explicitly blocks us, or fails to connect
+            if error and not error.startswith("not_found_json:"):
+                await interaction.followup.send(f"❌ **API Connection Error while fetching {link}:**\n{error}", ephemeral=True)
+                return
+
+            # If the profile doesn't exist OR is private (404 JSON)
+            if error and error.startswith("not_found_json:"):
+                api_msg = error.split(":", 1)[1]
+                await interaction.followup.send(f"❌ **Profile Not Found or is Private**\nAPI Message: `{api_msg}`\nIf `{link}` is correct, it is likely set to Private in-game. Please make it Public in the Social tab.", ephemeral=True)
+                return
+
+            # Success (Link them in the database)
+            self.users[user_id] = link
+            self.save_data()
+            
+            # Hand out the Role
+            role_msg = ""
+            role_id = self.config.get("linked_role_id")
+            if role_id:
+                role = interaction.guild.get_role(role_id)
+                if role:
+                    try:
+                        await interaction.user.add_roles(role)
+                    except discord.Forbidden:
+                        role_msg = "\n*(Note: Could not assign the linked role due to missing permissions.)*"
+
+            # Since we got profile_data (Status 200), we know 100% it is public!
+            await interaction.followup.send(f"✅ Successfully linked your profile to **{link}**!{role_msg}", ephemeral=True)
+            return
+
+        # 3. HANDLE LIST
+        if show_list:
+            if not self.users:
+                await interaction.response.send_message("No users are currently registered.", ephemeral=True)
+                return
+            
+            await interaction.response.defer()
+            entries = []
+            
+            for uid, btag in self.users.items():
+                member = interaction.guild.get_member(int(uid))
+                display_name = member.display_name if member else f"Unknown User ({uid})"
+                entries.append((display_name, btag))
+            
+            entries.sort(key=lambda x: x[0].lower())
+            
+            list_text = "**Registered Overwatch Players:**\n\n"
+            for name, btag in entries:
+                list_text += f"**{name}**\n└ ID: `{btag}`\n"
+            
+            embed = discord.Embed(description=list_text, color=discord.Color.orange())
+            await interaction.followup.send(embed=embed)
+            return
+
+        # 4. HANDLE VIEW STATS (Self or User)
+        target_member = user or interaction.user
+        target_id = str(target_member.id)
+
+        if target_id not in self.users:
+            if target_member == interaction.user:
+                await interaction.response.send_message("⚠️ You are not registered! Please link your profile using `/overwatch link:<battletag>`", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"⚠️ **{target_member.display_name}** is not registered with the bot.", ephemeral=True)
+            return
+
+        await interaction.response.defer()
         
-        settings = self.get_sticky_settings()
-        settings = [s for s in settings if s['guild_id'] != interaction.guild_id]
-        settings.append({"guild_id": interaction.guild_id, "delay": total_seconds, "mode": timing.value})
-        self.save_sticky_settings(settings)
+        battletag = self.users[target_id]
+        profile_data, error = await self.fetch_profile(battletag)
+
+        if error and error.startswith("not_found_json:"):
+            await interaction.followup.send("⚠️ Profile not found or is currently Private. Please ensure it is public in-game.")
+            return
+        elif error:
+            await interaction.followup.send(f"❌ **API Error:**\n{error}")
+            return
+
+        # Build Stats Embed
+        embed = discord.Embed(
+            title=f"Overwatch Stats: {battletag}",
+            color=discord.Color.orange(),
+            url=f"https://overwatch.blizzard.com/en-us/career/{battletag.replace('#', '-')}/"
+        )
         
-        delay_text = "Instant (0s)" if total_seconds == 0 else f"{total_seconds} seconds"
-        mode_text = "Cooldown (Before)" if timing.value == "before" else "Delay (After)"
-        await interaction.response.send_message(f"✅ Sticky settings updated.\nMode: **{mode_text}**\nTime: **{delay_text}**", ephemeral=True)
+        if profile_data.get("avatar"):
+            embed.set_thumbnail(url=profile_data["avatar"])
+        
+        title = profile_data.get("title", "No Title")
+        endorsement = profile_data.get("endorsement", {}).get("level", 1)
+        embed.add_field(name="Profile Info", value=f"**Title:** {title}\n**Endorsement:** Level {endorsement}", inline=False)
+
+        comp_data = profile_data.get("competitive")
+        if comp_data:
+            platform_stats = comp_data.get("pc") or comp_data.get("console")
+            if platform_stats:
+                ranks = []
+                for role in ["tank", "damage", "support"]:
+                    role_info = platform_stats.get(role)
+                    if role_info:
+                        div = role_info.get("division", "Unknown").capitalize()
+                        tier = role_info.get("tier", "")
+                        ranks.append(f"**{role.capitalize()}:** {div} {tier}")
+                
+                if ranks:
+                    embed.add_field(name="Competitive Ranks", value="\n".join(ranks), inline=False)
+                else:
+                    embed.add_field(name="Competitive Ranks", value="Unranked / No Data", inline=False)
+        else:
+            embed.add_field(name="Competitive Ranks", value="Unranked / No Data", inline=False)
+
+        await interaction.followup.send(embed=embed)
+
+
+    @app_commands.command(name="overrole", description="Assign a specific role to all users linked with the bot")
+    @app_commands.default_permissions(manage_roles=True)
+    async def overrole(self, interaction: discord.Interaction, role: discord.Role):
+        await interaction.response.defer(ephemeral=True)
+
+        self.config["linked_role_id"] = role.id
+        self.save_config()
+
+        if not self.users:
+            await interaction.followup.send(f"✅ Linked role set to {role.mention}. No users are currently registered in the database to assign it to.")
+            return
+
+        assigned_count = 0
+        failed_count = 0
+
+        for uid in self.users.keys():
+            member = interaction.guild.get_member(int(uid))
+            if member:
+                if role not in member.roles:
+                    try:
+                        await member.add_roles(role)
+                        assigned_count += 1
+                        await asyncio.sleep(0.5) 
+                    except discord.Forbidden:
+                        failed_count += 1
+            else:
+                failed_count += 1
+        
+        msg = f"✅ Success! Linked role set to {role.mention} and assigned to **{assigned_count}** existing users."
+        if failed_count > 0:
+            msg += f"\n⚠️ Skipped **{failed_count}** users (Missing permissions, or user left the server)."
+            
+        await interaction.followup.send(msg)
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member):
+        """Automatically deregisters users when they leave the server."""
+        user_id = str(member.id)
+        if user_id in self.users:
+            del self.users[user_id]
+            self.save_data()
 
 async def setup(bot):
-    await bot.add_cog(Stickies(bot))
+    await bot.add_cog(Overwatch(bot))
