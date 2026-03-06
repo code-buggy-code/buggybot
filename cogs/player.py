@@ -28,20 +28,20 @@ class Player(commands.Cog):
         self.bot.loop.create_task(self.setup_nodes())
 
     async def setup_nodes(self):
-        """Connects to the Lavalink node specified."""
+        """Connects to the local Lavalink node running on the Oracle device."""
         await self.bot.wait_until_ready()
         
-        # Using the specified proxy server/Lavalink node
+        # Connects to the local Lavalink server (which uses the Mac as a proxy in its own config)
         node = wavelink.Node(
-            uri="http://68.100.203.50:8080",
-            password="youshallnotpass" # Default Lavalink password, change if yours is different!
+            uri="http://127.0.0.1:2333",
+            password="youshallnotpass" # Default Lavalink password
         )
         
         try:
             await wavelink.Pool.connect(client=self.bot, nodes=[node])
-            print("⏳ Requested Lavalink connection to 68.100.203.50:8080...")
+            print("⏳ Requested Lavalink connection to local server (127.0.0.1:2333)...")
         except Exception as e:
-            print(f"❌ Failed to connect to Lavalink: {e}")
+            print(f"❌ Failed to connect to local Lavalink: {e}")
 
     @commands.Cog.listener()
     async def on_wavelink_node_ready(self, payload: wavelink.NodeReadyEventPayload):
@@ -56,12 +56,11 @@ class Player(commands.Cog):
         """Play a YouTube playlist or song."""
         await interaction.response.defer()
 
-        # Check if the node is actually connected!
+        # Check if the local node is connected
         if not wavelink.Pool.nodes:
             return await interaction.followup.send(
-                "❌ **Lavalink Connection Failed!**\nThe server at `68.100.203.50:8080` is offline or unreachable. "
-                "*(Note: If this is just an HTTP web proxy, it cannot be used directly as a Wavelink Node. "
-                "You must run Lavalink locally and set the proxy inside Lavalink's `application.yml` file!)*"
+                "❌ **Lavalink Connection Failed!**\nThe local Lavalink server at `127.0.0.1:2333` is offline. "
+                "*(Make sure Lavalink.jar is running on this Oracle machine and configured to use your Mac's proxy!)*"
             )
 
         if not interaction.user.voice:
