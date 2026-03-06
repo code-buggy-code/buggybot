@@ -62,19 +62,24 @@ class Player(commands.Cog):
 
     async def _connect_and_sync(self, interaction: discord.Interaction) -> wavelink.Player:
         """Internal helper to force a synchronous-feeling connection for Lavalink v4."""
+        # Check permissions first to ensure we aren't being kicked by Discord for lack of Speak/Connect
+        perms = interaction.user.voice.channel.permissions_for(interaction.guild.me)
+        if not perms.connect or not perms.speak:
+            raise commands.BotMissingPermissions(["connect", "speak"])
+
         # 1. Physical connection
         vc: wavelink.Player = await interaction.user.voice.channel.connect(cls=wavelink.Player, timeout=60.0)
         
         # 2. Forced wait while checking internal state
-        # We loop and sleep because simple await asyncio.sleep() sometimes gets 
-        # optimized or bypassed if the event loop is busy.
-        for _ in range(7): 
+        # We check for both channel and node to ensure the handshake is 100% complete
+        for _ in range(10): 
             await asyncio.sleep(1)
-            # We want to ensure the player knows its own channel and session
-            if vc.channel and vc.node:
-                break
+            if vc.channel and vc.node and vc.guild:
+                # Extra check to see if Discord has assigned a session ID yet
+                if hasattr(vc, 'session_id') and vc.session_id:
+                    break
         
-        # 3. Final safety buffer
+        # 3. Final safety buffer for the Discord Gateway
         await asyncio.sleep(2)
         vc.autoplay = wavelink.AutoPlayMode.partial
         return vc
@@ -87,7 +92,7 @@ class Player(commands.Cog):
         """Play a YouTube playlist or song."""
         await interaction.response.defer()
 
-        # Search FIRST
+        # Search FIRST so we don't join and then fail search
         try:
             tracks: wavelink.Search = await wavelink.Playable.search(query)
         except Exception as e:
@@ -105,11 +110,13 @@ class Player(commands.Cog):
         if not vc:
             try:
                 vc = await self._connect_and_sync(interaction)
+            except discord.Forbidden:
+                return await interaction.followup.send("❌ I don't have permission to join or speak in that channel!")
             except Exception as e:
                 return await interaction.followup.send(f"❌ Connection failed: `{e}`")
         
-        if not vc:
-             return await interaction.followup.send("❌ Failed to initialize player state.")
+        if not vc or not vc.channel:
+             return await interaction.followup.send("❌ Failed to initialize player state. Try again in a moment!")
 
         # Queue tracks
         if isinstance(tracks, wavelink.Playlist):
@@ -124,8 +131,9 @@ class Player(commands.Cog):
         # Play
         if not vc.playing:
             try:
+                # We fetch the next track
                 next_track = vc.queue.get()
-                # Final delay before the first packet is sent
+                # Final delay to prevent the race condition where the DELETE command hits before PLAY
                 await asyncio.sleep(2)
                 await vc.play(next_track, add_history=True)
             except Exception as e:
