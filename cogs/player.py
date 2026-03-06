@@ -57,29 +57,9 @@ class Player(commands.Cog):
         """Play a YouTube playlist or song."""
         await interaction.response.defer()
 
-        if not wavelink.Pool.nodes:
-            return await interaction.followup.send(
-                "❌ **Lavalink Connection Failed!**\nThe local Lavalink server at `127.0.0.1:2333` is offline."
-            )
-
-        if not interaction.user.voice:
-            return await interaction.followup.send("❌ You need to be in a voice channel first!")
-
-        vc: wavelink.Player = interaction.guild.voice_client
-        
-        if not vc:
-            try:
-                # We connect to the voice channel. 
-                # Wavelink handles the session/channel syncing automatically usually, 
-                # but making sure we are on the latest pattern.
-                vc = await interaction.user.voice.channel.connect(cls=wavelink.Player, timeout=60.0)
-                vc.autoplay = wavelink.AutoPlayMode.partial
-            except Exception as e:
-                return await interaction.followup.send(f"❌ Failed to connect to voice channel: `{e}`")
-
-        # Search for the track or playlist
+        # 1. Search for the track or playlist FIRST
+        # This keeps the bot from joining and sitting there while it searches
         try:
-            # Using the specific YouTube source to help Lavalink know where to look
             tracks: wavelink.Search = await wavelink.Playable.search(query)
         except Exception as e:
             error_message = str(e)
@@ -92,6 +72,29 @@ class Player(commands.Cog):
         if not tracks:
             return await interaction.followup.send("❌ Could not find any songs with that query.")
 
+        # 2. Check connections
+        if not wavelink.Pool.nodes:
+            return await interaction.followup.send("❌ **Lavalink Offline!**")
+
+        if not interaction.user.voice:
+            return await interaction.followup.send("❌ You need to be in a voice channel first!")
+
+        vc: wavelink.Player = interaction.guild.voice_client
+        
+        if not vc:
+            try:
+                # 3. Connect to the voice channel
+                vc = await interaction.user.voice.channel.connect(cls=wavelink.Player, timeout=60.0)
+                vc.autoplay = wavelink.AutoPlayMode.partial
+                
+                # 4. CRITICAL: Wait a moment for Discord/Lavalink to sync!
+                # This fixes the "Field 'channelId' is required" error by letting the session settle.
+                await asyncio.sleep(2)
+                
+            except Exception as e:
+                return await interaction.followup.send(f"❌ Failed to connect to voice channel: `{e}`")
+
+        # 5. Handle Queueing
         if isinstance(tracks, wavelink.Playlist):
             for track in tracks.tracks:
                 vc.queue.put(track)
@@ -101,6 +104,7 @@ class Player(commands.Cog):
             vc.queue.put(track)
             await interaction.followup.send(f"🎵 Added **{track.title}** to the queue.")
 
+        # 6. Play the music
         if not vc.playing:
             await vc.play(vc.queue.get())
 
