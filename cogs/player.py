@@ -10,6 +10,7 @@ import asyncio
 # - cog_load()
 # - setup_nodes()
 # - on_wavelink_node_ready(payload)
+# - on_wavelink_track_exception(payload)
 # - play(interaction, query) [Slash]
 # - leave(interaction) [Slash]
 # - pause(interaction) [Slash]
@@ -49,6 +50,11 @@ class Player(commands.Cog):
         """Fired when the Lavalink node connects successfully."""
         print(f"✅ Lavalink Node connected successfully: {payload.node.identifier}")
 
+    @commands.Cog.listener()
+    async def on_wavelink_track_exception(self, payload: wavelink.TrackExceptionEventPayload):
+        """Fired when a track fails to play. Helps us debug leaving issues."""
+        print(f"❌ Track Exception: {payload.exception}")
+
     # --- SLASH COMMANDS ---
 
     @app_commands.command(name="play", description="Play a YouTube playlist or song")
@@ -58,7 +64,6 @@ class Player(commands.Cog):
         await interaction.response.defer()
 
         # 1. Search for the track or playlist FIRST
-        # This keeps the bot from joining and sitting there while it searches
         try:
             tracks: wavelink.Search = await wavelink.Playable.search(query)
         except Exception as e:
@@ -84,12 +89,14 @@ class Player(commands.Cog):
         if not vc:
             try:
                 # 3. Connect to the voice channel
+                # We don't set autoplay here; we do it after connection to be safe
                 vc = await interaction.user.voice.channel.connect(cls=wavelink.Player, timeout=60.0)
-                vc.autoplay = wavelink.AutoPlayMode.partial
                 
                 # 4. CRITICAL: Wait a moment for Discord/Lavalink to sync!
-                # This fixes the "Field 'channelId' is required" error by letting the session settle.
-                await asyncio.sleep(2)
+                # This fixes the "Field 'channelId' is required" error.
+                await asyncio.sleep(3)
+                
+                vc.autoplay = wavelink.AutoPlayMode.partial
                 
             except Exception as e:
                 return await interaction.followup.send(f"❌ Failed to connect to voice channel: `{e}`")
@@ -106,7 +113,12 @@ class Player(commands.Cog):
 
         # 6. Play the music
         if not vc.playing:
-            await vc.play(vc.queue.get())
+            try:
+                # Using a small delay before the first play to ensure session is active
+                await asyncio.sleep(1)
+                await vc.play(vc.queue.get())
+            except Exception as e:
+                print(f"Play Error: {e}")
 
     @app_commands.command(name="leave", description="Disconnect the bot from the voice channel")
     async def leave(self, interaction: discord.Interaction):
