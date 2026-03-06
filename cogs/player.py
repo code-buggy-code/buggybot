@@ -79,6 +79,14 @@ class Player(commands.Cog):
         try:
             tracks: wavelink.Search = await wavelink.Playable.search(query)
         except Exception as e:
+            error_message = str(e)
+            # Catch the specific FriendlyException from Lavalink when YouTube blocks the IP
+            if "FriendlyException" in error_message or "Something went wrong" in error_message:
+                return await interaction.followup.send(
+                    "❌ **YouTube Blocked the Request!**\n"
+                    "YouTube's anti-bot protection is currently blocking your Mac Proxy or Lavalink Node. "
+                    "*(To fix this, you will need to update your Lavalink server with the `youtube-source` plugin and configure a PO Token in your `application.yml`!)*"
+                )
             return await interaction.followup.send(f"❌ Error searching for the song: `{e}`")
 
         if not tracks:
