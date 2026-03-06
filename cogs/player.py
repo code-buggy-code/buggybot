@@ -70,8 +70,8 @@ class Player(commands.Cog):
         if not vc:
             try:
                 vc = await interaction.user.voice.channel.connect(cls=wavelink.Player)
-                # Setting to normal means it will automatically play the next song in the queue
-                vc.autoplay = wavelink.AutoPlayMode.normal
+                # Setting to partial means it will automatically play the next song in the queue
+                vc.autoplay = wavelink.AutoPlayMode.partial
             except Exception as e:
                 return await interaction.followup.send(f"❌ Failed to connect to voice channel: `{e}`")
 
