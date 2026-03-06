@@ -12,6 +12,7 @@ import asyncio
 # - on_wavelink_node_ready(payload)
 # - on_wavelink_track_start(payload)
 # - on_wavelink_track_exception(payload)
+# - on_voice_state_update(member, before, after)
 # - _connect_and_sync(interaction)
 # - play(interaction, query) [Slash]
 # - leave(interaction) [Slash]
@@ -60,153 +61,144 @@ class Player(commands.Cog):
         """Fired when a track fails to play. Helps us debug leaving issues."""
         print(f"❌ Track Exception: {payload.exception}")
 
-    async def _connect_and_sync(self, interaction: discord.Interaction) -> wavelink.Player:
-        """Internal helper to force a synchronous-feeling connection for Lavalink v4."""
-        # Check permissions first to ensure we aren't being kicked by Discord for lack of Speak/Connect
-        perms = interaction.user.voice.channel.permissions_for(interaction.guild.me)
-        if not perms.connect or not perms.speak:
-            raise commands.BotMissingPermissions(["connect", "speak"])
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        """Monitor why the bot is leaving."""
+        if member.id == self.bot.user.id and before.channel is not None and after.channel is None:
+            print(f"⚠️ Bot left voice channel: {before.channel.name}. Deleting player state.")
 
-        # 1. Physical connection
-        vc: wavelink.Player = await interaction.user.voice.channel.connect(cls=wavelink.Player, timeout=60.0)
+    async def _connect_and_sync(self, interaction: discord.Interaction) -> wavelink.Player:
+        """Internal helper to force a stable connection for Lavalink v4."""
+        # 1. Self-deafen often prevents Discord from killing the session prematurely
+        # Using self_deaf=True is a standard stability practice
+        vc: wavelink.Player = await interaction.user.voice.channel.connect(cls=wavelink.Player, timeout=60.0, self_deaf=True)
         
-        # 2. Forced wait while checking internal state
-        # We check for both channel and node to ensure the handshake is 100% complete
-        for _ in range(10): 
+        # 2. Aggressive handshake wait
+        # We wait for the node, channel, and a session ID to be populated.
+        for _ in range(15): 
             await asyncio.sleep(1)
             if vc.channel and vc.node and vc.guild:
-                # Extra check to see if Discord has assigned a session ID yet
-                if hasattr(vc, 'session_id') and vc.session_id:
+                # If the player already has a session ID, we're likely ready
+                if getattr(vc, 'session_id', None):
                     break
         
-        # 3. Final safety buffer for the Discord Gateway
+        # 3. Final stabilization delay
         await asyncio.sleep(2)
         vc.autoplay = wavelink.AutoPlayMode.partial
         return vc
 
     # --- SLASH COMMANDS ---
 
-    @app_commands.command(name="play", description="Play a YouTube playlist or song")
-    @app_commands.describe(query="The YouTube URL or playlist link")
+    @app_commands.command(name="play", description="Play music from YouTube")
+    @app_commands.describe(query="The URL or search query")
     async def play(self, interaction: discord.Interaction, query: str):
-        """Play a YouTube playlist or song."""
+        """Play music."""
         await interaction.response.defer()
 
-        # Search FIRST so we don't join and then fail search
         try:
             tracks: wavelink.Search = await wavelink.Playable.search(query)
         except Exception as e:
-            return await interaction.followup.send(f"❌ Error searching: `{e}`")
+            return await interaction.followup.send(f"❌ Search error: `{e}`")
 
         if not tracks:
-            return await interaction.followup.send("❌ Could not find any songs.")
+            return await interaction.followup.send("❌ No tracks found.")
 
         if not interaction.user.voice:
-            return await interaction.followup.send("❌ Join a voice channel first!")
+            return await interaction.followup.send("❌ Join a VC first!")
 
         vc: wavelink.Player = interaction.guild.voice_client
         
-        # If not connected, use the specialized sync connection
         if not vc:
             try:
                 vc = await self._connect_and_sync(interaction)
-            except discord.Forbidden:
-                return await interaction.followup.send("❌ I don't have permission to join or speak in that channel!")
             except Exception as e:
-                return await interaction.followup.send(f"❌ Connection failed: `{e}`")
+                return await interaction.followup.send(f"❌ Handshake failed: `{e}`")
         
         if not vc or not vc.channel:
-             return await interaction.followup.send("❌ Failed to initialize player state. Try again in a moment!")
+             return await interaction.followup.send("❌ Player failed to sync. Try again, buggy!")
 
-        # Queue tracks
+        # Queue
         if isinstance(tracks, wavelink.Playlist):
             for track in tracks.tracks:
                 vc.queue.put(track)
-            await interaction.followup.send(f"🎵 Added playlist **{tracks.name}** to queue.")
+            await interaction.followup.send(f"🎵 Added playlist **{tracks.name}**.")
         else:
             track = tracks[0]
             vc.queue.put(track)
-            await interaction.followup.send(f"🎵 Added **{track.title}** to queue.")
+            await interaction.followup.send(f"🎵 Added **{track.title}**.")
 
         # Play
         if not vc.playing:
             try:
-                # We fetch the next track
-                next_track = vc.queue.get()
-                # Final delay to prevent the race condition where the DELETE command hits before PLAY
+                # One last sleep to make sure the DELETE command from Lavalink doesn't race us
                 await asyncio.sleep(2)
-                await vc.play(next_track, add_history=True)
+                await vc.play(vc.queue.get(), add_history=True)
             except Exception as e:
-                print(f"Play Error: {e}")
-                await interaction.followup.send("⚠️ Session sync error. Re-running the command usually fixes this, buggy!")
+                print(f"Play error: {e}")
+                await interaction.followup.send("⚠️ Sync error. Re-running /play usually fixes it!")
 
-    @app_commands.command(name="leave", description="Disconnect the bot from the voice channel")
+    @app_commands.command(name="leave", description="Stop music and leave")
     async def leave(self, interaction: discord.Interaction):
-        """Disconnect the bot from the voice channel."""
+        """Leave channel."""
         vc: wavelink.Player = interaction.guild.voice_client
         if not vc:
-            return await interaction.response.send_message("❌ Not in a voice channel.", ephemeral=True)
+            return await interaction.response.send_message("❌ Not in a VC.", ephemeral=True)
         await vc.disconnect()
-        await interaction.response.send_message("👋 Disconnected.")
+        await interaction.response.send_message("👋 Bye!")
 
-    @app_commands.command(name="pause", description="Pause the current song")
+    @app_commands.command(name="pause", description="Pause music")
     async def pause(self, interaction: discord.Interaction):
-        """Pause the current song."""
+        """Pause."""
         vc: wavelink.Player = interaction.guild.voice_client
         if not vc or not vc.playing:
-            return await interaction.response.send_message("❌ Nothing playing.", ephemeral=True)
+            return await interaction.response.send_message("❌ Not playing.", ephemeral=True)
         await vc.pause(True)
         await interaction.response.send_message("⏸️ Paused.")
 
-    @app_commands.command(name="resume", description="Resume the paused song")
+    @app_commands.command(name="resume", description="Resume music")
     async def resume(self, interaction: discord.Interaction):
-        """Resume the paused song."""
+        """Resume."""
         vc: wavelink.Player = interaction.guild.voice_client
         if not vc or not vc.paused:
             return await interaction.response.send_message("❌ Not paused.", ephemeral=True)
         await vc.pause(False)
         await interaction.response.send_message("▶️ Resumed.")
 
-    @app_commands.command(name="skip", description="Skip the current song")
+    @app_commands.command(name="skip", description="Skip song")
     async def skip(self, interaction: discord.Interaction):
-        """Skip the current song."""
+        """Skip."""
         vc: wavelink.Player = interaction.guild.voice_client
         if not vc or not vc.playing:
-            return await interaction.response.send_message("❌ Nothing playing.", ephemeral=True)
+            return await interaction.response.send_message("❌ Not playing.", ephemeral=True)
         await vc.skip(force=True)
         await interaction.response.send_message("⏭️ Skipped.")
 
-    @app_commands.command(name="go_back", description="Play the previous song")
+    @app_commands.command(name="go_back", description="Previous song")
     async def go_back(self, interaction: discord.Interaction):
-        """Play the previous song."""
+        """Back."""
         vc: wavelink.Player = interaction.guild.voice_client
         if not vc:
-            return await interaction.response.send_message("❌ I'm not in a voice channel.", ephemeral=True)
-        history_list = list(vc.queue.history)
-        if not history_list:
-            return await interaction.response.send_message("❌ No history found.", ephemeral=True)
-        previous_track = history_list[-1] 
-        current = vc.current
-        if current:
-            vc.queue.put_at_front(current)
-        await vc.play(previous_track)
-        await interaction.response.send_message(f"⏮️ Back to: **{previous_track.title}**")
+            return await interaction.response.send_message("❌ Not in VC.", ephemeral=True)
+        history = list(vc.queue.history)
+        if not history:
+            return await interaction.response.send_message("❌ No history.", ephemeral=True)
+        track = history[-1]
+        if vc.current:
+            vc.queue.put_at_front(vc.current)
+        await vc.play(track)
+        await interaction.response.send_message(f"⏮️ Back to **{track.title}**")
 
-    @app_commands.command(name="queue", description="View the upcoming songs in the queue")
+    @app_commands.command(name="queue", description="Show queue")
     async def queue(self, interaction: discord.Interaction):
-        """View the upcoming songs in the queue."""
+        """Queue list."""
         vc: wavelink.Player = interaction.guild.voice_client
         if not vc or vc.queue.is_empty:
-            return await interaction.response.send_message("📝 Queue is empty.", ephemeral=True)
-        queue_list = list(vc.queue)
-        upcoming = queue_list[:10]
-        desc = ""
-        for i, track in enumerate(upcoming, 1):
-            desc += f"**{i}.** {track.title}\n"
-        if len(queue_list) > 10:
-            desc += f"\n*...and {len(queue_list) - 10} more*"
-        embed = discord.Embed(title="🎶 Queue", description=desc, color=discord.Color.blue())
-        await interaction.response.send_message(embed=embed)
+            return await interaction.response.send_message("📝 Queue empty.", ephemeral=True)
+        q = list(vc.queue)[:10]
+        desc = "\n".join([f"**{i+1}.** {t.title}" for i, t in enumerate(q)])
+        if len(vc.queue) > 10:
+            desc += f"\n*...and {len(vc.queue)-10} more*"
+        await interaction.response.send_message(embed=discord.Embed(title="🎶 Queue", description=desc, color=discord.Color.blue()))
 
 async def setup(bot):
     await bot.add_cog(Player(bot))
