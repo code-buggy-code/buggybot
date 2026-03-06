@@ -32,14 +32,13 @@ class Player(commands.Cog):
         """Connects to the local Lavalink node running on the Oracle device."""
         await self.bot.wait_until_ready()
         
-        # Connects to the local Lavalink server (which uses the Mac as a proxy in its own config)
+        # Connects to the local Lavalink server
         node = wavelink.Node(
             uri="http://127.0.0.1:2333",
             password="youshallnotpass" 
         )
         
         try:
-            # Connecting to the pool
             await wavelink.Pool.connect(client=self.bot, nodes=[node])
             print("⏳ Requested Lavalink connection to local server (127.0.0.1:2333)...")
         except Exception as e:
@@ -89,13 +88,10 @@ class Player(commands.Cog):
         if not vc:
             try:
                 # 3. Connect to the voice channel
-                # We don't set autoplay here; we do it after connection to be safe
                 vc = await interaction.user.voice.channel.connect(cls=wavelink.Player, timeout=60.0)
                 
-                # 4. CRITICAL: Wait a moment for Discord/Lavalink to sync!
-                # This fixes the "Field 'channelId' is required" error.
-                await asyncio.sleep(3)
-                
+                # 4. Wait for session to be fully established
+                await asyncio.sleep(2)
                 vc.autoplay = wavelink.AutoPlayMode.partial
                 
             except Exception as e:
@@ -114,9 +110,10 @@ class Player(commands.Cog):
         # 6. Play the music
         if not vc.playing:
             try:
-                # Using a small delay before the first play to ensure session is active
-                await asyncio.sleep(1)
-                await vc.play(vc.queue.get())
+                # We need to make sure the player knows its channel ID for Lavalink v4
+                # This helps fix the 'channelId is required' error in the logs
+                track = vc.queue.get()
+                await vc.play(track, add_history=True)
             except Exception as e:
                 print(f"Play Error: {e}")
 
