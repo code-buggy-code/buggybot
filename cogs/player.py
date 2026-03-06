@@ -34,10 +34,11 @@ class Player(commands.Cog):
         # Connects to the local Lavalink server (which uses the Mac as a proxy in its own config)
         node = wavelink.Node(
             uri="http://127.0.0.1:2333",
-            password="youshallnotpass" # Default Lavalink password
+            password="youshallnotpass" 
         )
         
         try:
+            # Connecting to the pool
             await wavelink.Pool.connect(client=self.bot, nodes=[node])
             print("⏳ Requested Lavalink connection to local server (127.0.0.1:2333)...")
         except Exception as e:
@@ -56,54 +57,50 @@ class Player(commands.Cog):
         """Play a YouTube playlist or song."""
         await interaction.response.defer()
 
-        # Check if the local node is connected
         if not wavelink.Pool.nodes:
             return await interaction.followup.send(
-                "❌ **Lavalink Connection Failed!**\nThe local Lavalink server at `127.0.0.1:2333` is offline. "
-                "*(Make sure Lavalink.jar is running on this Oracle machine and configured to use your Mac's proxy!)*"
+                "❌ **Lavalink Connection Failed!**\nThe local Lavalink server at `127.0.0.1:2333` is offline."
             )
 
         if not interaction.user.voice:
             return await interaction.followup.send("❌ You need to be in a voice channel first!")
 
         vc: wavelink.Player = interaction.guild.voice_client
+        
         if not vc:
             try:
-                vc = await interaction.user.voice.channel.connect(cls=wavelink.Player)
-                # Setting to partial means it will automatically play the next song in the queue
+                # We connect to the voice channel. 
+                # Wavelink handles the session/channel syncing automatically usually, 
+                # but making sure we are on the latest pattern.
+                vc = await interaction.user.voice.channel.connect(cls=wavelink.Player, timeout=60.0)
                 vc.autoplay = wavelink.AutoPlayMode.partial
             except Exception as e:
                 return await interaction.followup.send(f"❌ Failed to connect to voice channel: `{e}`")
 
-        # Search for the track or playlist using Wavelink
+        # Search for the track or playlist
         try:
+            # Using the specific YouTube source to help Lavalink know where to look
             tracks: wavelink.Search = await wavelink.Playable.search(query)
         except Exception as e:
             error_message = str(e)
-            # Catch the specific FriendlyException from Lavalink when YouTube blocks the IP
             if "FriendlyException" in error_message or "Something went wrong" in error_message:
                 return await interaction.followup.send(
-                    "❌ **YouTube Blocked the Request!**\n"
-                    "YouTube's anti-bot protection is currently blocking your Mac Proxy or Lavalink Node. "
-                    "*(To fix this, you will need to update your Lavalink server with the `youtube-source` plugin and configure a PO Token in your `application.yml`!)*"
+                    "❌ **YouTube Blocked the Request!**\nUpdate your `application.yml` with the poToken, buggy!"
                 )
             return await interaction.followup.send(f"❌ Error searching for the song: `{e}`")
 
         if not tracks:
             return await interaction.followup.send("❌ Could not find any songs with that query.")
 
-        # Handle Playlists
         if isinstance(tracks, wavelink.Playlist):
             for track in tracks.tracks:
                 vc.queue.put(track)
             await interaction.followup.send(f"🎵 Added playlist **{tracks.name}** ({len(tracks.tracks)} songs) to the queue.")
-        # Handle Single Track
         else:
             track = tracks[0]
             vc.queue.put(track)
             await interaction.followup.send(f"🎵 Added **{track.title}** to the queue.")
 
-        # Start playback if nothing is playing
         if not vc.playing:
             await vc.play(vc.queue.get())
 
@@ -115,7 +112,7 @@ class Player(commands.Cog):
             return await interaction.response.send_message("❌ I'm not currently in a voice channel.", ephemeral=True)
         
         await vc.disconnect()
-        await interaction.response.send_message("👋 Disconnected from the voice channel and cleared the queue.")
+        await interaction.response.send_message("👋 Disconnected and cleared the queue.")
 
     @app_commands.command(name="pause", description="Pause the current song")
     async def pause(self, interaction: discord.Interaction):
@@ -159,10 +156,8 @@ class Player(commands.Cog):
             return await interaction.response.send_message("❌ There is no previous song in the history.", ephemeral=True)
 
         previous_track = history_list[-1] 
-        
         current = vc.current
         if current:
-            # Optionally put the current track back to the top of the queue so it isn't lost
             vc.queue.put_at_front(current)
             
         await vc.play(previous_track)
@@ -176,7 +171,7 @@ class Player(commands.Cog):
             return await interaction.response.send_message("📝 The queue is currently empty.", ephemeral=True)
         
         queue_list = list(vc.queue)
-        upcoming = queue_list[:10] # Display top 10
+        upcoming = queue_list[:10]
         
         desc = ""
         for i, track in enumerate(upcoming, 1):
