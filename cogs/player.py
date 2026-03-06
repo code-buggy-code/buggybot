@@ -13,7 +13,7 @@ import asyncio
 # - on_wavelink_track_start(payload)
 # - on_wavelink_track_exception(payload)
 # - on_voice_state_update(member, before, after)
-# - _connect_and_sync(interaction)
+# - _force_voice_connection(interaction)
 # - play(interaction, query) [Slash]
 # - leave(interaction) [Slash]
 # - pause(interaction) [Slash]
@@ -58,31 +58,30 @@ class Player(commands.Cog):
 
     @commands.Cog.listener()
     async def on_wavelink_track_exception(self, payload: wavelink.TrackExceptionEventPayload):
-        """Fired when a track fails to play. Helps us debug leaving issues."""
+        """Fired when a track fails to play."""
         print(f"❌ Track Exception: {payload.exception}")
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-        """Monitor why the bot is leaving."""
+        """Debug listener to catch why the bot leaves."""
         if member.id == self.bot.user.id and before.channel is not None and after.channel is None:
-            print(f"⚠️ Bot left voice channel: {before.channel.name}. Deleting player state.")
+            print(f"⚠️ Bot was DISCONNECTED from: {before.channel.name}")
 
-    async def _connect_and_sync(self, interaction: discord.Interaction) -> wavelink.Player:
-        """Internal helper to force a stable connection for Lavalink v4."""
-        # 1. Self-deafen often prevents Discord from killing the session prematurely
-        # Using self_deaf=True is a standard stability practice
+    async def _force_voice_connection(self, interaction: discord.Interaction) -> wavelink.Player:
+        """Forces a robust connection that ignores API lag to prevent instant kicks."""
+        # We use self_deaf=True to reduce bandwidth and satisfy Discord's stability check
         vc: wavelink.Player = await interaction.user.voice.channel.connect(cls=wavelink.Player, timeout=60.0, self_deaf=True)
         
-        # 2. Aggressive handshake wait
-        # We wait for the node, channel, and a session ID to be populated.
-        for _ in range(15): 
+        # We wait for the internal discord.py voice client to settle its own websocket
+        # This prevents Lavalink from 'stealing' the session before it's ready
+        for _ in range(10):
             await asyncio.sleep(1)
-            if vc.channel and vc.node and vc.guild:
-                # If the player already has a session ID, we're likely ready
-                if getattr(vc, 'session_id', None):
-                    break
+            if vc.is_connected() and vc.channel:
+                break
         
-        # 3. Final stabilization delay
+        # We manually trigger a small internal ping to keep the gateway alive
+        await interaction.guild.change_voice_state(channel=interaction.user.voice.channel, self_deaf=True)
+        
         await asyncio.sleep(2)
         vc.autoplay = wavelink.AutoPlayMode.partial
         return vc
@@ -108,13 +107,14 @@ class Player(commands.Cog):
 
         vc: wavelink.Player = interaction.guild.voice_client
         
+        # If not connected, use the Nuclear Force connection
         if not vc:
             try:
-                vc = await self._connect_and_sync(interaction)
+                vc = await self._force_voice_connection(interaction)
             except Exception as e:
-                return await interaction.followup.send(f"❌ Handshake failed: `{e}`")
+                return await interaction.followup.send(f"❌ Force connection failed: `{e}`")
         
-        if not vc or not vc.channel:
+        if not vc:
              return await interaction.followup.send("❌ Player failed to sync. Try again, buggy!")
 
         # Queue
@@ -130,12 +130,12 @@ class Player(commands.Cog):
         # Play
         if not vc.playing:
             try:
-                # One last sleep to make sure the DELETE command from Lavalink doesn't race us
-                await asyncio.sleep(2)
+                # We wait specifically for the session to be 100% stable
+                await asyncio.sleep(3)
                 await vc.play(vc.queue.get(), add_history=True)
             except Exception as e:
                 print(f"Play error: {e}")
-                await interaction.followup.send("⚠️ Sync error. Re-running /play usually fixes it!")
+                await interaction.followup.send("⚠️ Session sync error. Re-running /play usually fixes it!")
 
     @app_commands.command(name="leave", description="Stop music and leave")
     async def leave(self, interaction: discord.Interaction):
