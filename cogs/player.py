@@ -56,6 +56,14 @@ class Player(commands.Cog):
         """Play a YouTube playlist or song."""
         await interaction.response.defer()
 
+        # Check if the node is actually connected!
+        if not wavelink.Pool.nodes:
+            return await interaction.followup.send(
+                "❌ **Lavalink Connection Failed!**\nThe server at `68.100.203.50:8080` is offline or unreachable. "
+                "*(Note: If this is just an HTTP web proxy, it cannot be used directly as a Wavelink Node. "
+                "You must run Lavalink locally and set the proxy inside Lavalink's `application.yml` file!)*"
+            )
+
         if not interaction.user.voice:
             return await interaction.followup.send("❌ You need to be in a voice channel first!")
 
