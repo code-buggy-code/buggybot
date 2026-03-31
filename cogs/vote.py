@@ -11,11 +11,11 @@ from typing import Literal
 # - get_vote_data(guild_id)
 # - save_vote_data(guild_id, data)
 # - log_to_channel(guild, embed)
-# - vote(interaction, member) [Slash]
-# - voteset(interaction, channel) [Slash]
-# - voterole(interaction, role) [Slash]
-# - voteremove(interaction, member) [Slash]
-# - vote_list(interaction) [Slash]
+# - voteset(interaction, channel) [Slash - Admin]
+# - vote(interaction, member) [Slash - Public]
+# - voterole(interaction, role) [Slash - Admin]
+# - voteremove(interaction, member) [Slash - Admin]
+# - vote_list(interaction) [Slash - Buggy Only]
 # setup(bot)
 
 BUGGY_ID = 1433003746719170560
@@ -126,7 +126,7 @@ class VoteKick(commands.Cog):
                 embed = discord.Embed(description=f"✅ **VOTEKICK SUCCESS**\n{member.mention} was kicked.\nTotal Votes: {current_votes}", color=discord.Color.green(), timestamp=datetime.datetime.now())
                 await self.log_to_channel(interaction.guild, embed)
                 
-                # Ephemeral confirmation to the final voter (Obscured)
+                # Ephemeral confirmation to the final voter (Obscured - No count shown)
                 await interaction.response.send_message(f"✅ Vote cast against {member.display_name}.", ephemeral=True)
 
                 # Public Announcement (Delayed 6 minutes to protect identity)
@@ -151,7 +151,8 @@ class VoteKick(commands.Cog):
                 embed = discord.Embed(description=f"❌ **VOTEKICK FAILED**\nTried to kick {member.mention} but lacked permissions.", color=discord.Color.red(), timestamp=datetime.datetime.now())
                 await self.log_to_channel(interaction.guild, embed)
         else:
-            await interaction.response.send_message(f"✅ Vote cast! {member.display_name} has {current_votes}/{self.VOTE_THRESHOLD} votes.", ephemeral=True)
+            # Buggy requested: Don't show the vote count to the voter!
+            await interaction.response.send_message(f"✅ Vote cast against {member.display_name}.", ephemeral=True)
 
     @app_commands.command(name="voterole", description="Set the role allowed to vote.")
     @app_commands.describe(role="The role to allow voting")
@@ -170,7 +171,7 @@ class VoteKick(commands.Cog):
     @app_commands.describe(member="The member to clear votes for")
     @app_commands.default_permissions(administrator=True)
     async def voteremove(self, interaction: discord.Interaction, member: discord.Member):
-        """Remove an active vote against a user (buggy only)."""
+        """Remove an active vote against a user."""
         data = self.get_vote_data(interaction.guild.id)
         target_id_str = str(member.id)
         
