@@ -1,3 +1,26 @@
+# --- FUNCTION LIST ---
+# 1. __init__(self, bot): Initializes the cog, starts tasks and YouTube services.
+# 2. cog_unload(self): Cancels background tasks when cog is unloaded.
+# 3. _get_secret_filename(self, slot): Returns the filename for the client secret of a given slot.
+# 4. _get_token_key(self, slot): Returns the DB key for the token of a given slot.
+# 5. execute_api_call(self, request_builder): Executes a YouTube API request with automatic rotation.
+# 6. load_config(self, guild_id): Loads music config for a specific guild from DB.
+# 7. save_config(self, guild_id, config): Saves guild config to DB.
+# 8. load_youtube_service(self): Loads all available YouTube API services from stored tokens.
+# 9. search_youtube_official(self, query): Uses the Official YouTube Data API to find a video ID.
+# 10. process_spotify_link(self, url, guild_id): Scrapes Spotify link header to find title/artist, converts to YouTube video, and adds to playlist.
+# 11. check_token_validity_task(self): Daily check for token validity.
+# 12. before_check_token(self): Waits until bot is ready before checking tokens.
+# 13. license_reminder_task(self): Checks if it's been 6 days since renewal.
+# 14. before_reminder(self): Waits until bot is ready before sending reminders.
+# 15. checkmusic(self, interaction): Checks all music API statuses.
+# 16. ytauth(self, interaction, slot): Starts the OAuth flow.
+# 17. ytcode(self, interaction, code, slot): Completes the YouTube renewal.
+# 18. playlist(self, interaction, playlist): Set the YouTube Playlist Link or ID.
+# 19. musicchannel(self, interaction, channel): Set the music sharing channel.
+# 20. removesong(self, interaction, query): Remove a song from the playlist by URL or ID.
+# 21. on_message(self, message): Listens for YouTube and Spotify links to process.
+
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -7,6 +30,8 @@ import asyncio
 import re
 import datetime
 import sys
+import aiohttp
+import html
 
 # music APIs
 from google.oauth2.credentials import Credentials
@@ -14,8 +39,6 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import Flow
-from spotipy import Spotify
-from spotipy.oauth2 import SpotifyClientCredentials
 
 class Music(commands.Cog):
     def __init__(self, bot):
@@ -23,12 +46,10 @@ class Music(commands.Cog):
 
         # List of active YouTube service objects for rotation
         self.youtube_services = [] 
-        self.spotify = None
         self.auth_flow = None
         self.auth_flow_slot = 1 # Track which slot is currently auth'ing
 
         # Start services
-        self.load_music_services()
         self.bot.loop.create_task(self.load_youtube_service())
         self.check_token_validity_task.start()
         self.license_reminder_task.start()
@@ -74,14 +95,14 @@ class Music(commands.Cog):
                 if e.resp.status == 403 and 'quotaExceeded' in str(e):
                     print(f"⚠️ Quota exceeded on License #{i+1}. Rotating...")
                     continue # Try next service
-                
+
                 # If it's not a quota error, we don't rotate, just fail
                 raise e
             except Exception as e:
                 last_error = e
                 # General connection errors might be worth retrying, but usually we fail fast
                 raise e
-        
+
         # If we ran out of services
         raise Exception(f"All YouTube licenses exhausted or failed. Last error: {last_error}")
 
@@ -106,7 +127,7 @@ class Music(commands.Cog):
     async def load_youtube_service(self):
         """Loads all available YouTube API services from stored tokens."""
         self.youtube_services = []
-        
+
         global_config = self.bot.db.get_collection("global_music_settings")
         if isinstance(global_config, list): 
             if global_config: global_config = global_config[0]
@@ -115,7 +136,7 @@ class Music(commands.Cog):
         # Check slots 1 through 5 (arbitrary limit)
         for slot in range(1, 6):
             secret_file = self._get_secret_filename(slot)
-            
+
             # Skip if no secret file for this slot
             if not os.path.exists(secret_file):
                 continue
@@ -150,32 +171,8 @@ class Music(commands.Cog):
                         print(f"✅ Loaded YouTube License Slot {slot}")
                 except Exception as e: 
                     print(f"Failed to load token for Slot {slot}: {e}")
-        
+
         return len(self.youtube_services) > 0
-
-    def load_music_services(self):
-        """Loads Spotify service only."""
-        spotify_id = None
-        spotify_secret = None
-
-        if os.path.exists('spotify.json'):
-            try:
-                with open('spotify.json', 'r') as f:
-                    secrets = json.load(f)
-                    spotify_id = secrets.get('spotify_client_id')
-                    spotify_secret = secrets.get('spotify_client_secret')
-            except Exception as e:
-                print(f"❌ Failed to load spotify.json: {e}")
-
-        if spotify_id and spotify_secret:
-            try:
-                sp_auth = SpotifyClientCredentials(client_id=spotify_id, client_secret=spotify_secret)
-                self.spotify = Spotify(auth_manager=sp_auth)
-                print("✅ Spotify Service Loaded.")
-            except Exception as e:
-                print(f"❌ Failed to load Spotify: {e}")
-        else:
-             print("⚠️ Spotify credentials not found in spotify.json.")
 
     async def search_youtube_official(self, query):
         """Uses the Official YouTube Data API to find a video ID."""
@@ -198,9 +195,8 @@ class Music(commands.Cog):
         return None
 
     async def process_spotify_link(self, url, guild_id):
-        """Converts Spotify link to YouTube video and adds to playlist."""
+        """Scrapes Spotify link to find track name, converts to YouTube video and adds to playlist."""
         errors = []
-        if not self.spotify: errors.append("Spotify service not loaded.")
         if not self.youtube_services: errors.append("YouTube API not loaded.")
 
         config = self.load_config(guild_id)
@@ -210,17 +206,26 @@ class Music(commands.Cog):
             return "Setup Errors:\n" + "\n".join([f"- {e}" for e in errors])
 
         clean_url = url.split("?")[0]
-        loop = asyncio.get_running_loop()
 
         try:
-            # 1. Get Track Info from Spotify
-            try:
-                track = await loop.run_in_executor(None, self.spotify.track, clean_url)
-            except Exception as e:
-                return f"Spotify Error: {e}"
+            # 1. Fetch the Spotify webpage to scrape the title
+            async with aiohttp.ClientSession() as session:
+                # Add a user-agent to avoid basic bot blocks
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+                async with session.get(clean_url, headers=headers) as resp:
+                    if resp.status != 200:
+                        return f"Failed to fetch Spotify page (HTTP {resp.status})."
+                    html_content = await resp.text()
 
-            search_query = f"{track['artists'][0]['name']} - {track['name']}"
+            # Find the title tag
+            title_match = re.search(r'<title.*?>(.*?)</title>', html_content, re.IGNORECASE)
+            if not title_match:
+                return "Could not extract title from Spotify page."
 
+            # Clean up the scraped title for our YouTube search
+            raw_title = html.unescape(title_match.group(1))
+            search_query = raw_title.replace(" | Spotify", "").replace(" - song and lyrics by ", " ").replace(" - song by ", " ")
+            
             # 2. Search on YouTube
             video_id = await self.search_youtube_official(search_query)
 
@@ -266,8 +271,6 @@ class Music(commands.Cog):
     @tasks.loop(hours=1)
     async def license_reminder_task(self):
         """Checks if it's been 6 days since renewal."""
-        # Note: Keeps tracking the reminder timestamp from global config.
-        # This will mostly reflect the last token renewed.
         global_config = self.bot.db.get_collection("global_music_settings")
         if isinstance(global_config, list): 
              if global_config: global_config = global_config[0]
@@ -307,25 +310,20 @@ class Music(commands.Cog):
         """Checks all music API statuses."""
         await self.load_youtube_service()
         count = len(self.youtube_services)
-        
-        yt_msg = f"✅ **YouTube:** {count} Active License(s)" if count > 0 else "❌ **YouTube:** No Licenses."
-        spot_msg = "✅ **Spotify:** Ready!" if self.spotify else "❌ **Spotify:** Not Loaded."
 
-        await interaction.response.send_message(f"{yt_msg}\n{spot_msg}", ephemeral=True)
+        yt_msg = f"✅ **YouTube:** {count} Active License(s)" if count > 0 else "❌ **YouTube:** No Licenses."
+        
+        await interaction.response.send_message(f"{yt_msg}", ephemeral=True)
 
     @app_commands.command(name="ytauth", description="Starts the OAuth flow. Specify slot number (e.g. 1, 2).")
     @app_commands.describe(slot="License slot number")
     @app_commands.default_permissions(administrator=True)
     async def ytauth(self, interaction: discord.Interaction, slot: int):
         """Starts the OAuth flow to renew YouTube license."""
-        # 1. Reload Spotify
-        self.load_music_services()
-        spot_status = "✅ **Spotify reloaded!**" if self.spotify else "❌ **Spotify NOT found!**"
-
         secret_file = self._get_secret_filename(slot)
         if not os.path.exists(secret_file):
              return await interaction.response.send_message(
-                 f"{spot_status}\n❌ Missing `{secret_file}` for Slot {slot}!", ephemeral=True
+                 f"❌ Missing `{secret_file}` for Slot {slot}!", ephemeral=True
              )
 
         try:
@@ -341,23 +339,20 @@ class Music(commands.Cog):
             cmd_mention = "`/ytcode`" # Default text fallback
             try:
                 # Fetch commands dynamically to get the ID for clickable link
-                # We try global commands first
                 cmds = await self.bot.tree.fetch_commands()
                 ytcode_cmd = discord.utils.get(cmds, name="ytcode")
-                
-                # If not found globally, try guild-specific (if applicable)
+
                 if not ytcode_cmd and interaction.guild:
                     guild_cmds = await self.bot.tree.fetch_commands(guild=interaction.guild)
                     ytcode_cmd = discord.utils.get(guild_cmds, name="ytcode")
-                
+
                 if ytcode_cmd:
-                    # Syntax: </commandname:id>
                     cmd_mention = f"</ytcode:{ytcode_cmd.id}>"
             except Exception as e:
                 print(f"Link generation failed: {e}")
 
             await interaction.response.send_message(
-                f"{spot_status}\n🔄 **YouTube API Renewal (Slot {slot})!**\n"
+                f"🔄 **YouTube API Renewal (Slot {slot})!**\n"
                 f"1. Click: [Auth Link](<{auth_url}>)\n"
                 f"2. Run: {cmd_mention} `code` `slot:{slot}`", 
                 ephemeral=True
@@ -453,17 +448,10 @@ class Music(commands.Cog):
              return await interaction.followup.send("❌ Could not parse Video ID from query.")
 
         try:
-            # Using execute_api_call for rotation safely
-            # We need to build a paginated search here, which is tricky with the lambda wrapper
-            # But we can wrap the specific calls inside the loop
-            
-            # NOTE: For complex logic like pagination where state is maintained between calls,
-            # using the wrapper for EVERY call is safest.
-            
             next_page_token = None
             target_item_id = None
             video_title = "?"
-            
+
             # Limit to 5 pages to save quota
             for _ in range(5):
                 response = await self.execute_api_call(
@@ -480,9 +468,9 @@ class Music(commands.Cog):
                         target_item_id = item['id']
                         video_title = item['snippet']['title']
                         break
-                
+
                 if target_item_id: break
-                
+
                 next_page_token = response.get('nextPageToken')
                 if not next_page_token: break
 
