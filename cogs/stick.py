@@ -86,7 +86,13 @@ class Stickies(commands.Cog):
                 sticky_data['last_posted_at'] = datetime.datetime.now().timestamp()
                 sticky_data['active'] = True
 
-                self.bot.db.update_doc("sticky_messages", "channel_id", channel.id, sticky_data)
+                # Manually save to DB to bypass any update_doc issues
+                stickies = self.get_stickies()
+                for i, s in enumerate(stickies):
+                    if int(s.get('channel_id', 0)) == channel.id:
+                        stickies[i] = sticky_data
+                        break
+                self.save_stickies(stickies)
 
             except Exception as e:
                 print(f"Failed to send sticky: {e}")
@@ -128,11 +134,12 @@ class Stickies(commands.Cog):
         now = datetime.datetime.now().timestamp()
 
         # LOGIC 1: BEFORE (Cooldown)
-        if mode == "before" and delay > 0:
-            last_posted = sticky_data.get('last_posted_at', 0)
-            if (now - last_posted) < delay:
-                return
-            # If cooldown passed, send immediately
+        if mode == "before":
+            if delay > 0:
+                last_posted = sticky_data.get('last_posted_at', 0)
+                if (now - last_posted) < delay:
+                    return
+            # If cooldown passed or delay is 0, send immediately
             await self.send_sticky(message.channel)
 
         # LOGIC 2: AFTER (Delay/Silence)
@@ -287,11 +294,17 @@ class Stickies(commands.Cog):
                 embed = discord.Embed(description=content, color=discord.Color(0xff90aa))
                 msg = await interaction.channel.send(embed=embed)
                 
-                # Ensure the first message is cached immediately
                 self.in_memory_last_stickies[interaction.channel_id] = msg.id
-                
                 new_sticky['last_message_id'] = msg.id
-                self.bot.db.update_doc("sticky_messages", "channel_id", interaction.channel_id, new_sticky)
+                
+                # Fetch stickies again to be safe and save it with the real message ID
+                stickies = self.get_stickies()
+                for i, s in enumerate(stickies):
+                    if int(s.get('channel_id', 0)) == interaction.channel_id:
+                        stickies[i] = new_sticky
+                        break
+                self.save_stickies(stickies)
+                
                 await interaction.response.send_message("✅ Sticky message added!", ephemeral=True)
             except Exception as e:
                 await interaction.response.send_message(f"❌ Failed to send sticky: {e}", ephemeral=True)
