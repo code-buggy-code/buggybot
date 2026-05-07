@@ -91,13 +91,11 @@ class DMRequests(commands.Cog):
             
             if has_role_1:
                 # Open DMs
-                embed = discord.Embed(description=f"{message.author.mention}, {target.display_name} has open dms 😐", color=discord.Color.green())
-                await message.channel.send(embed=embed)
+                await message.channel.send(f"{message.author.mention}, {target.display_name} has open dms 😐")
             
             elif has_role_2:
                 # Closed DMs
-                embed = discord.Embed(description=f"{message.author.mention}, {target.display_name} has closed dms 😐", color=discord.Color.red())
-                await message.channel.send(embed=embed)
+                await message.channel.send(f"{message.author.mention}, {target.display_name} has closed dms 😐")
             
             elif has_role_3:
                 # Reactions route
@@ -106,12 +104,10 @@ class DMRequests(commands.Cog):
                         await message.add_reaction(e)
                 except: pass
                 
-                embed = discord.Embed(description="please react to the request with your answer", color=discord.Color.blue())
-                await message.channel.send(content=target.mention, embed=embed)
+                await message.channel.send(f"{target.mention} please react to the request with your answer")
             else:
                 # No roles found
-                embed = discord.Embed(description=f"Sorry, **{target.display_name}** doesn't have DM roles set up yet. Buggy's working on this!", color=discord.Color.dark_grey())
-                await message.channel.send(embed=embed)
+                await message.channel.send(f"Sorry, **{target.display_name}** doesn't have DM roles set up yet. Buggy's working on this!")
 
     # --- EVENTS ---
 
@@ -171,29 +167,25 @@ class DMRequests(commands.Cog):
                 # We search the last 20 messages for the bot's prompt containing their mention
                 async for past_msg in channel.history(limit=20, after=message.created_at):
                     if past_msg.author == self.bot.user and target_member.mention in past_msg.content:
-                        # Ensure we're deleting the prompt embed specifically
-                        if past_msg.embeds and "please react" in str(past_msg.embeds[0].description).lower():
+                        # Ensure we're deleting the prompt specifically
+                        if "please react" in past_msg.content.lower():
                             try: await past_msg.delete()
                             except: pass
                 
-                # 3. Process the final text and colors
+                # 3. Process the final text
                 if msg_type == 0:
                     text = f"{requester.mention}, {requested_name} accepts your dm request! :D"
-                    color = discord.Color.green()
                 elif msg_type == 1:
                     text = f"{requester.mention}, {requested_name} denies your dm request. please respect their boundaries! :D"
-                    color = discord.Color.red()
                 else:
                     text = f"{requester.mention}, {requested_name} needs more info. please send another request with more detail! :D"
-                    color = discord.Color.orange()
                 
-                # 4. Send the message without ping, then edit it to contain the ping
+                # 4. Send the message without the ping first, then edit it to include the ping
                 # Automatically delete after 24 hours (86400 seconds) via Discord's delete_after
-                embed_placeholder = discord.Embed(description="Processing your answer...", color=color)
-                sent_msg = await channel.send(embed=embed_placeholder, delete_after=86400)
+                placeholder_text = "Processing your answer..."
+                sent_msg = await channel.send(content=placeholder_text, delete_after=86400)
                 
-                embed_final = discord.Embed(description=text, color=color)
-                await sent_msg.edit(content=requester.mention, embed=embed_final)
+                await sent_msg.edit(content=text)
 
         except Exception as e:
             print(f"DM Req Reaction Error: {e}")
