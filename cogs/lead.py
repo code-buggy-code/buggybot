@@ -4,7 +4,8 @@ from discord.ext import commands, tasks
 import json
 import os
 import time
-from datetime import datetime, timezone
+import datetime
+from datetime import timezone
 import asyncio
 from typing import Literal, Optional, Union
 
@@ -33,7 +34,7 @@ from typing import Literal, Optional, Union
 # - remove(interaction, member, group_num, amount) [Slash - Admin]
 # - leaderboard(interaction, group_num) [Slash - Buggy/Admin]
 # - points(interaction, user) [Slash - Public]
-# setup(bot)
+# - setup(bot)
 
 BUGGY_ID = 1433003746719170560
 
@@ -189,7 +190,6 @@ class Lead(commands.Cog):
         else:
             top_users = cache_entry['top_users']
 
-        # Updated Color to #ff90aa
         embed = discord.Embed(title=f"🏆 {group_name} Leaderboard", color=discord.Color(0xff90aa))
         
         desc = ""
@@ -203,7 +203,10 @@ class Lead(commands.Cog):
                 desc += f"{emoji} **{name}**: {points} pts\n"
         
         embed.description = desc
-        embed.set_footer(text=f"Updates every 5 minutes • Group {group_key}")
+        
+        # Now sets just the time it was updated, without labels!
+        current_time = datetime.datetime.now().strftime("%I:%M %p")
+        embed.set_footer(text=current_time)
         return embed
 
     # --- LISTENERS ---
