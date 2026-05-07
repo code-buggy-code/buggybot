@@ -27,6 +27,7 @@ from typing import Literal, Optional, Union
 # - on_voice_state_update(member, before, after)
 # - voice_time_checker()
 # - point_saver()
+# - before_point_saver()
 # - lead(interaction, action, group_num, name, reset) [Slash - Admin]
 # - track(interaction, group_num, action, channel) [Slash - Admin]
 # - setpoints(interaction, action_type, value) [Slash - Admin]
@@ -204,9 +205,9 @@ class Lead(commands.Cog):
         
         embed.description = desc
         
-        # Now sets just the time it was updated, without labels!
+        # Formatted to perfectly match: "Updates every 5 minutes • [time]"
         current_time = datetime.datetime.now().strftime("%I:%M %p")
-        embed.set_footer(text=current_time)
+        embed.set_footer(text=f"Updates every 5 minutes • {current_time}")
         return embed
 
     # --- LISTENERS ---
@@ -337,6 +338,16 @@ class Lead(commands.Cog):
                     except (discord.NotFound, discord.Forbidden):
                         group_data["last_lb_msg"] = None
                         await self.save_config(guild_id, config)
+
+    @point_saver.before_loop
+    async def before_point_saver(self):
+        """Aligns the task to start on precise 5-minute marks (e.g., :00, :05, :10)."""
+        await self.bot.wait_until_ready()
+        now = datetime.datetime.now()
+        next_minute = ((now.minute // 5) + 1) * 5
+        next_time = now.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(minutes=next_minute)
+        delay = (next_time - now).total_seconds()
+        await asyncio.sleep(delay)
 
     # --- ADMIN SLASH COMMANDS ---
 
