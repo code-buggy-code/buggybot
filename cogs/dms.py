@@ -12,15 +12,16 @@ from typing import Literal
 # - handle_dm_request(message)
 # - on_message(message)
 # - on_raw_reaction_add(payload)
-# - dmconfig(interaction, role1, role2, role3, emoji1, emoji2) [Slash]
+# - dmconfig(interaction, role1, role2, role3, emoji1, emoji2, emoji3) [Slash]
 # - dmchannel(interaction, action, channel) [Slash]
-# setup(bot)
+# - setup(bot)
 
 class DMRequests(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.description = "DM Request system."
-        self.DEFAULT_DM_REACTS = ["👍", "👎"]
+        # Added grey question mark for More Info
+        self.DEFAULT_DM_REACTS = ["👍", "👎", "❔"]
 
     # --- HELPERS ---
 
@@ -30,6 +31,9 @@ class DMRequests(commands.Cog):
         for doc in collection:
             if doc['guild_id'] == guild_id:
                 if "reacts" not in doc: doc["reacts"] = self.DEFAULT_DM_REACTS.copy()
+                # Ensure 3 emojis exist if migrated from older format
+                while len(doc["reacts"]) < 3:
+                    doc["reacts"].append(self.DEFAULT_DM_REACTS[len(doc["reacts"])])
                 if "roles" not in doc: doc["roles"] = [0, 0, 0]
                 if "channels" not in doc: doc["channels"] = []
                 return doc
@@ -80,30 +84,34 @@ class DMRequests(commands.Cog):
             target = target_member
             roles = settings['roles']
             
-            # Roles Config: [Role1_Trigger, Role2_Msg3, Role3_Msg4]
+            # Roles Config: [Role1_Open, Role2_Closed, Role3_Reactions]
             has_role_1 = any(r.id == roles[0] for r in target.roles)
             has_role_2 = any(r.id == roles[1] for r in target.roles)
             has_role_3 = any(r.id == roles[2] for r in target.roles)
             
             if has_role_1:
-                # 1. Add reactions for manual accept/deny
+                # Open DMs
+                embed = discord.Embed(description=f"{message.author.mention}, {target.display_name} has open dms 😐", color=discord.Color.green())
+                await message.channel.send(embed=embed)
+            
+            elif has_role_2:
+                # Closed DMs
+                embed = discord.Embed(description=f"{message.author.mention}, {target.display_name} has closed dms 😐", color=discord.Color.red())
+                await message.channel.send(embed=embed)
+            
+            elif has_role_3:
+                # Reactions route
                 try:
                     for e in settings['reacts']:
                         await message.add_reaction(e)
                 except: pass
                 
-                # 2. Send instruction message (No requester ping)
-                await message.channel.send(f"**{target.display_name}**, please react with the relevant emoji to accept or reject the request.")
-            
-            elif has_role_2:
-                # Auto-response 1 (No requester ping)
-                await message.channel.send(f"DM Request sent to **{target.display_name}**.")
-            elif has_role_3:
-                # Auto-response 2 (No requester ping)
-                await message.channel.send(f"DM Request sent to **{target.display_name}**.")
+                embed = discord.Embed(description="please react to the request with your answer", color=discord.Color.blue())
+                await message.channel.send(content=target.mention, embed=embed)
             else:
                 # No roles found
-                await message.channel.send(f"Sorry, **{target.display_name}** doesn't have DM roles set up yet. Buggy's working on this!")
+                embed = discord.Embed(description=f"Sorry, **{target.display_name}** doesn't have DM roles set up yet. Buggy's working on this!", color=discord.Color.dark_grey())
+                await message.channel.send(embed=embed)
 
     # --- EVENTS ---
 
@@ -131,39 +139,61 @@ class DMRequests(commands.Cog):
         try:
             message = await channel.fetch_message(payload.message_id)
             if not message.mentions: return
-            target_member = message.mentions[0] 
             
-            # Only the requested user can react to accept/deny
+            # Find the actual target safely
+            target_member = None
+            for user in message.mentions:
+                if user.bot: continue
+                target_member = user
+                break
+                
+            if not target_member: return
+            
+            # Only the requested user can react to their request
             if payload.user_id != target_member.id: return 
 
             msg_type = -1
-            if str(payload.emoji) == settings['reacts'][0]: msg_type = 1 # Accept
-            elif str(payload.emoji) == settings['reacts'][1]: msg_type = 2 # Deny
+            if str(payload.emoji) == settings['reacts'][0]: msg_type = 0 # Accept
+            elif str(payload.emoji) == settings['reacts'][1]: msg_type = 1 # Deny
+            elif str(payload.emoji) == settings['reacts'][2]: msg_type = 2 # Info
             
             if msg_type != -1:
                 requester = message.author
                 requested_name = target_member.display_name
                 
-                sent_msg = None
-                if msg_type == 1:
-                    # Accepted
-                    sent_msg = await channel.send(f"{requester.mention} Request Accepted by **{requested_name}**!")
+                # 1. Clear the two unclicked reactions
+                for e in settings['reacts']:
+                    if e != str(payload.emoji):
+                        try: await message.clear_reaction(e)
+                        except: pass
+                
+                # 2. Delete the prompt message linking to this user
+                # We search the last 20 messages for the bot's prompt containing their mention
+                async for past_msg in channel.history(limit=20, after=message.created_at):
+                    if past_msg.author == self.bot.user and target_member.mention in past_msg.content:
+                        # Ensure we're deleting the prompt embed specifically
+                        if past_msg.embeds and "please react" in str(past_msg.embeds[0].description).lower():
+                            try: await past_msg.delete()
+                            except: pass
+                
+                # 3. Process the final text and colors
+                if msg_type == 0:
+                    text = f"{requester.mention}, {requested_name} accepts your dm request! :D"
+                    color = discord.Color.green()
+                elif msg_type == 1:
+                    text = f"{requester.mention}, {requested_name} denies your dm request. please respect their boundaries! :D"
+                    color = discord.Color.red()
                 else:
-                    # Denied
-                    sent_msg = await channel.send(f"{requester.mention} Request Denied by **{requested_name}**.")
+                    text = f"{requester.mention}, {requested_name} needs more info. please send another request with more detail! :D"
+                    color = discord.Color.orange()
                 
-                # Pin the log message
-                if sent_msg:
-                    try:
-                        await sent_msg.pin()
-                    except: pass
+                # 4. Send the message without ping, then edit it to contain the ping
+                # Automatically delete after 24 hours (86400 seconds) via Discord's delete_after
+                embed_placeholder = discord.Embed(description="Processing your answer...", color=color)
+                sent_msg = await channel.send(embed=embed_placeholder, delete_after=86400)
                 
-                # Clean up reactions
-                try:
-                    for e in settings['reacts']:
-                        await message.remove_reaction(e, self.bot.user)
-                        await message.remove_reaction(e, target_member)
-                except: pass
+                embed_final = discord.Embed(description=text, color=color)
+                await sent_msg.edit(content=requester.mention, embed=embed_final)
 
         except Exception as e:
             print(f"DM Req Reaction Error: {e}")
@@ -172,29 +202,30 @@ class DMRequests(commands.Cog):
     
     @app_commands.command(name="dmconfig", description="Configure DM Request settings (Roles & Emojis).")
     @app_commands.describe(
-        role1="Role 1 (Triggers Reactions)",
-        role2="Role 2 (Auto Response 1)",
-        role3="Role 3 (Auto Response 2)",
+        role1="Role 1 (Open DMs)",
+        role2="Role 2 (Closed DMs)",
+        role3="Role 3 (Triggers Reactions)",
         emoji1="Emoji 1 (Accept)",
-        emoji2="Emoji 2 (Deny)"
+        emoji2="Emoji 2 (Deny)",
+        emoji3="Emoji 3 (More Info)"
     )
     @app_commands.default_permissions(administrator=True)
     async def dmconfig(self, interaction: discord.Interaction, 
                        role1: discord.Role, role2: discord.Role, role3: discord.Role,
-                       emoji1: str, emoji2: str):
+                       emoji1: str, emoji2: str, emoji3: str):
         
         settings = self.get_dm_settings(interaction.guild_id)
         
         settings['roles'] = [role1.id, role2.id, role3.id]
-        settings['reacts'] = [emoji1, emoji2]
-        # We no longer save custom messages
+        settings['reacts'] = [emoji1, emoji2, emoji3]
+        
         if 'messages' in settings: del settings['messages']
         
         self.save_dm_settings(interaction.guild_id, settings)
         
         embed = discord.Embed(title="✅ DM Request Config Updated", color=discord.Color(0xff90aa))
-        embed.add_field(name="Roles", value=f"1 (Reactions): {role1.mention}\n2 (Auto): {role2.mention}\n3 (Auto): {role3.mention}", inline=False)
-        embed.add_field(name="Reactions", value=f"Accept: {emoji1}\nDeny: {emoji2}", inline=False)
+        embed.add_field(name="Roles", value=f"Open: {role1.mention}\nClosed: {role2.mention}\nReactions: {role3.mention}", inline=False)
+        embed.add_field(name="Reactions", value=f"Accept: {emoji1}\nDeny: {emoji2}\nMore Info: {emoji3}", inline=False)
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
