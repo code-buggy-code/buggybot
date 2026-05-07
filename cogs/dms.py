@@ -91,14 +91,16 @@ class DMRequests(commands.Cog):
             
             if has_role_1:
                 # Open DMs
-                await message.channel.send(f"{message.author.mention}, {target.display_name} has open dms 😐")
+                msg = await message.channel.send(f"{message.author.mention}, {target.display_name} has open dms 😐")
+                await msg.edit(content=f"{message.author.mention}, {target.mention} has open dms 😐")
             
             elif has_role_2:
                 # Closed DMs
-                await message.channel.send(f"{message.author.mention}, {target.display_name} has closed dms 😐")
+                msg = await message.channel.send(f"{message.author.mention}, {target.display_name} has closed dms 😐")
+                await msg.edit(content=f"{message.author.mention}, {target.mention} has closed dms 😐")
             
             elif has_role_3:
-                # Reactions route
+                # Reactions route (we DO want to ping target here, so no display_name edit needed)
                 try:
                     for e in settings['reacts']:
                         await message.add_reaction(e)
@@ -107,7 +109,8 @@ class DMRequests(commands.Cog):
                 await message.channel.send(f"{target.mention} please react to the request with your answer")
             else:
                 # No roles found
-                await message.channel.send(f"Sorry, **{target.display_name}** doesn't have DM roles set up yet. Buggy's working on this!")
+                msg = await message.channel.send(f"Sorry, **{target.display_name}** doesn't have DM roles set up yet. Buggy's working on this!")
+                await msg.edit(content=f"Sorry, {target.mention} doesn't have DM roles set up yet. Buggy's working on this!")
 
     # --- EVENTS ---
 
@@ -174,18 +177,19 @@ class DMRequests(commands.Cog):
                 
                 # 3. Process the final text
                 if msg_type == 0:
-                    text = f"{requester.mention}, {requested_name} accepts your dm request! :D"
+                    text_initial = f"{requester.mention}, {requested_name} accepts your dm request! :D"
+                    text_final = f"{requester.mention}, {target_member.mention} accepts your dm request! :D"
                 elif msg_type == 1:
-                    text = f"{requester.mention}, {requested_name} denies your dm request. please respect their boundaries! :D"
+                    text_initial = f"{requester.mention}, {requested_name} denies your dm request. please respect their boundaries! :D"
+                    text_final = f"{requester.mention}, {target_member.mention} denies your dm request. please respect their boundaries! :D"
                 else:
-                    text = f"{requester.mention}, {requested_name} needs more info. please send another request with more detail! :D"
+                    text_initial = f"{requester.mention}, {requested_name} needs more info. please send another request with more detail! :D"
+                    text_final = f"{requester.mention}, {target_member.mention} needs more info. please send another request with more detail! :D"
                 
-                # 4. Send the message without the ping first, then edit it to include the ping
+                # 4. Send the message with display_name, then edit to mention to prevent a double ping
                 # Automatically delete after 24 hours (86400 seconds) via Discord's delete_after
-                placeholder_text = "Processing your answer..."
-                sent_msg = await channel.send(content=placeholder_text, delete_after=86400)
-                
-                await sent_msg.edit(content=text)
+                sent_msg = await channel.send(content=text_initial, delete_after=86400)
+                await sent_msg.edit(content=text_final)
 
         except Exception as e:
             print(f"DM Req Reaction Error: {e}")
