@@ -15,12 +15,11 @@
 # 14. license_reminder_task(self): Checks if it's been 6 days since renewal.
 # 15. before_reminder(self): Waits until bot is ready before sending reminders.
 # 16. checkmusic(self, interaction): Checks all music API statuses.
-# 17. ytauth(self, interaction): Auto-finds oldest license and starts the OAuth flow.
-# 18. ytcode(self, interaction, code): Completes the YouTube renewal using pending state.
-# 19. playlist(self, interaction, playlist): Set the YouTube Playlist Link or ID.
-# 20. musicchannel(self, interaction, channel): Set the music sharing channel.
-# 21. removesong(self, interaction, query): Remove a song from the playlist by URL or ID.
-# 22. on_message(self, message): Listens for YouTube and Spotify links to process.
+# 17. ytauth(self, interaction, code): Auto-finds oldest license and starts the OAuth flow, or completes the renewal if a code is provided.
+# 18. playlist(self, interaction, playlist): Set the YouTube Playlist Link or ID.
+# 19. musicchannel(self, interaction, channel): Set the music sharing channel.
+# 20. removesong(self, interaction, query): Remove a song from the playlist by URL or ID.
+# 21. on_message(self, message): Listens for YouTube and Spotify links to process.
 
 import discord
 from discord.ext import commands, tasks
@@ -340,7 +339,7 @@ class Music(commands.Cog):
                         "⚠️ **YouTube License Reminder!**\n"
                         "It has been 6 days since you renewed a YouTube license. "
                         "It expires in roughly 24 hours.\n\n"
-                        "Please run `/ytauth` and then `/ytcode` again soon to keep the music playing!"
+                        "Please run `/ytauth` to get a link and then run it again with your code soon to keep the music playing!"
                     )
                 except Exception as e:
                     print(f"Failed to DM user for license reminder: {e}")
@@ -365,74 +364,24 @@ class Music(commands.Cog):
         
         await interaction.response.send_message(f"{yt_msg}", ephemeral=True)
 
-    @app_commands.command(name="ytauth", description="Get a renewal link for the oldest YouTube license.")
+    @app_commands.command(name="ytauth", description="Get a renewal link or submit a code to renew a YouTube license.")
+    @app_commands.describe(code="The authorization code (leave blank to get a new link)")
     @app_commands.default_permissions(administrator=True)
-    async def ytauth(self, interaction: discord.Interaction):
-        """Starts the OAuth flow to renew the oldest YouTube license."""
-        slot = self._get_oldest_license_slot()
-        if not slot:
-            return await interaction.response.send_message(
-                "❌ No `client_secret` files found in any slot. Please add credentials first!", 
-                ephemeral=True
-            )
-
-        secret_file = self._get_secret_filename(slot)
-
-        try:
-            flow = Flow.from_client_secrets_file(
-                secret_file,
-                scopes=['https://www.googleapis.com/auth/youtube'],
-                redirect_uri='urn:ietf:wg:oauth:2.0:oob'
-            )
-            auth_url, _ = flow.authorization_url(prompt='consent')
-
-            # Save the flow and slot to this user's state
-            self.pending_renewals[interaction.user.id] = {
-                "slot": slot,
-                "flow": flow
-            }
-
-            # UX FIX: Clickable Command Link
-            cmd_mention = "`/ytcode`" # Default text fallback
-            try:
-                cmds = await self.bot.tree.fetch_commands()
-                ytcode_cmd = discord.utils.get(cmds, name="ytcode")
-
-                if not ytcode_cmd and interaction.guild:
-                    guild_cmds = await self.bot.tree.fetch_commands(guild=interaction.guild)
-                    ytcode_cmd = discord.utils.get(guild_cmds, name="ytcode")
-
-                if ytcode_cmd:
-                    cmd_mention = f"</ytcode:{ytcode_cmd.id}>"
-            except Exception as e:
-                print(f"Link generation failed: {e}")
-
-            await interaction.response.send_message(
-                f"🔄 **YouTube API Renewal (Slot {slot} - Oldest License)!**\n"
-                f"1. Click: [Auth Link](<{auth_url}>)\n"
-                f"2. Run: {cmd_mention} `code:[your_code]`", 
-                ephemeral=True
-            )
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
-
-    @app_commands.command(name="ytcode", description="Apply a code to the last requested YouTube license.")
-    @app_commands.describe(code="The authorization code (optional)")
-    @app_commands.default_permissions(administrator=True)
-    async def ytcode(self, interaction: discord.Interaction, code: str = None):
-        """Completes the YouTube renewal using pending state."""
-        pending_data = self.pending_renewals.get(interaction.user.id)
-
-        if not pending_data:
-            return await interaction.response.send_message(
-                "❌ I don't remember sending you an authorization link recently. Please run `/ytauth` first.", 
-                ephemeral=True
-            )
-
-        slot = pending_data["slot"]
-        flow = pending_data["flow"]
-
+    async def ytauth(self, interaction: discord.Interaction, code: str = None):
+        """Starts the OAuth flow or completes the renewal if a code is provided."""
+        
         if code:
+            # --- SUBMITTING A CODE ---
+            pending_data = self.pending_renewals.get(interaction.user.id)
+            if not pending_data:
+                return await interaction.response.send_message(
+                    "❌ I don't remember sending you an authorization link recently. Please run `/ytauth` without a code first to get a link.", 
+                    ephemeral=True
+                )
+
+            slot = pending_data["slot"]
+            flow = pending_data["flow"]
+
             try:
                 flow.fetch_token(code=code)
 
@@ -464,13 +413,55 @@ class Music(commands.Cog):
                 )
             except Exception as e:
                 await interaction.response.send_message(f"❌ Error applying code: {e}", ephemeral=True)
+
         else:
-            # Check Status Behavior
-            await interaction.response.send_message(
-                f"ℹ️ **Status:** You are currently renewing the license for **Slot {slot}**.\n"
-                f"Please obtain the authorization code from the link provided in `/ytauth` and run `/ytcode code:[your_code]` to complete the process.",
-                ephemeral=True
-            )
+            # --- GETTING THE LINK ---
+            slot = self._get_oldest_license_slot()
+            if not slot:
+                return await interaction.response.send_message(
+                    "❌ No `client_secret` files found in any slot. Please add credentials first!", 
+                    ephemeral=True
+                )
+
+            secret_file = self._get_secret_filename(slot)
+
+            try:
+                flow = Flow.from_client_secrets_file(
+                    secret_file,
+                    scopes=['https://www.googleapis.com/auth/youtube'],
+                    redirect_uri='urn:ietf:wg:oauth:2.0:oob'
+                )
+                auth_url, _ = flow.authorization_url(prompt='consent')
+
+                # Save the flow and slot to this user's state
+                self.pending_renewals[interaction.user.id] = {
+                    "slot": slot,
+                    "flow": flow
+                }
+
+                # UX FIX: Clickable Command Link
+                cmd_mention = "`/ytauth`" # Default text fallback
+                try:
+                    cmds = await self.bot.tree.fetch_commands()
+                    ytauth_cmd = discord.utils.get(cmds, name="ytauth")
+
+                    if not ytauth_cmd and interaction.guild:
+                        guild_cmds = await self.bot.tree.fetch_commands(guild=interaction.guild)
+                        ytauth_cmd = discord.utils.get(guild_cmds, name="ytauth")
+
+                    if ytauth_cmd:
+                        cmd_mention = f"</ytauth:{ytauth_cmd.id}>"
+                except Exception as e:
+                    print(f"Link generation failed: {e}")
+
+                await interaction.response.send_message(
+                    f"🔄 **YouTube API Renewal (Slot {slot} - Oldest License)!**\n"
+                    f"1. Click: [Auth Link](<{auth_url}>)\n"
+                    f"2. Run: {cmd_mention} `code:[your_code]`", 
+                    ephemeral=True
+                )
+            except Exception as e:
+                await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
     @app_commands.command(name="playlist", description="Set the YouTube Playlist Link or ID.")
     @app_commands.describe(playlist="The YouTube Playlist Link or ID")
