@@ -1,25 +1,26 @@
 # --- FUNCTION LIST ---
-# 1. __init__(self, bot): Initializes the cog, starts tasks and YouTube services.
+# 1. __init__(self, bot): Initializes the cog, starts tasks, sets up state tracking, and YouTube services.
 # 2. cog_unload(self): Cancels background tasks when cog is unloaded.
 # 3. _get_secret_filename(self, slot): Returns the filename for the client secret of a given slot.
 # 4. _get_token_key(self, slot): Returns the DB key for the token of a given slot.
-# 5. execute_api_call(self, request_builder): Executes a YouTube API request with automatic rotation.
-# 6. load_config(self, guild_id): Loads music config for a specific guild from DB.
-# 7. save_config(self, guild_id, config): Saves guild config to DB.
-# 8. load_youtube_service(self): Loads all available YouTube API services from stored tokens.
-# 9. search_youtube_official(self, query): Uses the Official YouTube Data API to find a video ID.
-# 10. process_spotify_link(self, url, guild_id): Scrapes Spotify link header to find title/artist, converts to YouTube video, and adds to playlist.
-# 11. check_token_validity_task(self): Daily check for token validity.
-# 12. before_check_token(self): Waits until bot is ready before checking tokens.
-# 13. license_reminder_task(self): Checks if it's been 6 days since renewal.
-# 14. before_reminder(self): Waits until bot is ready before sending reminders.
-# 15. checkmusic(self, interaction): Checks all music API statuses.
-# 16. ytauth(self, interaction, slot): Starts the OAuth flow.
-# 17. ytcode(self, interaction, code, slot): Completes the YouTube renewal.
-# 18. playlist(self, interaction, playlist): Set the YouTube Playlist Link or ID.
-# 19. musicchannel(self, interaction, channel): Set the music sharing channel.
-# 20. removesong(self, interaction, query): Remove a song from the playlist by URL or ID.
-# 21. on_message(self, message): Listens for YouTube and Spotify links to process.
+# 5. _get_oldest_license_slot(self): Analyzes token expiries to return the slot number of the oldest license.
+# 6. execute_api_call(self, request_builder): Executes a YouTube API request with automatic rotation.
+# 7. load_config(self, guild_id): Loads music config for a specific guild from DB.
+# 8. save_config(self, guild_id, config): Saves guild config to DB.
+# 9. load_youtube_service(self): Loads all available YouTube API services from stored tokens.
+# 10. search_youtube_official(self, query): Uses the Official YouTube Data API to find a video ID.
+# 11. process_spotify_link(self, url, guild_id): Scrapes Spotify link header to find title/artist, converts to YouTube video, and adds to playlist.
+# 12. check_token_validity_task(self): Daily check for token validity.
+# 13. before_check_token(self): Waits until bot is ready before checking tokens.
+# 14. license_reminder_task(self): Checks if it's been 6 days since renewal.
+# 15. before_reminder(self): Waits until bot is ready before sending reminders.
+# 16. checkmusic(self, interaction): Checks all music API statuses.
+# 17. ytauth(self, interaction): Auto-finds oldest license and starts the OAuth flow.
+# 18. ytcode(self, interaction, code): Completes the YouTube renewal using pending state.
+# 19. playlist(self, interaction, playlist): Set the YouTube Playlist Link or ID.
+# 20. musicchannel(self, interaction, channel): Set the music sharing channel.
+# 21. removesong(self, interaction, query): Remove a song from the playlist by URL or ID.
+# 22. on_message(self, message): Listens for YouTube and Spotify links to process.
 
 import discord
 from discord.ext import commands, tasks
@@ -46,8 +47,9 @@ class Music(commands.Cog):
 
         # List of active YouTube service objects for rotation
         self.youtube_services = [] 
-        self.auth_flow = None
-        self.auth_flow_slot = 1 # Track which slot is currently auth'ing
+        
+        # Dictionary mapping User ID to their pending renewal data (slot and flow)
+        self.pending_renewals = {}
 
         # Start services
         self.bot.loop.create_task(self.load_youtube_service())
@@ -67,6 +69,54 @@ class Music(commands.Cog):
     def _get_token_key(self, slot):
         """Returns the DB key for the token of a given slot."""
         return 'youtube_token_json' if slot == 1 else f'youtube_token_{slot}_json'
+
+    def _get_oldest_license_slot(self):
+        """Analyzes token expiries to return the slot number of the oldest license."""
+        global_config = self.bot.db.get_collection("global_music_settings")
+        if isinstance(global_config, list): 
+            global_config = global_config[0] if global_config else {}
+            
+        oldest_slot = None
+        oldest_time = None
+        
+        for slot in range(1, 6):
+            secret_file = self._get_secret_filename(slot)
+            if not os.path.exists(secret_file):
+                continue
+                
+            token_key = self._get_token_key(slot)
+            token_json = global_config.get(token_key)
+            
+            # Fallback to local file for Slot 1 only (legacy support)
+            if slot == 1 and not token_json and os.path.exists('token.json'):
+                try:
+                    with open('token.json', 'r') as f:
+                        token_json = f.read()
+                except: pass
+                
+            if not token_json:
+                # If a secret exists but no token does, this needs authorization the most!
+                return slot
+                
+            try:
+                info = json.loads(token_json)
+                expiry_str = info.get("expiry")
+                if expiry_str:
+                    # Clean the ISO string if it has a 'Z' at the end
+                    expiry_str = expiry_str.replace("Z", "+00:00")
+                    expiry_dt = datetime.datetime.fromisoformat(expiry_str)
+                    
+                    if oldest_time is None or expiry_dt < oldest_time:
+                        oldest_time = expiry_dt
+                        oldest_slot = slot
+                else:
+                    # Token exists but has no expiry date; treat as unauthorized
+                    return slot
+            except Exception:
+                # Corrupt token; prioritize for re-auth
+                return slot
+                
+        return oldest_slot
 
     async def execute_api_call(self, request_builder):
         """
@@ -315,30 +365,36 @@ class Music(commands.Cog):
         
         await interaction.response.send_message(f"{yt_msg}", ephemeral=True)
 
-    @app_commands.command(name="ytauth", description="Starts the OAuth flow. Specify slot number (e.g. 1, 2).")
-    @app_commands.describe(slot="License slot number")
+    @app_commands.command(name="ytauth", description="Get a renewal link for the oldest YouTube license.")
     @app_commands.default_permissions(administrator=True)
-    async def ytauth(self, interaction: discord.Interaction, slot: int):
-        """Starts the OAuth flow to renew YouTube license."""
+    async def ytauth(self, interaction: discord.Interaction):
+        """Starts the OAuth flow to renew the oldest YouTube license."""
+        slot = self._get_oldest_license_slot()
+        if not slot:
+            return await interaction.response.send_message(
+                "❌ No `client_secret` files found in any slot. Please add credentials first!", 
+                ephemeral=True
+            )
+
         secret_file = self._get_secret_filename(slot)
-        if not os.path.exists(secret_file):
-             return await interaction.response.send_message(
-                 f"❌ Missing `{secret_file}` for Slot {slot}!", ephemeral=True
-             )
 
         try:
-            self.auth_flow = Flow.from_client_secrets_file(
+            flow = Flow.from_client_secrets_file(
                 secret_file,
                 scopes=['https://www.googleapis.com/auth/youtube'],
                 redirect_uri='urn:ietf:wg:oauth:2.0:oob'
             )
-            self.auth_flow_slot = slot # Remember which slot we are auth'ing
-            auth_url, _ = self.auth_flow.authorization_url(prompt='consent')
+            auth_url, _ = flow.authorization_url(prompt='consent')
 
-            # --- UX FIX: Clickable Command Link ---
+            # Save the flow and slot to this user's state
+            self.pending_renewals[interaction.user.id] = {
+                "slot": slot,
+                "flow": flow
+            }
+
+            # UX FIX: Clickable Command Link
             cmd_mention = "`/ytcode`" # Default text fallback
             try:
-                # Fetch commands dynamically to get the ID for clickable link
                 cmds = await self.bot.tree.fetch_commands()
                 ytcode_cmd = discord.utils.get(cmds, name="ytcode")
 
@@ -352,50 +408,69 @@ class Music(commands.Cog):
                 print(f"Link generation failed: {e}")
 
             await interaction.response.send_message(
-                f"🔄 **YouTube API Renewal (Slot {slot})!**\n"
+                f"🔄 **YouTube API Renewal (Slot {slot} - Oldest License)!**\n"
                 f"1. Click: [Auth Link](<{auth_url}>)\n"
-                f"2. Run: {cmd_mention} `code` `slot:{slot}`", 
+                f"2. Run: {cmd_mention} `code:[your_code]`", 
                 ephemeral=True
             )
         except Exception as e:
             await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
-    @app_commands.command(name="ytcode", description="Completes the YouTube renewal.")
-    @app_commands.describe(code="The code from the Auth Link", slot="License slot number")
+    @app_commands.command(name="ytcode", description="Apply a code to the last requested YouTube license.")
+    @app_commands.describe(code="The authorization code (optional)")
     @app_commands.default_permissions(administrator=True)
-    async def ytcode(self, interaction: discord.Interaction, code: str, slot: int):
-        """Completes the YouTube renewal with the code."""
-        if not self.auth_flow:
-            return await interaction.response.send_message("❌ Run `/ytauth` first!", ephemeral=True)
+    async def ytcode(self, interaction: discord.Interaction, code: str = None):
+        """Completes the YouTube renewal using pending state."""
+        pending_data = self.pending_renewals.get(interaction.user.id)
 
-        if slot != self.auth_flow_slot:
-            return await interaction.response.send_message(f"❌ You started auth for Slot {self.auth_flow_slot}, but submitted for Slot {slot}. Please match them.", ephemeral=True)
+        if not pending_data:
+            return await interaction.response.send_message(
+                "❌ I don't remember sending you an authorization link recently. Please run `/ytauth` first.", 
+                ephemeral=True
+            )
 
-        try:
-            self.auth_flow.fetch_token(code=code)
+        slot = pending_data["slot"]
+        flow = pending_data["flow"]
 
-            # Save Token for specific slot
-            global_config = self.bot.db.get_collection("global_music_settings")
-            if isinstance(global_config, list):
-                 if global_config: global_config = global_config[0]
-                 else: global_config = {}
+        if code:
+            try:
+                flow.fetch_token(code=code)
 
-            token_key = self._get_token_key(slot)
-            global_config[token_key] = self.auth_flow.credentials.to_json()
+                # Save Token for specific slot
+                global_config = self.bot.db.get_collection("global_music_settings")
+                if isinstance(global_config, list):
+                     if global_config: global_config = global_config[0]
+                     else: global_config = {}
 
-            # Reminder Setup (Updates the timestamp to now + 6 days)
-            reminder_time = datetime.datetime.now().timestamp() + (6 * 24 * 60 * 60)
-            global_config['reminder_timestamp'] = reminder_time
-            global_config['reminder_user_id'] = interaction.user.id
-            global_config['reminder_sent'] = False
+                token_key = self._get_token_key(slot)
+                global_config[token_key] = flow.credentials.to_json()
 
-            self.bot.db.save_collection("global_music_settings", global_config)
+                # Reminder Setup (Updates the timestamp to now + 6 days)
+                reminder_time = datetime.datetime.now().timestamp() + (6 * 24 * 60 * 60)
+                global_config['reminder_timestamp'] = reminder_time
+                global_config['reminder_user_id'] = interaction.user.id
+                global_config['reminder_sent'] = False
 
-            await self.load_youtube_service()
-            active_count = len(self.youtube_services)
-            await interaction.response.send_message(f"✅ **Success!** License for Slot {slot} renewed. Total Active Licenses: {active_count}", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+                self.bot.db.save_collection("global_music_settings", global_config)
+
+                # Clear state on success
+                del self.pending_renewals[interaction.user.id]
+
+                await self.load_youtube_service()
+                active_count = len(self.youtube_services)
+                await interaction.response.send_message(
+                    f"✅ **Success!** License for Slot {slot} renewed. Total Active Licenses: {active_count}", 
+                    ephemeral=True
+                )
+            except Exception as e:
+                await interaction.response.send_message(f"❌ Error applying code: {e}", ephemeral=True)
+        else:
+            # Check Status Behavior
+            await interaction.response.send_message(
+                f"ℹ️ **Status:** You are currently renewing the license for **Slot {slot}**.\n"
+                f"Please obtain the authorization code from the link provided in `/ytauth` and run `/ytcode code:[your_code]` to complete the process.",
+                ephemeral=True
+            )
 
     @app_commands.command(name="playlist", description="Set the YouTube Playlist Link or ID.")
     @app_commands.describe(playlist="The YouTube Playlist Link or ID")
