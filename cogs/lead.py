@@ -1,3 +1,31 @@
+# Function/Class List:
+# class Lead(commands.Cog)
+# - __init__(self, bot)
+# - cog_unload(self)
+# - get_config(self, guild_id)
+# - save_config(self, guild_id, config)
+# - update_user_points(self, guild_id, group_key, user_id, points)
+# - get_group_points(self, guild_id, group_key)
+# - get_user_points(self, guild_id, user_id)
+# - clear_points_by_group(self, guild_id, group_key)
+# - get_tracked_groups(self, channel, config)
+# - add_points_to_cache(self, user_id, guild_id, group_key, points)
+# - create_leaderboard_embed(self, guild, group_key, group_data)
+# - on_message(self, message)
+# - on_reaction_add(self, reaction, user)
+# - on_voice_state_update(self, member, before, after)
+# - voice_time_checker(self)
+# - point_saver(self)
+# - before_point_saver(self)
+# - lead(self, interaction, action, group_num, name, reset)
+# - track(self, interaction, group_num, action, channel)
+# - setpoints(self, interaction, action_type, value)
+# - lead_award(self, interaction, member, group_num, amount)
+# - lead_deduct(self, interaction, member, group_num, amount)
+# - show_leaderboard(self, interaction, group_num)
+# - points(self, interaction, user)
+# - setup(bot)
+
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -8,34 +36,6 @@ import datetime
 from datetime import timezone
 import asyncio
 from typing import Literal, Optional, Union
-
-# Function/Class List:
-# class Lead(commands.Cog)
-# - __init__(bot)
-# - cog_unload()
-# - get_config(guild_id)
-# - save_config(guild_id, config)
-# - update_user_points(guild_id, group_key, user_id, points)
-# - get_group_points(guild_id, group_key)
-# - get_user_points(guild_id, user_id)
-# - clear_points_by_group(guild_id, group_key)
-# - get_tracked_groups(channel, config)
-# - add_points_to_cache(user_id, guild_id, group_key, points)
-# - create_leaderboard_embed(guild, group_key, group_data)
-# - on_message(message)
-# - on_reaction_add(reaction, user)
-# - on_voice_state_update(member, before, after)
-# - voice_time_checker()
-# - point_saver()
-# - before_point_saver()
-# - lead(interaction, action, group_num, name, reset) [Slash - Admin]
-# - track(interaction, group_num, action, channel) [Slash - Admin]
-# - setpoints(interaction, action_type, value) [Slash - Admin]
-# - award(interaction, member, group_num, amount) [Slash - Admin]
-# - remove(interaction, member, group_num, amount) [Slash - Admin]
-# - leaderboard(interaction, group_num) [Slash - Buggy/Admin]
-# - points(interaction, user) [Slash - Public]
-# - setup(bot)
 
 BUGGY_ID = 1433003746719170560
 
@@ -301,12 +301,15 @@ class Lead(commands.Cog):
 
     @tasks.loop(seconds=300.0)
     async def point_saver(self):
-        if self.point_cache:
-            for guild_id, groups in self.point_cache.items():
+        # We copy the cache then clear it so we don't drop points awarded during the saves
+        cache_copy = self.point_cache.copy()
+        self.point_cache = {}
+        
+        if cache_copy:
+            for guild_id, groups in cache_copy.items():
                 for group_key, users in groups.items():
                     for user_id, points in users.items():
                         await self.update_user_points(guild_id, group_key, user_id, points)
-            self.point_cache = {}
 
         configs = self.bot.db.get_collection("leaderboard_configs")
         if isinstance(configs, list): configs = {}
@@ -343,11 +346,12 @@ class Lead(commands.Cog):
     async def before_point_saver(self):
         """Aligns the task to start on precise 5-minute marks (e.g., :00, :05, :10)."""
         await self.bot.wait_until_ready()
-        now = datetime.datetime.now()
-        next_minute = ((now.minute // 5) + 1) * 5
-        next_time = now.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(minutes=next_minute)
+        now = datetime.datetime.now(timezone.utc)
+        minutes_to_add = 5 - (now.minute % 5)
+        next_time = now + datetime.timedelta(minutes=minutes_to_add)
+        next_time = next_time.replace(second=0, microsecond=0)
         delay = (next_time - now).total_seconds()
-        await asyncio.sleep(delay)
+        await asyncio.sleep(max(0, delay))
 
     # --- ADMIN SLASH COMMANDS ---
 
