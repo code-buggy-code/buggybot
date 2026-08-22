@@ -121,6 +121,25 @@ class Lead(commands.Cog):
         self.bot.db.save_collection("leaderboard_points", new_collection)
         return initial_count - len(new_collection)
 
+    async def remove_user_points(self, guild_id, user_id):
+        """Purges all stored and cached points for a user in a specific guild."""
+        guild_id = str(guild_id)
+        user_id = str(user_id)
+        
+        # 1. Remove from database collection
+        collection = self.bot.db.get_collection("leaderboard_points")
+        new_collection = [
+            doc for doc in collection 
+            if not (doc.get("guild_id") == guild_id and doc.get("user_id") == user_id)
+        ]
+        self.bot.db.save_collection("leaderboard_points", new_collection)
+
+        # 2. Clear from live point cache
+        if guild_id in self.point_cache:
+            for group_key in list(self.point_cache[guild_id].keys()):
+                if user_id in self.point_cache[guild_id][group_key]:
+                    del self.point_cache[guild_id][group_key][user_id]
+
     # --- HELPERS ---
 
     def get_tracked_groups(self, channel, config):
@@ -169,12 +188,26 @@ class Lead(commands.Cog):
         if not top_users:
             desc = "No points recorded yet."
         else:
-            for rank, (uid, points) in enumerate(top_users, 1):
+            rank = 0
+            for uid, points in top_users:
                 user = guild.get_member(int(uid))
-                # Using <@{uid}> lets Discord render the name natively even if the bot hasn't cached them!
-                name = user.display_name if user else f"<@{uid}>"
+                if not user:
+                    try:
+                        user = await guild.fetch_member(int(uid))
+                    except (discord.NotFound, discord.HTTPException):
+                        user = None
+
+                # If user is no longer in the guild, purge their data and skip them
+                if not user:
+                    await self.remove_user_points(guild_id, uid)
+                    continue
+
+                rank += 1
                 emoji = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"**#{rank}**")
-                desc += f"{emoji} **{name}**: {points} pts\n"
+                desc += f"{emoji} **{user.display_name}**: {points} pts\n"
+            
+            if not desc:
+                desc = "No points recorded yet."
         
         embed.description = desc
         
@@ -237,6 +270,12 @@ class Lead(commands.Cog):
                 'guild_id': member.guild.id,
                 'channel_id': after.channel.id
             }
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member):
+        """Automatically purges user data when a member leaves, is kicked, or is banned."""
+        if member.guild:
+            await self.remove_user_points(member.guild.id, member.id)
 
     # --- TASKS ---
 
