@@ -1,31 +1,3 @@
-# Function/Class List:
-# class Lead(commands.Cog)
-# - __init__(self, bot)
-# - cog_unload(self)
-# - get_config(self, guild_id)
-# - save_config(self, guild_id, config)
-# - update_user_points(self, guild_id, group_key, user_id, points)
-# - get_group_points(self, guild_id, group_key)
-# - get_user_points(self, guild_id, user_id)
-# - clear_points_by_group(self, guild_id, group_key)
-# - get_tracked_groups(self, channel, config)
-# - add_points_to_cache(self, user_id, guild_id, group_key, points)
-# - create_leaderboard_embed(self, guild, group_key, group_data)
-# - on_message(self, message)
-# - on_reaction_add(self, reaction, user)
-# - on_voice_state_update(self, member, before, after)
-# - voice_time_checker(self)
-# - point_saver(self)
-# - before_point_saver(self)
-# - lead(self, interaction, action, group_num, name, reset)
-# - track(self, interaction, group_num, action, channel)
-# - setpoints(self, interaction, action_type, value)
-# - lead_award(self, interaction, member, group_num, amount)
-# - lead_deduct(self, interaction, member, group_num, amount)
-# - show_leaderboard(self, interaction, group_num)
-# - points(self, interaction, user)
-# - setup(bot)
-
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -199,14 +171,15 @@ class Lead(commands.Cog):
         else:
             for rank, (uid, points) in enumerate(top_users, 1):
                 user = guild.get_member(int(uid))
-                name = user.display_name if user else "Unknown User"
+                # Using <@{uid}> lets Discord render the name natively even if the bot hasn't cached them!
+                name = user.display_name if user else f"<@{uid}>"
                 emoji = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"**#{rank}**")
                 desc += f"{emoji} **{name}**: {points} pts\n"
         
         embed.description = desc
         
-        # Formatted to perfectly match: "Updates every 5 minutes • [time]"
-        current_time = datetime.datetime.now().strftime("%I:%M %p")
+        # Formatted to perfectly match: "Updates every 5 minutes • MM/DD • [time]"
+        current_time = datetime.datetime.now().strftime("%m/%d • %I:%M %p")
         embed.set_footer(text=f"Updates every 5 minutes • {current_time}")
         return embed
 
@@ -316,7 +289,10 @@ class Lead(commands.Cog):
 
         for guild_id in list(configs.keys()):
             config = configs[guild_id]
-            guild = self.bot.get_guild(int(guild_id))
+            try:
+                guild = self.bot.get_guild(int(guild_id))
+            except ValueError:
+                continue
             if not guild: continue
 
             if guild_id not in self.leaderboard_cache:
@@ -333,14 +309,37 @@ class Lead(commands.Cog):
                 lb_info = group_data.get("last_lb_msg")
                 if lb_info:
                     try:
-                        chan = guild.get_channel(lb_info['channel_id'])
+                        # Ensures IDs are correctly formatted as integers
+                        chan_id = int(lb_info['channel_id'])
+                        msg_id = int(lb_info['message_id'])
+                        
+                        chan = guild.get_channel(chan_id)
+                        if not chan:
+                            # Fallback if channel isn't cached yet (common on restarts or with threads)
+                            try:
+                                chan = await guild.fetch_channel(chan_id)
+                            except (discord.NotFound, discord.Forbidden):
+                                chan = None
+
                         if chan:
-                            msg = await chan.fetch_message(lb_info['message_id'])
+                            msg = await chan.fetch_message(msg_id)
                             embed = await self.create_leaderboard_embed(guild, group_key, group_data)
                             await msg.edit(embed=embed)
-                    except (discord.NotFound, discord.Forbidden):
+                        else:
+                            # The channel no longer exists or the bot can't see it
+                            group_data["last_lb_msg"] = None
+                            await self.save_config(guild_id, config)
+                            
+                    except discord.NotFound:
+                        # The leaderboard message was deleted
                         group_data["last_lb_msg"] = None
                         await self.save_config(guild_id, config)
+                    except discord.Forbidden:
+                        # Bot lost permissions to the channel
+                        pass
+                    except Exception as e:
+                        # Catch-all prevents the task loop from dying silently if Discord has an API issue
+                        print(f"[Lead] Error updating leaderboard msg in guild {guild_id}: {e}")
 
     @point_saver.before_loop
     async def before_point_saver(self):
@@ -369,6 +368,8 @@ class Lead(commands.Cog):
                    name: Optional[str] = None,
                    reset: Optional[bool] = False):
         """Manage leaderboard groups."""
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This command must be used in a server.", ephemeral=True)
         
         # --- 1. ADD ---
         if action == "Add":
@@ -481,6 +482,9 @@ class Lead(commands.Cog):
                     action: Literal["Add", "Remove"], 
                     channel: Union[discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel]):
         """Manage channels to track."""
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This command must be used in a server.", ephemeral=True)
+
         config = await self.get_config(interaction.guild_id)
         group_key = str(group_num)
 
@@ -517,6 +521,9 @@ class Lead(commands.Cog):
                         action_type: Literal["message", "attachment", "voice_minute", "reaction_add", "reaction_receive"],
                         value: int):
         """Configure point values for specific actions."""
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This command must be used in a server.", ephemeral=True)
+
         config = await self.get_config(interaction.guild_id)
         
         # Ensure point_values dict exists (migration safety)
@@ -534,6 +541,9 @@ class Lead(commands.Cog):
     @app_commands.describe(member="The user to award", group_num="The Group ID to award points in", amount="Points to give")
     @app_commands.default_permissions(administrator=True)
     async def lead_award(self, interaction: discord.Interaction, member: discord.Member, group_num: int, amount: int):
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This command must be used in a server.", ephemeral=True)
+
         config = await self.get_config(interaction.guild_id)
         group_key = str(group_num)
         
@@ -550,6 +560,9 @@ class Lead(commands.Cog):
     @app_commands.describe(member="The user to remove points from", group_num="The Group ID", amount="Points to remove")
     @app_commands.default_permissions(administrator=True)
     async def lead_deduct(self, interaction: discord.Interaction, member: discord.Member, group_num: int, amount: int):
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This command must be used in a server.", ephemeral=True)
+
         config = await self.get_config(interaction.guild_id)
         group_key = str(group_num)
         
@@ -569,7 +582,12 @@ class Lead(commands.Cog):
     @app_commands.describe(group_num="The Group ID (Default: 1)")
     async def show_leaderboard(self, interaction: discord.Interaction, group_num: int = 1):
         """Show the leaderboard."""
-        if interaction.user.id != BUGGY_ID and not interaction.user.guild_permissions.administrator:
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This command must be used in a server.", ephemeral=True)
+
+        # Administrator check explicitly since it's a public command technically
+        is_admin = interaction.user.guild_permissions.administrator if hasattr(interaction.user, 'guild_permissions') else False
+        if interaction.user.id != BUGGY_ID and not is_admin:
             return await interaction.response.send_message("❌ You are not authorized to use this command.", ephemeral=True)
 
         config = await self.get_config(interaction.guild_id)
@@ -583,7 +601,7 @@ class Lead(commands.Cog):
         embed = await self.create_leaderboard_embed(interaction.guild, group_key, config["groups"][group_key])
         
         # If admin runs it, update the "pinned" message tracking
-        if interaction.user.guild_permissions.administrator or interaction.user.id == BUGGY_ID:
+        if is_admin or interaction.user.id == BUGGY_ID:
             # Acknowledge ephemerally to hide the "Used /leaderboard" text
             await interaction.response.send_message("✅ Leaderboard updated.", ephemeral=True)
             
@@ -602,6 +620,9 @@ class Lead(commands.Cog):
     @app_commands.describe(user="The user to check (leave empty for yourself)")
     async def points(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
         """Check points for yourself or another user."""
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This command must be used in a server.", ephemeral=True)
+
         target = user or interaction.user
         config = await self.get_config(interaction.guild_id)
         
