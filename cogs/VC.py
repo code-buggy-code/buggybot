@@ -16,7 +16,7 @@ Referenced during compilation to ensure no functions are omitted or removed.
     - __init__(self, bot: commands.Bot)
     - cog_load(self)
     - cog_unload(self)
-    - vc(self, interaction: discord.Interaction)
+    - vc(self, ctx: commands.Context)
     - on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState)
     - _create_private_vc(self, member: discord.Member, trigger_channel: discord.VoiceChannel)
     - _cleanup_temp_channel(self, channel: discord.VoiceChannel)
@@ -83,7 +83,6 @@ class InviteUserSelect(discord.ui.UserSelect):
         self.target_channel = channel
 
     async def callback(self, interaction: discord.Interaction):
-        # Verify the user requesting the invite is inside the temporary channel
         if interaction.user not in self.target_channel.members and interaction.user.id != self.target_channel.guild.owner_id:
             await interaction.response.send_message(
                 "⚠️ You must be inside this voice channel to invite other members!",
@@ -179,25 +178,25 @@ class VC(commands.Cog, name="VC"):
         """Persists current state when cog is unloaded."""
         save_vc_data(self.data_path, self.data)
 
-    @app_commands.command(name="vc", description="Set this voice channel as the private voice trigger.")
-    @app_commands.guild_only()
-    async def vc(self, interaction: discord.Interaction):
+    @commands.hybrid_command(name="vc", description="Set this voice channel as the private voice trigger.")
+    @commands.guild_only()
+    async def vc(self, ctx: commands.Context):
         """Sets the current voice channel chat as the trigger for generating private rooms."""
-        if not isinstance(interaction.channel, discord.VoiceChannel):
-            await interaction.response.send_message(
+        if not isinstance(ctx.channel, discord.VoiceChannel):
+            await ctx.reply(
                 "⚠️ This command must be executed inside the text chat of a voice channel!",
                 ephemeral=True,
             )
             return
 
-        guild_id_str = str(interaction.guild_id)
-        channel_id = interaction.channel.id
+        guild_id_str = str(ctx.guild.id)
+        channel_id = ctx.channel.id
 
         self.data.setdefault("triggers", {})[guild_id_str] = channel_id
         save_vc_data(self.data_path, self.data)
 
-        await interaction.response.send_message(
-            f"✅ **{interaction.channel.name}** has been marked as the trigger channel!\n"
+        await ctx.reply(
+            f"✅ **{ctx.channel.name}** has been marked as the trigger channel!\n"
             "Whenever someone joins this channel, a private voice room will be generated for them.",
             ephemeral=False,
         )
@@ -217,11 +216,9 @@ class VC(commands.Cog, name="VC"):
         guild_id_str = str(guild.id)
         trigger_id = self.data.get("triggers", {}).get(guild_id_str)
 
-        # Trigger channel joined: Create private voice channel and move member
         if after.channel and after.channel.id == trigger_id and (before.channel != after.channel):
             await self._create_private_vc(member, after.channel)
 
-        # Temp channel joined: ensure joining user has invite permissions
         if after.channel and after.channel.id in self.data.get("temp_channels", []):
             if member not in after.channel.overwrites:
                 try:
@@ -237,7 +234,6 @@ class VC(commands.Cog, name="VC"):
                 except (discord.Forbidden, discord.HTTPException):
                     pass
 
-        # Temp channel left: check if it is now empty and delete
         if before.channel and before.channel.id in self.data.get("temp_channels", []):
             if len(before.channel.members) == 0:
                 await self._cleanup_temp_channel(before.channel)
@@ -247,9 +243,6 @@ class VC(commands.Cog, name="VC"):
         guild = member.guild
         category = trigger_channel.category
 
-        # Overwrite setup:
-        # @everyone cannot view or connect.
-        # The user and the bot have full viewing, connecting, and invite permissions.
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(
                 view_channel=False,
@@ -284,13 +277,11 @@ class VC(commands.Cog, name="VC"):
         self.data.setdefault("temp_channels", []).append(new_channel.id)
         save_vc_data(self.data_path, self.data)
 
-        # Move the member into their newly created room
         try:
             await member.move_to(new_channel, reason="Moved into temporary private VC.")
         except (discord.Forbidden, discord.HTTPException):
             pass
 
-        # Generate an instant invite link
         invite_url = "Invite link unavailable"
         try:
             invite = await new_channel.create_invite(
@@ -301,7 +292,6 @@ class VC(commands.Cog, name="VC"):
         except (discord.Forbidden, discord.HTTPException):
             pass
 
-        # Send greeting, direct invite link, and user selector in the channel text chat
         embed = discord.Embed(
             title="🔒 Private Voice Channel Active",
             description=(
