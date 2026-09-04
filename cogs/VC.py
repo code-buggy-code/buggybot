@@ -14,7 +14,7 @@ Referenced during compilation to ensure no functions are omitted or removed.
     - copy_invite_button(self, interaction: discord.Interaction, button: discord.ui.Button)
 5.  VC(commands.Cog)
     - __init__(self, bot: commands.Bot)
-    - cog_load(self)
+    - on_ready(self)
     - cog_unload(self)
     - vc(self, ctx: commands.Context)
     - on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState)
@@ -143,10 +143,10 @@ class VC(commands.Cog, name="VC"):
         self.data_path = os.path.join("data", "vc_data.json")
         self.data: dict = load_vc_data(self.data_path)
 
-    async def cog_load(self):
+    @commands.Cog.listener()
+    async def on_ready(self):
         """Loads configuration and prunes stale or empty temporary channels from downtime."""
         self.data = load_vc_data(self.data_path)
-        await self.bot.wait_until_ready()
 
         to_remove = []
         for channel_id in list(self.data.get("temp_channels", [])):
