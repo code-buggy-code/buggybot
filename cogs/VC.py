@@ -8,9 +8,10 @@ Referenced during compilation to ensure no functions are omitted or removed.
 2.  VC.load_data(self) -> None
 3.  VC.save_data(self) -> None
 4.  VC.cog_load(self) -> None
-5.  VC.on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState)
-6.  VC.vc_command(self, interaction: discord.Interaction)
-7.  setup(bot: commands.Bot)
+5.  VC._startup_cleanup(self) -> None
+6.  VC.on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState)
+7.  VC.vc_command(self, interaction: discord.Interaction)
+8.  setup(bot: commands.Bot)
 ================================================================================
 """
 
@@ -60,7 +61,11 @@ class VC(commands.Cog):
             print(f"[VC Cog] Failed to save {DATA_FILE}: {e}")
 
     async def cog_load(self) -> None:
-        """Prunes any empty temporary channels that were left over during downtime."""
+        """Starts the background cleanup task without blocking the setup process."""
+        self.bot.loop.create_task(self._startup_cleanup())
+
+    async def _startup_cleanup(self) -> None:
+        """Background task to prune any empty temporary channels that were left over during downtime."""
         await self.bot.wait_until_ready()
         stale_channels: set[int] = set()
 
